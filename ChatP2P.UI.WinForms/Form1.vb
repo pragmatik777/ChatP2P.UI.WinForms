@@ -1,9 +1,10 @@
-﻿Imports System.Net
+﻿Imports System.IO
+Imports System.Net
+Imports System.Text
 Imports System.Threading
-Imports System.IO
-Imports ChatP2P.Core
 Imports ChatP2P.App
 Imports ChatP2P.App.Protocol
+Imports ChatP2P.Core
 Imports Proto = ChatP2P.App.Protocol.Tags
 
 Public Class Form1
@@ -41,7 +42,6 @@ Public Class Form1
     End Class
     Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)()
     Private ReadOnly _fileRelays As New Dictionary(Of String, INetworkStream)()
-
     ' =========================================
     ' =========== Chargement / Settings =========
     ' =========================================
@@ -56,10 +56,33 @@ Public Class Form1
             End If
         Catch
         End Try
+
         _displayName = If(String.IsNullOrWhiteSpace(txtName.Text), "Me", txtName.Text.Trim())
 
         AddHandler lstPeers.DoubleClick, AddressOf lstPeers_DoubleClick
+
+        ' ---- Init P2PManager : callback d’envoi des signaux ICE ----
+        ' payload = texte (ex: "ICE_OFFER:..."), on encode en UTF8 quand on passe par des streams binaires
+        P2PManager.Init(
+        Async Function(dest As String, payload As String) As Task
+            If _isHost Then
+                ' côté host : on passe par le hub (NetworkStream) → Byte()
+                If _hub IsNot Nothing Then
+                    Dim bytes = Encoding.UTF8.GetBytes(payload)
+                    Await _hub.SendToAsync(dest, bytes)
+                End If
+            Else
+                ' côté client : on envoie au host via le stream binaire
+                If _stream IsNot Nothing Then
+                    Dim bytes = Encoding.UTF8.GetBytes(payload)
+                    Await _stream.SendAsync(bytes, Threading.CancellationToken.None)
+                End If
+            End If
+        End Function,
+        _displayName
+    )
     End Sub
+
 
     Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
         SaveSettings()
