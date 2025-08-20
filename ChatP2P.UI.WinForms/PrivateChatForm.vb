@@ -105,4 +105,8 @@ Public Class PrivateChatForm
             MessageBox.Show("Envoi privé échoué: " & ex.Message, "Chat privé", MessageBoxButtons.OK, MessageBoxIcon.Warning)
         End Try
     End Sub
+
+    Private Sub PrivateChatForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+
+    End Sub
 End Class

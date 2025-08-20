@@ -148,9 +148,9 @@ Public Class Form1
         _path = New DirectPath(port)
 
         Dim localPeer As New PeerDescriptor With {
-            .Identity = New IdentityBundle With {.DisplayName = _displayName},
-            .Endpoints = New List(Of IPEndPoint) From {New IPEndPoint(IPAddress.Any, port)}
-        }
+        .Identity = New IdentityBundle With {.DisplayName = _displayName},
+        .Endpoints = New List(Of IPEndPoint) From {New IPEndPoint(IPAddress.Any, port)}
+    }
 
         Dim res = Await _path.ProbeAsync(localPeer, Nothing, CancellationToken.None)
         Log($"Hosting on port {port}: {res.Notes}")
@@ -165,18 +165,27 @@ Public Class Form1
         AddHandler _hub.LogLine, Sub(t) Log(t)
         AddHandler _hub.MessageArrived, Sub(senderName, text) Log($"{senderName}: {text}")
         AddHandler _hub.PrivateArrived,
-            Sub(senderName, dest, text)
-                If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
-                    AppendToPrivate(senderName, senderName, text)
-                End If
-            End Sub
+        Sub(senderName, dest, text)
+            If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
+                AppendToPrivate(senderName, senderName, text)
+            End If
+        End Sub
+
+        ' ✅ FileSignal a 2 paramètres (kind, payload)
         AddHandler _hub.FileSignal,
-            Sub(raw)
-                If raw.StartsWith(Proto.TAG_FILEMETA) Then HandleFileMeta(raw)
-                If raw.StartsWith(Proto.TAG_FILECHUNK) Then HandleFileChunk(raw)
-                If raw.StartsWith(Proto.TAG_FILEEND) Then HandleFileEnd(raw)
-            End Sub
-        AddHandler _hub.IceSignal, Sub(raw) Log("[ICE] " & raw, verbose:=True)
+        Sub(kind As String, payload As String)
+            Select Case kind
+                Case "FILEMETA" : HandleFileMeta(payload)
+                Case "FILECHUNK" : HandleFileChunk(payload)
+                Case "FILEEND" : HandleFileEnd(payload)
+            End Select
+        End Sub
+
+        ' ✅ IceSignal a 2 paramètres (kind, payload)
+        AddHandler _hub.IceSignal,
+        Sub(kind As String, payload As String)
+            Log("[ICE] " & kind & " " & payload, verbose:=True)
+        End Sub
 
         ' Accepte plusieurs clients en boucle (via DirectPath)
         Task.Run(Async Sub()
@@ -190,6 +199,7 @@ Public Class Form1
                      End While
                  End Sub)
     End Sub
+
 
     ' =========================================
     ' ================ CLIENT ==================
@@ -233,21 +243,26 @@ Public Class Form1
         Dim msg = txtMessage.Text.Trim()
         If msg = "" Then Return
 
-        Dim payload = $"{Proto.TAG_MSG}{_displayName}:{msg}"
-        Dim data = System.Text.Encoding.UTF8.GetBytes(payload)
+        Dim payload As String = $"{Proto.TAG_MSG}{_displayName}:{msg}"
+        Dim data As Byte() = System.Text.Encoding.UTF8.GetBytes(payload)
 
         If _isHost Then
-            If _hub Is Nothing Then Log("Hub non initialisé.") : Return
-            Await _hub.BroadcastFromHostAsync(data)
+            If _hub Is Nothing Then
+                Log("Hub non initialisé.") : Return
+            End If
+            ' ✅ Le hub prend une String
+            Await _hub.BroadcastFromHostAsync(payload)
         Else
-            If _stream Is Nothing Then Log("Not connected.") : Return
+            If _stream Is Nothing Then
+                Log("Not connected.") : Return
+            End If
+            ' ✅ Le stream prend des bytes
             Await _stream.SendAsync(data, CancellationToken.None)
         End If
 
         Log($"{_displayName}: {msg}")
         txtMessage.Clear()
     End Sub
-
     ' =========================================
     ' =========== ENVOI FICHIERS (RELAY) ======
     ' =========================================
@@ -267,13 +282,14 @@ Public Class Form1
             pbSend.Value = 0
             lblSendProgress.Text = "0%"
 
-            ' META
-            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}"
-            Dim metaBytes = System.Text.Encoding.UTF8.GetBytes(meta)
+            ' META (string)
+            Dim meta As String = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}"
 
             If _isHost Then
                 If _hub Is Nothing Then Log("Hub non initialisé.") : Return
-                Await _hub.SendToAsync(dest, metaBytes)
+
+                ' ✅ Le hub prend des String
+                Await _hub.SendToAsync(dest, meta)
 
                 Using fs = fi.OpenRead()
                     Dim buffer(32768 - 1) As Byte
@@ -283,8 +299,9 @@ Public Class Form1
                         read = fs.Read(buffer, 0, buffer.Length)
                         If read > 0 Then
                             Dim chunk = Convert.ToBase64String(buffer, 0, read)
-                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
-                            Await _hub.SendToAsync(dest, System.Text.Encoding.UTF8.GetBytes(chunkMsg))
+                            Dim chunkMsg As String = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
+                            ' ✅ string vers le hub
+                            Await _hub.SendToAsync(dest, chunkMsg)
                             totalSent += read
 
                             ' Progression
@@ -296,12 +313,15 @@ Public Class Form1
                     Loop While read > 0
                 End Using
 
-                Dim endMsg = $"{MessageProtocol.TAG_FILEEND}{transferId}"
-                Await _hub.SendToAsync(dest, System.Text.Encoding.UTF8.GetBytes(endMsg))
+                Dim endMsg As String = $"{Proto.TAG_FILEEND}{transferId}"
+                Await _hub.SendToAsync(dest, endMsg)
+
             Else
+                ' Côté client : on envoie au host en bytes
                 If _stream Is Nothing Then Log("Not connected.") : Return
 
-                Await _stream.SendAsync(metaBytes, CancellationToken.None)
+                ' META en bytes
+                Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(meta), CancellationToken.None)
 
                 Using fs = fi.OpenRead()
                     Dim buffer(32768 - 1) As Byte
@@ -311,7 +331,7 @@ Public Class Form1
                         read = fs.Read(buffer, 0, buffer.Length)
                         If read > 0 Then
                             Dim chunk = Convert.ToBase64String(buffer, 0, read)
-                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
+                            Dim chunkMsg As String = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
                             Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(chunkMsg), CancellationToken.None)
                             totalSent += read
 
@@ -323,13 +343,14 @@ Public Class Form1
                     Loop While read > 0
                 End Using
 
-                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}"
+                Dim endMsg As String = $"{Proto.TAG_FILEEND}{transferId}"
                 Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(endMsg), CancellationToken.None)
             End If
 
             Log($"Fichier {fi.Name} envoyé à {dest}")
         End Using
     End Sub
+
 
     ' =========================================
     ' ======= Handlers FICHIERS (communs) ======
@@ -555,16 +576,25 @@ Public Class Form1
     End Sub
 
     Private Async Sub SendPrivateMessage(dest As String, text As String)
-        Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{text}"
-        Dim data = System.Text.Encoding.UTF8.GetBytes(payload)
+        Dim payload As String = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{text}"
+        Dim data As Byte() = System.Text.Encoding.UTF8.GetBytes(payload)
 
         If _isHost Then
-            If _hub Is Nothing Then Log("[Privé] Hub non initialisé.") : Return
-            Await _hub.SendToAsync(dest, data)
+            If _hub Is Nothing Then
+                Log("[Privé] Hub non initialisé.")
+                Return
+            End If
+            ' ✅ Le hub attend une string
+            Await _hub.SendToAsync(dest, payload)
         Else
-            If _stream Is Nothing Then Log("[Privé] Non connecté au host.") : Return
+            If _stream Is Nothing Then
+                Log("[Privé] Non connecté au host.")
+                Return
+            End If
+            ' ✅ Le stream prend des bytes
             Await _stream.SendAsync(data, CancellationToken.None)
         End If
     End Sub
+
 
 End Class
