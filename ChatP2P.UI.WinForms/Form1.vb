@@ -172,21 +172,18 @@ Public Class Form1
         End Sub
 
         ' ✅ FileSignal a 2 paramètres (kind, payload)
-        AddHandler _hub.FileSignal,
-        Sub(kind As String, payload As String)
-            Select Case kind
-                Case "FILEMETA" : HandleFileMeta(payload)
-                Case "FILECHUNK" : HandleFileChunk(payload)
-                Case "FILEEND" : HandleFileEnd(payload)
-            End Select
-        End Sub
+        AddHandler _hub.FileSignal, Sub(raw As String)
+                                        If raw.StartsWith(Proto.TAG_FILEMETA) Then HandleFileMeta(raw)
+                                        If raw.StartsWith(Proto.TAG_FILECHUNK) Then HandleFileChunk(raw)
+                                        If raw.StartsWith(Proto.TAG_FILEEND) Then HandleFileEnd(raw)
+                                    End Sub
+
 
         ' ✅ IceSignal a 2 paramètres (kind, payload)
-        AddHandler _hub.IceSignal,
-        Sub(kind As String, payload As String)
-            Log("[ICE] " & kind & " " & payload, verbose:=True)
-        End Sub
 
+        AddHandler _hub.IceSignal, Sub(raw As String)
+                                       Log("[ICE] " & raw, verbose:=True)
+                                   End Sub
         ' Accepte plusieurs clients en boucle (via DirectPath)
         Task.Run(Async Sub()
                      While Not _cts.IsCancellationRequested
