@@ -1,0 +1,24 @@
+﻿<?xml version='1.0' encoding='utf-8'?>
+<SettingsFile xmlns="http://schemas.microsoft.com/VisualStudio/2004/01/settings" CurrentProfile="(Default)" GeneratedClassNamespace="My" GeneratedClassName="MySettings" UseMySettingsClassName="true">
+  <Profiles />
+  <Settings>
+    <Setting Name="DisplayName" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="LocalPort" Type="System.String" Scope="User">
+      <Value Profile="(Default)">7777</Value>
+    </Setting>
+    <Setting Name="RemoteIp" Type="System.String" Scope="User">
+      <Value Profile="(Default)">127.0.0.1</Value>
+    </Setting>
+    <Setting Name="RemotePort" Type="System.String" Scope="User">
+      <Value Profile="(Default)">7777</Value>
+    </Setting>
+    <Setting Name="FilePort" Type="System.String" Scope="User">
+      <Value Profile="(Default)">9010</Value>
+    </Setting>
+    <Setting Name="RecvFolder" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+  </Settings>
+</SettingsFile>
