@@ -7,10 +7,10 @@ Namespace ChatP2P.Core
 
     ''' <summary>
     ''' Session ICE + DataChannel basée sur SIPSorcery.Net.
-    ''' - Pas d'Await sur setLocal/RemoteDescription (renvoient SetDescriptionResultEnum).
+    ''' - setLocal/RemoteDescription renvoient SetDescriptionResultEnum (non-awaitable).
     ''' - createOffer/createAnswer renvoient un RTCSessionDescriptionInit (sync).
     ''' - DataChannel: event OnMessage(chan, proto, payload()).
-    ''' - Logs détaillés via événements.
+    ''' - Logs détaillés via événements vers l’UI.
     ''' </summary>
     Public Class IceP2PSession
         Implements IAsyncDisposable
@@ -50,7 +50,6 @@ Namespace ChatP2P.Core
             End If
 
             _pc = New RTCPeerConnection(cfg)
-
             RaiseEvent OnNegotiationLog($"ICE cfg: caller={_isCaller}, label='{_label}'")
 
             ' Candidats locaux
@@ -69,7 +68,7 @@ Namespace ChatP2P.Core
                     RaiseEvent OnNegotiationLog($"ICE state → {st}")
                 End Sub
 
-            ' États connexion
+            ' États connexion (global)
             AddHandler _pc.onconnectionstatechange,
                 Sub(state)
                     Select Case state
@@ -88,7 +87,7 @@ Namespace ChatP2P.Core
                     RaiseEvent OnNegotiationLog("ondatachannel (callee) → wired")
                 End Sub
 
-            ' Caller → crée le datachannel (ta version retourne Task(Of RTCDataChannel) parfois; on gère les deux)
+            ' Caller → crée le datachannel (selon version SIPSorcery : sync ou Task)
             If _isCaller Then
                 Dim created As Object = _pc.createDataChannel(_label)
                 If TypeOf created Is Threading.Tasks.Task Then
@@ -153,7 +152,7 @@ Namespace ChatP2P.Core
             )
 
             Dim remote As New RTCSessionDescriptionInit With {.type = t, .sdp = sdp}
-            Call _pc.setRemoteDescription(remote) ' enum, pas awaitable
+            Call _pc.setRemoteDescription(remote)
 
             If (Not _isCaller) AndAlso t = RTCSdpType.offer Then
                 RaiseEvent OnNegotiationLog("createAnswer()")
@@ -170,6 +169,14 @@ Namespace ChatP2P.Core
             RaiseEvent OnNegotiationLog($"addRemoteCandidate: {candidate}")
             _pc.addIceCandidate(New RTCIceCandidateInit With {.candidate = candidate})
         End Sub
+
+        Public ReadOnly Property IsOpen As Boolean
+            Get
+                If _dc Is Nothing Then Return False
+                Return _dc.readyState = RTCDataChannelState.open
+            End Get
+        End Property
+
         Public Sub SendText(text As String)
             If _dc Is Nothing OrElse _dc.readyState <> RTCDataChannelState.open Then
                 Throw New InvalidOperationException("DataChannel non prêt.")
@@ -177,7 +184,6 @@ Namespace ChatP2P.Core
             Dim bytes = Encoding.UTF8.GetBytes(text)
             _dc.send(bytes)
         End Sub
-
 
         Public Sub SendBinary(data As Byte())
             If _dc Is Nothing OrElse _dc.readyState <> RTCDataChannelState.open Then

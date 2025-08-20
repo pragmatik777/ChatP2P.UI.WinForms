@@ -126,9 +126,9 @@ Partial Class Form1
         GroupBox2.Controls.Add(Label3)
         GroupBox2.Controls.Add(txtRemoteIp)
         GroupBox2.Controls.Add(Label2)
-        GroupBox2.Location = New Point(385, 32)
+        GroupBox2.Location = New Point(397, 32)
         GroupBox2.Name = "GroupBox2"
-        GroupBox2.Size = New Size(408, 139)
+        GroupBox2.Size = New Size(396, 139)
         GroupBox2.TabIndex = 1
         GroupBox2.TabStop = False
         GroupBox2.Text = "Remote Connect"
@@ -297,7 +297,7 @@ Partial Class Form1
         ' 
         ' Form1
         ' 
-        AutoScaleDimensions = New SizeF(10.0F, 25.0F)
+        AutoScaleDimensions = New SizeF(10F, 25F)
         AutoScaleMode = AutoScaleMode.Font
         AutoSize = True
         BackColor = SystemColors.ActiveBorder
