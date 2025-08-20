@@ -1,191 +1,215 @@
 ﻿Option Strict On
-Imports System.Net
-Imports System.Net.Sockets
 Imports System.Text
 Imports System.Threading
+Imports System.Threading.Tasks
+Imports ChatP2P.Core
+Imports ChatP2P.App.Protocol
+Imports Proto = ChatP2P.App.Protocol.Tags
 
 Namespace ChatP2P.App
+
+    ''' <summary>
+    ''' Hub "manager" SANS socket : il gère des INetworkStream que l'hôte lui fournit
+    ''' (par ex. acceptés via DirectPath). Il route MSG/PRIV/FILExxx/ICExxx, diffuse la
+    ''' liste des pairs, et expose des événements de log.
+    ''' </summary>
     Public Class RelayHub
 
-        ' --- Events exposés vers l’UI ---
+        ' ---- Evénements vers l’UI ----
         Public Event PeerListUpdated(names As List(Of String))
         Public Event LogLine(line As String)
         Public Event MessageArrived(sender As String, text As String)
         Public Event PrivateArrived(sender As String, dest As String, text As String)
-        Public Event FileSignal(raw As String)
-        Public Event IceSignal(raw As String)
 
-        Public Property HostDisplayName As String
+        ' Signaux bruts (texte) que Form1 traite
+        Public Delegate Sub FileSignalEventHandler(raw As String)
+        Public Event FileSignal As FileSignalEventHandler
 
-        Private ReadOnly _clients As New Dictionary(Of String, NetworkStream)
-        Private ReadOnly _listener As TcpListener
-        Private _cts As CancellationTokenSource
+        Public Delegate Sub IceSignalEventHandler(raw As String)
+        Public Event IceSignal As IceSignalEventHandler
 
-        Public Sub New(port As Integer)
-            _listener = New TcpListener(IPAddress.Any, port)
+        Public Property HostDisplayName As String = "Host"
+
+        ' ---- Etat ----
+        Private ReadOnly _clients As New Dictionary(Of String, INetworkStream)()  ' nom -> stream
+        Private ReadOnly _rev As New Dictionary(Of INetworkStream, String)()      ' stream -> nom
+        Private ReadOnly _gate As New Object()
+
+        ' === API : l’hôte ajoute un client déjà accepté (DirectPath) ===
+        Public Sub AddClient(initialName As String, s As INetworkStream)
+            If s Is Nothing Then
+                RaiseEvent LogLine("[Hub] Stream NULL ignoré.")
+                Exit Sub
+            End If
+
+            Dim name = If(String.IsNullOrWhiteSpace(initialName), $"Client{DateTime.UtcNow.Ticks}", initialName)
+
+            SyncLock _gate
+                If _clients.ContainsKey(name) Then
+                    name &= "_" & DateTime.UtcNow.Ticks.ToString()
+                End If
+                _clients(name) = s
+                _rev(s) = name
+            End SyncLock
+
+            RaiseEvent LogLine($"[Hub] {name} connecté (INetworkStream).")
+            BroadcastPeers()
+
+            ' Boucle de réception (fire-and-forget)
+            Dim _ignoreListen As Task = ListenLoopAsync(s, name)
         End Sub
 
-        Public Sub Start()
-            _cts = New CancellationTokenSource()
-            _listener.Start()
-            Task.Run(Function() AcceptLoop(_cts.Token))
-        End Sub
-
-        Public Sub [Stop]()
-            Try
-                _cts?.Cancel()
-                _listener.Stop()
-            Catch
-            End Try
-        End Sub
-
-        Private Async Function AcceptLoop(ct As CancellationToken) As Task
-            While Not ct.IsCancellationRequested
-                Try
-                    Dim client = Await _listener.AcceptTcpClientAsync()
-                    Dim s = client.GetStream()
-                    Dim clientName = "peer" & Guid.NewGuid().ToString("N")
-
-                    SyncLock _clients
-                        _clients(clientName) = s
-                    End SyncLock
-
-                    RaiseEvent LogLine($"[RelayHub] Nouveau client connecté : {clientName}")
-
-                    ' Fire-and-forget
-                    _ = Task.Run(Function() ListenClientLoopAsync(s, clientName, ct))
-                Catch ex As Exception
-                    If Not ct.IsCancellationRequested Then
-                        RaiseEvent LogLine($"[RelayHub] Erreur AcceptLoop: {ex.Message}")
-                    End If
-                End Try
-            End While
+        ' === Envoi depuis le Host à tous ===
+        Public Async Function BroadcastFromHostAsync(payload As String) As Task
+            Dim data = Encoding.UTF8.GetBytes(payload)
+            Await BroadcastFromHostAsync(data)
         End Function
 
-        Private Async Function ListenClientLoopAsync(s As NetworkStream, clientName As String, ct As CancellationToken) As Task
-            Dim buffer(4096) As Byte
+        Public Async Function BroadcastFromHostAsync(data As Byte()) As Task
+            Dim targets As List(Of INetworkStream)
+            SyncLock _gate
+                targets = New List(Of INetworkStream)(_clients.Values)
+            End SyncLock
+
+            For Each t In targets
+                Try
+                    Await t.SendAsync(data, CancellationToken.None)
+                Catch ex As Exception
+                    RaiseEvent LogLine($"[Hub] Erreur broadcast: {ex.Message}")
+                End Try
+            Next
+        End Function
+
+        ' === Envoi à un destinataire précis ===
+        Public Async Function SendToAsync(targetName As String, payload As String) As Task
+            Dim data = Encoding.UTF8.GetBytes(payload)
+            Await SendToAsync(targetName, data)
+        End Function
+
+        Public Async Function SendToAsync(targetName As String, data As Byte()) As Task
+            Dim s As INetworkStream = Nothing
+            SyncLock _gate
+                If _clients.ContainsKey(targetName) Then s = _clients(targetName)
+            End SyncLock
+            If s Is Nothing Then
+                RaiseEvent LogLine($"[Hub] Destinataire introuvable: {targetName}")
+                Exit Function
+            End If
             Try
-                While Not ct.IsCancellationRequested
-                    Dim read = Await s.ReadAsync(buffer, 0, buffer.Length, ct)
-                    If read <= 0 Then Exit While
+                Await s.SendAsync(data, CancellationToken.None)
+            Catch ex As Exception
+                RaiseEvent LogLine($"[Hub] Erreur SendTo {targetName}: {ex.Message}")
+            End Try
+        End Function
 
-                    Dim msg = Encoding.UTF8.GetString(buffer, 0, read)
-                    RaiseEvent LogLine($"[RelayHub] {clientName} → {msg.Substring(0, Math.Min(80, msg.Length))}")
+        ' === Diffuser la liste des pairs à tous ===
+        Private Sub BroadcastPeers()
+            Dim names As List(Of String)
+            SyncLock _gate
+                names = New List(Of String) From {HostDisplayName}
+                names.AddRange(_clients.Keys)
+            End SyncLock
 
-                    If msg.StartsWith(Protocol.Tags.TAG_NAME) Then
-                        Dim newName = msg.Substring(Protocol.Tags.TAG_NAME.Length).Trim()
-                        If Not String.IsNullOrEmpty(newName) Then
-                            SyncLock _clients
-                                _clients.Remove(clientName)
-                                _clients(newName) = s
-                                clientName = newName
+            ' Notifie l’UI
+            RaiseEvent PeerListUpdated(names)
+
+            ' Notifie les pairs
+            Dim msg = Proto.TAG_PEERS & String.Join(";", names)
+            Dim _ignoreBroadcast As Task = BroadcastFromHostAsync(msg)
+        End Sub
+
+        ' === Boucle de réception par client ===
+        Private Async Function ListenLoopAsync(s As INetworkStream, currentName As String) As Task
+            Try
+                While True
+                    Dim data = Await s.ReceiveAsync(CancellationToken.None)
+                    If data Is Nothing OrElse data.Length = 0 Then
+                        Throw New IO.EndOfStreamException()
+                    End If
+
+                    Dim msg = Encoding.UTF8.GetString(data)
+                    RaiseEvent LogLine($"[Hub] {currentName} → {Left(msg, Math.Min(80, msg.Length))}")
+
+                    If msg.StartsWith(Proto.TAG_NAME) Then
+                        Dim newName = msg.Substring(Proto.TAG_NAME.Length).Trim()
+                        If newName <> "" Then
+                            SyncLock _gate
+                                If _rev.ContainsKey(s) Then
+                                    Dim old = _rev(s)
+                                    If _clients.ContainsKey(old) Then _clients.Remove(old)
+                                    Dim finalName = newName
+                                    If _clients.ContainsKey(finalName) Then finalName &= "_" & DateTime.UtcNow.Ticks.ToString()
+                                    _clients(finalName) = s
+                                    _rev(s) = finalName
+                                    currentName = finalName
+                                End If
                             End SyncLock
-                            RaiseEvent LogLine($"[RelayHub] Client renommé en {clientName}")
+                            RaiseEvent LogLine($"[Hub] Client renommé → {currentName}")
                             BroadcastPeers()
                         End If
 
-                    ElseIf msg.StartsWith(Protocol.Tags.TAG_MSG) Then
-                        RaiseEvent MessageArrived(clientName, msg.Substring(Protocol.Tags.TAG_MSG.Length))
+                    ElseIf msg.StartsWith(Proto.TAG_MSG) Then
+                        RaiseEvent MessageArrived(currentName, msg.Substring(Proto.TAG_MSG.Length))
+                        ' Re-diffuse aux autres
+                        Await BroadcastOthersAsync(s, data)
 
-                    ElseIf msg.StartsWith(Protocol.Tags.TAG_PRIV) Then
-                        Dim parts = msg.Substring(Protocol.Tags.TAG_PRIV.Length).Split(":"c, 3)
+                    ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
+                        ' PRIV:sender:dest:message
+                        Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
+                        Dim parts = rest.Split(":"c, 3)
                         If parts.Length = 3 Then
-                            RaiseEvent PrivateArrived(parts(0), parts(1), parts(2))
+                            Dim sender = parts(0)
+                            Dim dest = parts(1)
+                            Dim body = parts(2)
+                            RaiseEvent PrivateArrived(sender, dest, body)
+                            ' Forward au destinataire
+                            Await SendToAsync(dest, data)
                         End If
 
-                    ElseIf msg.StartsWith(Protocol.Tags.TAG_FILEMETA) _
-                        OrElse msg.StartsWith(Protocol.Tags.TAG_FILECHUNK) _
-                        OrElse msg.StartsWith(Protocol.Tags.TAG_FILEEND) Then
+                    ElseIf msg.StartsWith(Proto.TAG_FILEMETA) _
+                        OrElse msg.StartsWith(Proto.TAG_FILECHUNK) _
+                        OrElse msg.StartsWith(Proto.TAG_FILEEND) Then
+
                         RaiseEvent FileSignal(msg)
+                        ' MVP: relay simple aux autres
+                        Await BroadcastOthersAsync(s, data)
 
-                    ElseIf msg.StartsWith(Protocol.Tags.TAG_ICE_OFFER) _
-                        OrElse msg.StartsWith(Protocol.Tags.TAG_ICE_ANSWER) _
-                        OrElse msg.StartsWith(Protocol.Tags.TAG_ICE_CAND) Then
+                    ElseIf msg.StartsWith(Proto.TAG_ICE_OFFER) _
+                        OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER) _
+                        OrElse msg.StartsWith(Proto.TAG_ICE_CAND) Then
+
                         RaiseEvent IceSignal(msg)
-
+                        ' Selon choix, router vers cible; MVP: broadcast autres
+                        Await BroadcastOthersAsync(s, data)
                     End If
                 End While
+
             Catch ex As Exception
-                RaiseEvent LogLine($"[RelayHub] {clientName} déconnecté: {ex.Message}")
+                RaiseEvent LogLine($"[Hub] {currentName} déconnecté: {ex.Message}")
             Finally
-                SyncLock _clients
-                    If _clients.ContainsKey(clientName) Then _clients.Remove(clientName)
+                SyncLock _gate
+                    If _rev.ContainsKey(s) Then
+                        Dim old = _rev(s)
+                        _rev.Remove(s)
+                        If _clients.ContainsKey(old) Then _clients.Remove(old)
+                    End If
                 End SyncLock
                 BroadcastPeers()
             End Try
         End Function
 
-        Private Async Function BroadcastAsync(msg As String, sender As String) As Task
-            Dim data = Encoding.UTF8.GetBytes(msg)
-            Dim targets As New List(Of NetworkStream)
-
-            SyncLock _clients
-                For Each kvp In _clients
-                    If kvp.Key <> sender Then targets.Add(kvp.Value)
-                Next
+        Private Async Function BroadcastOthersAsync(senderStream As INetworkStream, data As Byte()) As Task
+            Dim targets As List(Of INetworkStream)
+            SyncLock _gate
+                targets = _clients.Values.Where(Function(v) Not Object.ReferenceEquals(v, senderStream)).ToList()
             End SyncLock
-
             For Each t In targets
                 Try
-                    Await t.WriteAsync(data, 0, data.Length)
+                    Await t.SendAsync(data, CancellationToken.None)
                 Catch
                 End Try
             Next
         End Function
-
-        Public Async Function BroadcastFromHostAsync(data As Byte()) As Task
-            Dim targets As New List(Of NetworkStream)
-            SyncLock _clients
-                For Each kvp In _clients
-                    targets.Add(kvp.Value)
-                Next
-            End SyncLock
-
-            For Each t In targets
-                Try
-                    Await t.WriteAsync(data, 0, data.Length)
-                Catch
-                End Try
-            Next
-        End Function
-
-        Public Async Function SendToAsync(target As String, data As Byte()) As Task
-            Dim s As NetworkStream = Nothing
-            SyncLock _clients
-                If _clients.ContainsKey(target) Then
-                    s = _clients(target)
-                End If
-            End SyncLock
-            If s Is Nothing Then Exit Function
-
-            Try
-                Await s.WriteAsync(data, 0, data.Length)
-            Catch
-            End Try
-        End Function
-
-        Private Sub BroadcastPeers()
-            Dim peers As String
-            SyncLock _clients
-                peers = String.Join(";", _clients.Keys)
-            End SyncLock
-            Dim msg = Protocol.Tags.TAG_PEERS & peers
-            RaiseEvent PeerListUpdated(_clients.Keys.ToList())
-            _ = BroadcastAsync(msg, "")
-        End Sub
-
-        Public Sub AddClient(name As String, s As IO.Stream)
-            Dim ns = TryCast(s, NetworkStream)
-            If ns Is Nothing Then
-                Dim ms As New IO.MemoryStream()
-                s.CopyTo(ms)
-                ns = New NetworkStream(New Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
-            End If
-            SyncLock _clients
-                _clients(name) = ns
-            End SyncLock
-            BroadcastPeers()
-        End Sub
 
     End Class
 End Namespace

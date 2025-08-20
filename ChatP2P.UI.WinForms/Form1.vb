@@ -3,6 +3,7 @@ Imports System.Threading
 Imports System.IO
 Imports ChatP2P.Core
 Imports ChatP2P.App
+Imports ChatP2P.App.Protocol
 Imports Proto = ChatP2P.App.Protocol.Tags
 
 Public Class Form1
@@ -15,8 +16,12 @@ Public Class Form1
     ' Côté client (chat principal vers host)
     Private _stream As INetworkStream
 
-    ' Hub (logique host consolidée)
+    ' Hub de relai (TCP)
     Private _hub As RelayHub
+
+    ' Côté host (plusieurs clients via DirectPath historique)
+    Private ReadOnly _clients As New Dictionary(Of String, INetworkStream)()
+    Private ReadOnly _revIndex As New Dictionary(Of INetworkStream, String)()
 
     ' Peers & nom local
     Private _displayName As String = "Me"
@@ -27,7 +32,7 @@ Public Class Form1
     ' -- Chat privé --
     Private ReadOnly _privateChats As New Dictionary(Of String, PrivateChatForm)()
 
-    ' Réception fichiers (état par transfert)
+    ' Réception fichiers
     Private Class FileRecvState
         Public File As FileStream
         Public FileName As String
@@ -35,6 +40,7 @@ Public Class Form1
         Public Received As Long
     End Class
     Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)()
+    Private ReadOnly _fileRelays As New Dictionary(Of String, INetworkStream)()
 
     ' =========================================
     ' =========== Chargement / Settings =========
@@ -94,8 +100,30 @@ Public Class Form1
         End If
     End Sub
 
+    Private Sub BroadcastPeers() ' HOST → tous (via connexions DirectPath historiques)
+        If Not _isHost Then Return
+
+        Dim allNames As New List(Of String)
+        Dim targets As List(Of INetworkStream)
+
+        SyncLock _clients
+            allNames.Add(_displayName) ' host
+            allNames.AddRange(_clients.Keys)
+            targets = New List(Of INetworkStream)(_clients.Values)
+        End SyncLock
+
+        Dim payload = Proto.TAG_PEERS & String.Join(";", allNames)
+        Dim data = System.Text.Encoding.UTF8.GetBytes(payload)
+
+        For Each cl In targets
+            cl.SendAsync(data, CancellationToken.None)
+        Next
+
+        UpdatePeers(allNames)
+    End Sub
+
     ' =========================================
-    ' =========== Entrées clavier ==============
+    ' ============ Entrées clavier =============
     ' =========================================
     Private Sub txtMessage_KeyDown(sender As Object, e As KeyEventArgs) Handles txtMessage.KeyDown
         If e.KeyCode = Keys.Enter Then
@@ -114,10 +142,9 @@ Public Class Form1
 
             If _isHost Then
                 Log($"[Info] Host name → {newName}")
-                ' Hub rebroadcaste la liste lors des changements de clients; ici on peut juste mettre à jour l'UI locale
-                ' (Optionnel) : rafraîchir côté clients via un message spécifique si tu veux.
+                BroadcastPeers()
             ElseIf _stream IsNot Nothing Then
-                Dim data = System.Text.Encoding.UTF8.GetBytes(MessageProtocol.TAG_NAME & newName)
+                Dim data = System.Text.Encoding.UTF8.GetBytes(Proto.TAG_NAME & newName)
                 _stream.SendAsync(data, CancellationToken.None)
                 Log($"[Info] Client name → {newName} (notif au host)")
             End If
@@ -135,8 +162,66 @@ Public Class Form1
     End Sub
 
     ' =========================================
-    ' ================ HOST ====================
+    ' ============ Double‑click peer ===========
     ' =========================================
+    Private Sub lstPeers_DoubleClick(sender As Object, e As EventArgs)
+        Dim sel = TryCast(lstPeers.SelectedItem, String)
+        If String.IsNullOrWhiteSpace(sel) Then Return
+        If String.Equals(sel, _displayName, StringComparison.OrdinalIgnoreCase) Then Return
+        OpenPrivateChat(sel)
+    End Sub
+
+    Private Sub OpenPrivateChat(peer As String)
+        Dim frm As PrivateChatForm = Nothing
+        If _privateChats.TryGetValue(peer, frm) Then
+            Try
+                If frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+                    frm.BringToFront()
+                    frm.Focus()
+                    Exit Sub
+                End If
+            Catch
+            End Try
+            _privateChats.Remove(peer)
+        End If
+
+        frm = New PrivateChatForm(_displayName, peer,
+            Sub(text)
+                SendPrivateMessage(peer, text)
+            End Sub)
+
+        _privateChats(peer) = frm
+        frm.Show(Me)
+    End Sub
+
+    Private Sub EnsurePrivateChat(peer As String)
+        If String.IsNullOrWhiteSpace(peer) Then Return
+        If Not _privateChats.ContainsKey(peer) Then
+            OpenPrivateChat(peer)
+        End If
+    End Sub
+
+    ' Append dans le chat privé (ouvre si nécessaire)
+    Private Sub AppendToPrivate(peer As String, senderName As String, message As String)
+        EnsurePrivateChat(peer)
+        Dim frm As PrivateChatForm = Nothing
+        If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+            frm.AppendMessage(senderName, message)
+        End If
+    End Sub
+
+    Private Async Sub SendPrivateMessage(dest As String, text As String)
+        Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{text}"
+        Dim data = System.Text.Encoding.UTF8.GetBytes(payload)
+
+        If _isHost Then
+            If _hub Is Nothing Then Log("[Privé] Hub non initialisé.") : Return
+            Await _hub.SendToAsync(dest, data)
+        Else
+            If _stream Is Nothing Then Log("[Privé] Non connecté au host.") : Return
+            Await _stream.SendAsync(data, CancellationToken.None)
+        End If
+    End Sub
     Private Async Sub btnStartHost_Click(sender As Object, e As EventArgs) Handles btnStartHost.Click
         Dim port As Integer
         If Not Integer.TryParse(txtLocalPort.Text, port) Then Log("Port invalide.") : Return
@@ -145,6 +230,7 @@ Public Class Form1
         _isHost = True
         SaveSettings()
 
+        ' Ouvre DirectPath (UN SEUL listener: ici)
         _path = New DirectPath(port)
 
         Dim localPeer As New PeerDescriptor With {
@@ -158,38 +244,34 @@ Public Class Form1
 
         _cts = New CancellationTokenSource()
 
-        ' Init du hub et branchements UI
-        _hub = New RelayHub(port) With {.HostDisplayName = _displayName}
-
-        AddHandler _hub.PeerListUpdated, Sub(names) UpdatePeers(names)
-        AddHandler _hub.LogLine, Sub(t) Log(t)
-        AddHandler _hub.MessageArrived, Sub(senderName, text) Log($"{senderName}: {text}")
+        ' Hub "manager" (pas de port, pas de Start)
+        _hub = New RelayHub() With {.HostDisplayName = _displayName}
+        AddHandler _hub.PeerListUpdated, Sub(names As List(Of String)) UpdatePeers(names)
+        AddHandler _hub.LogLine, Sub(t As String) Log(t)
+        AddHandler _hub.MessageArrived, Sub(senderName As String, text As String) Log($"{senderName}: {text}")
         AddHandler _hub.PrivateArrived,
-        Sub(senderName, dest, text)
+        Sub(senderName As String, dest As String, text As String)
             If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
                 AppendToPrivate(senderName, senderName, text)
             End If
         End Sub
+        AddHandler _hub.FileSignal, New RelayHub.FileSignalEventHandler(AddressOf OnHubFileSignal)
+        AddHandler _hub.IceSignal, New RelayHub.IceSignalEventHandler(AddressOf OnHubIceSignal)
 
-        ' ✅ FileSignal a 2 paramètres (kind, payload)
-        AddHandler _hub.FileSignal, Sub(raw As String)
-                                        If raw.StartsWith(Proto.TAG_FILEMETA) Then HandleFileMeta(raw)
-                                        If raw.StartsWith(Proto.TAG_FILECHUNK) Then HandleFileChunk(raw)
-                                        If raw.StartsWith(Proto.TAG_FILEEND) Then HandleFileEnd(raw)
-                                    End Sub
-
-
-        ' ✅ IceSignal a 2 paramètres (kind, payload)
-
-        AddHandler _hub.IceSignal, Sub(raw As String)
-                                       Log("[ICE] " & raw, verbose:=True)
-                                   End Sub
-        ' Accepte plusieurs clients en boucle (via DirectPath)
+        ' Accepte les clients via DirectPath et les donne au hub
         Task.Run(Async Sub()
                      While Not _cts.IsCancellationRequested
                          Try
                              Dim s = Await _path.ConnectAsync(Nothing, _cts.Token) ' accepte un client
-                             _hub.AddClient("Client", s)
+                             Dim name As String
+                             SyncLock _clients
+                                 name = $"Client{_clients.Count + 1}"
+                                 _clients(name) = s
+                                 _revIndex(s) = name
+                             End SyncLock
+                             Log($"{name} connected.")
+                             ' Ajoute au hub (qui va lire/écrire sur s)
+                             _hub.AddClient(name, s)
                          Catch ex As Exception
                              Log("Accept failed: " & ex.Message)
                          End Try
@@ -197,6 +279,22 @@ Public Class Form1
                  End Sub)
     End Sub
 
+    ' Handlers nommés pour le Hub (signatures strictes)
+    Private Sub OnHubFileSignal(raw As String)
+        If raw.StartsWith(Proto.TAG_FILEMETA) Then
+            HandleFileMeta(raw)
+        ElseIf raw.StartsWith(Proto.TAG_FILECHUNK) Then
+            HandleFileChunk(raw)
+        ElseIf raw.StartsWith(Proto.TAG_FILEEND) Then
+            HandleFileEnd(raw)
+        End If
+    End Sub
+
+    Private Sub OnHubIceSignal(raw As String)
+        Log("[ICE] " & raw, verbose:=True)
+        ' Si tu as une routine OnIceSignal(kind, payload) ailleurs, appelle-la ici :
+        ' OnIceSignal(kind, payload)
+    End Sub
 
     ' =========================================
     ' ================ CLIENT ==================
@@ -222,11 +320,7 @@ Public Class Form1
             _cts = New CancellationTokenSource()
             _stream = Await _path.ConnectAsync(remotePeer, _cts.Token)
             Log($"Connected to {ip}:{port}")
-
-            ' Notifie le host de mon nom
-            Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(MessageProtocol.TAG_NAME & _displayName), CancellationToken.None)
-
-            ' Attend messages du host (peers, chat, privés, fichiers)
+            Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(Proto.TAG_NAME & _displayName), CancellationToken.None)
             ListenIncomingClient(_stream, _cts.Token)
         Catch ex As Exception
             Log($"Connect failed: {ex.Message}")
@@ -240,26 +334,21 @@ Public Class Form1
         Dim msg = txtMessage.Text.Trim()
         If msg = "" Then Return
 
-        Dim payload As String = $"{Proto.TAG_MSG}{_displayName}:{msg}"
-        Dim data As Byte() = System.Text.Encoding.UTF8.GetBytes(payload)
+        Dim payload = $"{Proto.TAG_MSG}{_displayName}:{msg}"
+        Dim data = System.Text.Encoding.UTF8.GetBytes(payload)
 
         If _isHost Then
-            If _hub Is Nothing Then
-                Log("Hub non initialisé.") : Return
-            End If
-            ' ✅ Le hub prend une String
-            Await _hub.BroadcastFromHostAsync(payload)
+            If _hub Is Nothing Then Log("Hub non initialisé.") : Return
+            Await _hub.BroadcastFromHostAsync(data)
         Else
-            If _stream Is Nothing Then
-                Log("Not connected.") : Return
-            End If
-            ' ✅ Le stream prend des bytes
+            If _stream Is Nothing Then Log("Not connected.") : Return
             Await _stream.SendAsync(data, CancellationToken.None)
         End If
 
         Log($"{_displayName}: {msg}")
         txtMessage.Clear()
     End Sub
+
     ' =========================================
     ' =========== ENVOI FICHIERS (RELAY) ======
     ' =========================================
@@ -279,14 +368,13 @@ Public Class Form1
             pbSend.Value = 0
             lblSendProgress.Text = "0%"
 
-            ' META (string)
-            Dim meta As String = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}"
+            ' META
+            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}"
+            Dim metaBytes = System.Text.Encoding.UTF8.GetBytes(meta)
 
             If _isHost Then
                 If _hub Is Nothing Then Log("Hub non initialisé.") : Return
-
-                ' ✅ Le hub prend des String
-                Await _hub.SendToAsync(dest, meta)
+                Await _hub.SendToAsync(dest, metaBytes)
 
                 Using fs = fi.OpenRead()
                     Dim buffer(32768 - 1) As Byte
@@ -296,9 +384,8 @@ Public Class Form1
                         read = fs.Read(buffer, 0, buffer.Length)
                         If read > 0 Then
                             Dim chunk = Convert.ToBase64String(buffer, 0, read)
-                            Dim chunkMsg As String = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
-                            ' ✅ string vers le hub
-                            Await _hub.SendToAsync(dest, chunkMsg)
+                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
+                            Await _hub.SendToAsync(dest, System.Text.Encoding.UTF8.GetBytes(chunkMsg))
                             totalSent += read
 
                             ' Progression
@@ -310,15 +397,12 @@ Public Class Form1
                     Loop While read > 0
                 End Using
 
-                Dim endMsg As String = $"{Proto.TAG_FILEEND}{transferId}"
-                Await _hub.SendToAsync(dest, endMsg)
-
+                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}"
+                Await _hub.SendToAsync(dest, System.Text.Encoding.UTF8.GetBytes(endMsg))
             Else
-                ' Côté client : on envoie au host en bytes
                 If _stream Is Nothing Then Log("Not connected.") : Return
 
-                ' META en bytes
-                Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(meta), CancellationToken.None)
+                Await _stream.SendAsync(metaBytes, CancellationToken.None)
 
                 Using fs = fi.OpenRead()
                     Dim buffer(32768 - 1) As Byte
@@ -328,7 +412,7 @@ Public Class Form1
                         read = fs.Read(buffer, 0, buffer.Length)
                         If read > 0 Then
                             Dim chunk = Convert.ToBase64String(buffer, 0, read)
-                            Dim chunkMsg As String = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
+                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
                             Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(chunkMsg), CancellationToken.None)
                             totalSent += read
 
@@ -340,7 +424,7 @@ Public Class Form1
                     Loop While read > 0
                 End Using
 
-                Dim endMsg As String = $"{Proto.TAG_FILEEND}{transferId}"
+                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}"
                 Await _stream.SendAsync(System.Text.Encoding.UTF8.GetBytes(endMsg), CancellationToken.None)
             End If
 
@@ -348,27 +432,23 @@ Public Class Form1
         End Using
     End Sub
 
-
     ' =========================================
     ' ======= Handlers FICHIERS (communs) ======
     ' =========================================
     Private Sub HandleFileMeta(msg As String)
-        ' FILEMETA:tid:from:dest:filename:size
         Dim parts = msg.Split(":"c, 6)
         If parts.Length < 6 Then Return
+
         Dim tid = parts(1)
         Dim fromName = parts(2)
-        Dim dest = parts(3)
-        Dim fname = parts(4)
-        Dim fsize = CLng(parts(5))
+        Dim dest = parts(3)         ' <- VB: parenthèses
+        Dim fname = parts(4)        ' <- VB: parenthèses
+        Dim fsize = CLng(parts(5))  ' <- VB: parenthèses
 
-        ' Je suis destinataire ?
-        Dim iAmDest As Boolean
-        If _isHost Then
-            iAmDest = String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase)
-        Else
-            iAmDest = True ' côté client, le host ne forwarde que si je suis la cible
-        End If
+        Dim iAmDest As Boolean =
+        If(_isHost,
+           String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase),
+           True)
 
         If Not iAmDest Then Return
 
@@ -385,11 +465,11 @@ Public Class Form1
 
         Dim fs As New FileStream(savePath, FileMode.Create, FileAccess.Write)
         Dim st As New FileRecvState With {
-            .File = fs,
-            .FileName = savePath,
-            .Expected = fsize,
-            .Received = 0
-        }
+        .File = fs,
+        .FileName = savePath,
+        .Expected = fsize,
+        .Received = 0
+    }
         SyncLock _fileRecv
             _fileRecv(tid) = st
         End SyncLock
@@ -401,7 +481,6 @@ Public Class Form1
     End Sub
 
     Private Sub HandleFileChunk(msg As String)
-        ' FILECHUNK:tid:base64
         Dim parts = msg.Split(":"c, 3)
         If parts.Length < 3 Then Return
         Dim tid = parts(1)
@@ -425,7 +504,6 @@ Public Class Form1
     End Sub
 
     Private Sub HandleFileEnd(msg As String)
-        ' FILEEND:tid
         Dim parts = msg.Split(":"c, 2)
         If parts.Length < 2 Then Return
         Dim tid = parts(1)
@@ -479,6 +557,144 @@ Public Class Form1
     End Sub
 
     ' =========================================
+    ' ========== Boucle réception HOST =========
+    ' =========================================
+    Private Async Sub ListenIncomingHost(s As INetworkStream, clientName As String, ct As CancellationToken)
+        Try
+            While Not ct.IsCancellationRequested
+                Dim data = Await s.ReceiveAsync(ct)
+                Dim msg = System.Text.Encoding.UTF8.GetString(data)
+
+                If msg.StartsWith(Proto.TAG_NAME) Then
+                    Dim newName = msg.Substring(Proto.TAG_NAME.Length).Trim()
+                    If newName <> "" Then
+                        SyncLock _clients
+                            If _clients.ContainsKey(clientName) AndAlso _clients(clientName) Is s Then
+                                _clients.Remove(clientName)
+                                Dim finalName = newName
+                                If _clients.ContainsKey(finalName) Then
+                                    finalName = finalName & "_" & DateTime.UtcNow.Ticks.ToString()
+                                End If
+                                _clients(finalName) = s
+                                _revIndex(s) = finalName
+
+                                ' Mise à jour fenêtre privée si ouverte sous l’ancien nom
+                                Dim frmOld As PrivateChatForm = Nothing
+                                If _privateChats.TryGetValue(clientName, frmOld) Then
+                                    _privateChats.Remove(clientName)
+                                    _privateChats(finalName) = frmOld
+                                    Try : frmOld.UpdatePeerName(finalName) : Catch : End Try
+                                End If
+
+                                clientName = finalName
+                            End If
+                        End SyncLock
+                        Log($"Client renommé → {clientName}")
+                        BroadcastPeers()
+                    End If
+                    Continue While
+                End If
+
+                If msg.StartsWith(Proto.TAG_PEERS) Then Continue While
+
+                If msg.StartsWith(Proto.TAG_MSG) Then
+                    Dim targets As New List(Of INetworkStream)
+                    SyncLock _clients
+                        For Each kvp In _clients
+                            If kvp.Value IsNot s Then targets.Add(kvp.Value)
+                        Next
+                    End SyncLock
+                    For Each t In targets
+                        Await t.SendAsync(data, CancellationToken.None)
+                    Next
+
+                    Dim parts = msg.Substring(Proto.TAG_MSG.Length).Split(":"c, 2)
+                    If parts.Length = 2 Then Log($"{parts(0)}: {parts(1)}")
+
+                ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
+                    Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
+                    Dim parts = rest.Split(":"c, 3)
+                    If parts.Length = 3 Then
+                        Dim senderName = parts(0)
+                        Dim dest = parts(1)
+                        Dim body = parts(2)
+
+                        If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
+                            AppendToPrivate(senderName, senderName, body)
+                        Else
+                            Dim target As INetworkStream = Nothing
+                            SyncLock _clients
+                                If _clients.ContainsKey(dest) Then target = _clients(dest)
+                            End SyncLock
+                            If target IsNot Nothing Then
+                                Await target.SendAsync(System.Text.Encoding.UTF8.GetBytes(Proto.TAG_PRIV & rest), CancellationToken.None)
+                            End If
+                        End If
+                    End If
+
+                ElseIf msg.StartsWith(Proto.TAG_FILEMETA) Then
+                    Dim parts = msg.Split(":"c, 6)
+                    If parts.Length >= 6 Then
+                        Dim tid = parts(1)
+                        Dim dest = parts(3)
+                        If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
+                            HandleFileMeta(msg)
+                        Else
+                            Dim target As INetworkStream = Nothing
+                            SyncLock _clients
+                                If _clients.ContainsKey(dest) Then target = _clients(dest)
+                            End SyncLock
+                            If target IsNot Nothing Then
+                                SyncLock _fileRelays
+                                    _fileRelays(tid) = target
+                                End SyncLock
+                                Await target.SendAsync(data, CancellationToken.None)
+                            End If
+                        End If
+                    End If
+
+                ElseIf msg.StartsWith(Proto.TAG_FILECHUNK) Then
+                    Dim parts = msg.Split(":"c, 3)
+                    If parts.Length < 3 Then Continue While
+                    Dim tid = parts(1)
+                    Dim target As INetworkStream = Nothing
+                    SyncLock _fileRelays
+                        If _fileRelays.ContainsKey(tid) Then target = _fileRelays(tid)
+                    End SyncLock
+                    If target Is Nothing Then
+                        HandleFileChunk(msg)
+                    Else
+                        Await target.SendAsync(data, CancellationToken.None)
+                    End If
+
+                ElseIf msg.StartsWith(Proto.TAG_FILEEND) Then
+                    Dim parts = msg.Split(":"c, 2)
+                    If parts.Length < 2 Then Continue While
+                    Dim tid = parts(1)
+                    Dim target As INetworkStream = Nothing
+                    SyncLock _fileRelays
+                        If _fileRelays.ContainsKey(tid) Then target = _fileRelays(tid)
+                    End SyncLock
+                    If target Is Nothing Then
+                        HandleFileEnd(msg)
+                    Else
+                        Await target.SendAsync(data, CancellationToken.None)
+                        SyncLock _fileRelays
+                            If _fileRelays.ContainsKey(tid) Then _fileRelays.Remove(tid)
+                        End SyncLock
+                    End If
+                End If
+            End While
+        Catch ex As Exception
+            Log($"{clientName} déconnecté: {ex.Message}")
+            SyncLock _clients
+                If _clients.ContainsKey(clientName) Then _clients.Remove(clientName)
+            End SyncLock
+            BroadcastPeers()
+        End Try
+    End Sub
+
+    ' =========================================
     ' ========= Boucle réception CLIENT ========
     ' =========================================
     Private Async Sub ListenIncomingClient(s As INetworkStream, ct As CancellationToken)
@@ -492,16 +708,17 @@ Public Class Form1
                     UpdatePeers(peers)
 
                 ElseIf msg.StartsWith(Proto.TAG_MSG) Then
-                    Dim parts = msg.Split(":"c, 3)
-                    If parts.Length >= 3 Then Log($"{parts(1)}: {parts(2)}")
+                    Dim payload = msg.Substring(Proto.TAG_MSG.Length)
+                    Dim parts = payload.Split(":"c, 2)
+                    If parts.Length = 2 Then Log($"{parts(0)}: {parts(1)}")
 
                 ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
-                    ' PRIV:sender:dest:message
-                    Dim parts = msg.Split(":"c, 4)
-                    If parts.Length >= 4 Then
-                        Dim senderName = parts(1)
-                        Dim dest = parts(2)
-                        Dim body = parts(3)
+                    Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
+                    Dim parts = rest.Split(":"c, 3)
+                    If parts.Length = 3 Then
+                        Dim senderName = parts(0)
+                        Dim dest = parts(1)
+                        Dim body = parts(2)
                         If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
                             AppendToPrivate(senderName, senderName, body)
                         End If
@@ -516,82 +733,11 @@ Public Class Form1
                 ElseIf msg.StartsWith(Proto.TAG_FILEEND) Then
                     HandleFileEnd(msg)
                 End If
+
             End While
         Catch ex As Exception
             Log($"Déconnecté: {ex.Message}")
         End Try
     End Sub
-
-    ' =========================================
-    ' ======== Chat privé (fenêtres) ===========
-    ' =========================================
-    Private Sub lstPeers_DoubleClick(sender As Object, e As EventArgs)
-        Dim sel = TryCast(lstPeers.SelectedItem, String)
-        If String.IsNullOrWhiteSpace(sel) Then Return
-        If String.Equals(sel, _displayName, StringComparison.OrdinalIgnoreCase) Then Return
-        OpenPrivateChat(sel)
-    End Sub
-
-    Private Sub OpenPrivateChat(peer As String)
-        Dim frm As PrivateChatForm = Nothing
-        If _privateChats.TryGetValue(peer, frm) Then
-            Try
-                If frm IsNot Nothing AndAlso Not frm.IsDisposed Then
-                    frm.BringToFront()
-                    frm.Focus()
-                    Exit Sub
-                End If
-            Catch
-            End Try
-            _privateChats.Remove(peer)
-        End If
-
-        ' crée la fenêtre avec callback d’envoi
-        frm = New PrivateChatForm(_displayName, peer,
-            Sub(text)
-                SendPrivateMessage(peer, text)
-            End Sub)
-
-        _privateChats(peer) = frm
-        frm.Show(Me)
-    End Sub
-
-    Private Sub EnsurePrivateChat(peer As String)
-        If String.IsNullOrWhiteSpace(peer) Then Return
-        Dim frm As PrivateChatForm = Nothing
-        If Not _privateChats.TryGetValue(peer, frm) OrElse frm Is Nothing OrElse frm.IsDisposed Then
-            OpenPrivateChat(peer)
-        End If
-    End Sub
-
-    Private Sub AppendToPrivate(peer As String, senderName As String, message As String)
-        EnsurePrivateChat(peer)
-        Dim frm As PrivateChatForm = Nothing
-        If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
-            frm.AppendMessage(senderName, message)
-        End If
-    End Sub
-
-    Private Async Sub SendPrivateMessage(dest As String, text As String)
-        Dim payload As String = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{text}"
-        Dim data As Byte() = System.Text.Encoding.UTF8.GetBytes(payload)
-
-        If _isHost Then
-            If _hub Is Nothing Then
-                Log("[Privé] Hub non initialisé.")
-                Return
-            End If
-            ' ✅ Le hub attend une string
-            Await _hub.SendToAsync(dest, payload)
-        Else
-            If _stream Is Nothing Then
-                Log("[Privé] Non connecté au host.")
-                Return
-            End If
-            ' ✅ Le stream prend des bytes
-            Await _stream.SendAsync(data, CancellationToken.None)
-        End If
-    End Sub
-
 
 End Class
