@@ -4,14 +4,16 @@ Imports System.Net
 Imports System.Net.Sockets
 Imports System.Text
 Imports System.Threading
+Imports ChatP2P.Core
 Imports Proto = ChatP2P.App.Protocol.Tags
 
 Namespace ChatP2P.App
 
     ''' <summary>
-    ''' Hub TCP (côté host) pour relayer messages publics/privés, fichiers et signaux ICE.
-    ''' API "compat" pour Form1 : HostDisplayName, SendToAsync, BroadcastFromHostAsync,
-    ''' événements PeerListUpdated, LogLine, MessageArrived, PrivateArrived, FileSignal, IceSignal, etc.
+    ''' Hub de relais.
+    ''' - Peut écouter lui-même en TCP (NetworkStream) via un TcpListener interne.
+    ''' - Peut aussi recevoir des connexions déjà établies via INetworkStream (DirectPath / ICE).
+    ''' - Conserve l’API attendue par Form1 (events + SendToAsync/BroadcastFromHostAsync/AddClient).
     ''' </summary>
     Public Class RelayHub
 
@@ -28,57 +30,87 @@ Namespace ChatP2P.App
         Public Event IceSignal(kind As String, payload As String)
 
         ' ==== Impl interne ====
-        Private ReadOnly _clients As New Dictionary(Of String, NetworkStream)()
+        ' Deux “pools” : TCP natif et INetworkStream
+        Private ReadOnly _clientsTcp As New Dictionary(Of String, NetworkStream)()
+        Private ReadOnly _clientsP2p As New Dictionary(Of String, INetworkStream)()
+
         Private ReadOnly _listener As TcpListener
+        Private ReadOnly _hasListener As Boolean
         Private _cts As CancellationTokenSource
 
         Public Sub New(port As Integer)
             _listener = New TcpListener(IPAddress.Any, port)
+            _hasListener = True
+        End Sub
+
+        ''' <summary>
+        ''' Constructeur “sans listener” si tu veux seulement AddClient(INetworkStream).
+        ''' </summary>
+        Public Sub New()
+            _hasListener = False
         End Sub
 
         Public Sub Start()
             _cts = New CancellationTokenSource()
-            _listener.Start()
-            RaiseEvent LogLine($"[RelayHub] Écoute sur port {CType(_listener.LocalEndpoint, IPEndPoint).Port}")
-            Task.Run(Function() AcceptLoop(_cts.Token))
+            If _hasListener Then
+                _listener.Start()
+                RaiseEvent LogLine($"[RelayHub] Écoute TCP sur port {CType(_listener.LocalEndpoint, IPEndPoint).Port}")
+                Task.Run(Function() AcceptLoop(_cts.Token))
+            Else
+                RaiseEvent LogLine("[RelayHub] Démarré (mode sans listener TCP)")
+            End If
         End Sub
 
         Public Sub [Stop]()
             Try
                 _cts?.Cancel()
-                _listener.Stop()
+                If _hasListener Then _listener.Stop()
             Catch
             End Try
         End Sub
 
         ''' <summary>
-        ''' Ajoute manuellement un client existant (si tu as déjà un TcpClient ailleurs).
-        ''' Optionnel : Form1 peut ne jamais l’appeler si on laisse le hub accepter lui-même.
+        ''' Ajoute un client en TCP natif (si tu as déjà un NetworkStream).
         ''' </summary>
         Public Sub AddClient(name As String, stream As NetworkStream)
             If String.IsNullOrWhiteSpace(name) OrElse stream Is Nothing Then Return
-            SyncLock _clients
-                _clients(name) = stream
+            SyncLock _clientsTcp
+                _clientsTcp(name) = stream
             End SyncLock
-            RaiseEvent LogLine($"[RelayHub] Client ajouté manuellement: {name}")
+            RaiseEvent LogLine($"[RelayHub] Client TCP ajouté: {name}")
             BroadcastPeers()
+            ' boucle de réception
+            Dim token = If(_cts IsNot Nothing, _cts.Token, CancellationToken.None)
+            Task.Run(Function() ListenClientLoopTcpAsync(stream, name, token))
+        End Sub
+
+        ''' <summary>
+        ''' Ajoute un client via un INetworkStream (DirectPath/ICE).
+        ''' </summary>
+        Public Sub AddClient(name As String, stream As INetworkStream)
+            If String.IsNullOrWhiteSpace(name) OrElse stream Is Nothing Then Return
+            SyncLock _clientsP2p
+                _clientsP2p(name) = stream
+            End SyncLock
+            RaiseEvent LogLine($"[RelayHub] Client P2P ajouté: {name}")
+            BroadcastPeers()
+            Dim token = If(_cts IsNot Nothing, _cts.Token, CancellationToken.None)
+            Task.Run(Function() ListenClientLoopP2pAsync(stream, name, token))
         End Sub
 
         Private Async Function AcceptLoop(ct As CancellationToken) As Task
             While Not ct.IsCancellationRequested
                 Try
-                    Dim client = Await _listener.AcceptTcpClientAsync()
-                    Dim s = client.GetStream()
+                    Dim tcp = Await _listener.AcceptTcpClientAsync()
+                    Dim s = tcp.GetStream()
                     Dim clientName = "peer" & Guid.NewGuid().ToString("N")
 
-                    SyncLock _clients
-                        _clients(clientName) = s
+                    SyncLock _clientsTcp
+                        _clientsTcp(clientName) = s
                     End SyncLock
 
-                    RaiseEvent LogLine($"[RelayHub] Nouveau client connecté : {clientName}")
-
-                    ' Fire & forget robuste
-                    Task.Run(Function() ListenClientLoopAsync(s, clientName, ct))
+                    RaiseEvent LogLine($"[RelayHub] Nouveau client TCP : {clientName}")
+                    Task.Run(Function() ListenClientLoopTcpAsync(s, clientName, ct))
                 Catch ex As Exception
                     If Not ct.IsCancellationRequested Then
                         RaiseEvent LogLine($"[RelayHub] Erreur AcceptLoop: {ex.Message}")
@@ -87,7 +119,10 @@ Namespace ChatP2P.App
             End While
         End Function
 
-        Private Async Function ListenClientLoopAsync(s As NetworkStream, clientName As String, ct As CancellationToken) As Task
+        ' =========================
+        ' == Boucle TCP native  ===
+        ' =========================
+        Private Async Function ListenClientLoopTcpAsync(s As NetworkStream, clientName As String, ct As CancellationToken) As Task
             Dim buffer(8192) As Byte
             Try
                 While Not ct.IsCancellationRequested
@@ -95,163 +130,226 @@ Namespace ChatP2P.App
                     If read <= 0 Then Exit While
 
                     Dim msg = Encoding.UTF8.GetString(buffer, 0, read)
-                    RaiseEvent LogLine($"[RelayHub] {clientName} → {Preview(msg)}")
-
-                    ' Gestion rename
-                    If msg.StartsWith(Proto.TAG_NAME) Then
-                        Dim newName = msg.Substring(Proto.TAG_NAME.Length).Trim()
-                        If Not String.IsNullOrEmpty(newName) Then
-                            SyncLock _clients
-                                _clients.Remove(clientName)
-                                ' collision ?
-                                Dim finalName = newName
-                                If _clients.ContainsKey(finalName) Then
-                                    finalName = $"{finalName}_{DateTime.UtcNow.Ticks}"
-                                End If
-                                _clients(finalName) = s
-                                clientName = finalName
-                            End SyncLock
-                            RaiseEvent LogLine($"[RelayHub] Client renommé en {clientName}")
-                            BroadcastPeers()
-                        End If
-                        Continue While
-                    End If
-
-                    ' Ignorer PEERS clients (l'annonce officielle vient du hub)
-                    If msg.StartsWith(Proto.TAG_PEERS) Then Continue While
-
-                    ' Messages publics
-                    If msg.StartsWith(Proto.TAG_MSG) Then
-                        ' MSG:sender:text
-                        Dim parts = msg.Split(":"c, 3)
-                        If parts.Length >= 3 Then
-                            Dim sender = parts(1)
-                            Dim text = parts(2)
-                            RaiseEvent MessageArrived(sender, text)
-                        End If
-                        ' re-broadcast aux autres
-                        Await BroadcastAsync(msg, clientName)
-                        Continue While
-                    End If
-
-                    ' Messages privés
-                    If msg.StartsWith(Proto.TAG_PRIV) Then
-                        ' PRIV:sender:dest:text
-                        Dim parts = msg.Split(":"c, 4)
-                        If parts.Length >= 4 Then
-                            Dim sender = parts(1)
-                            Dim dest = parts(2)
-                            Dim text = parts(3)
-                            RaiseEvent PrivateArrived(sender, dest, text)
-
-                            ' Envoi ciblé si possible, sinon broadcast fallback
-                            If Not Await TrySendToAsync(dest, msg) Then
-                                Await BroadcastAsync(msg, clientName)
-                            End If
-                        End If
-                        Continue While
-                    End If
-
-                    ' Fichiers
-                    If msg.StartsWith(Proto.TAG_FILEMETA) Then
-                        RaiseEvent FileSignal("FILEMETA", msg)
-                        Await RouteFileLikeAsync(msg, clientName, isMeta:=True)
-                        Continue While
-                    End If
-                    If msg.StartsWith(Proto.TAG_FILECHUNK) Then
-                        RaiseEvent FileSignal("FILECHUNK", msg)
-                        Await RouteFileLikeAsync(msg, clientName, isMeta:=False)
-                        Continue While
-                    End If
-                    If msg.StartsWith(Proto.TAG_FILEEND) Then
-                        RaiseEvent FileSignal("FILEEND", msg)
-                        Await RouteFileLikeAsync(msg, clientName, isMeta:=False, endSig:=True)
-                        Continue While
-                    End If
-
-                    ' ICE
-                    If msg.StartsWith(Proto.TAG_ICE_OFFER) Then
-                        RaiseEvent IceSignal("ICE_OFFER", msg)
-                        Await BroadcastAsync(msg, clientName)
-                        Continue While
-                    End If
-                    If msg.StartsWith(Proto.TAG_ICE_ANSWER) Then
-                        RaiseEvent IceSignal("ICE_ANSWER", msg)
-                        Await BroadcastAsync(msg, clientName)
-                        Continue While
-                    End If
-                    If msg.StartsWith(Proto.TAG_ICE_CAND) Then
-                        RaiseEvent IceSignal("ICE_CAND", msg)
-                        Await BroadcastAsync(msg, clientName)
-                        Continue While
-                    End If
-
-                    ' par défaut, rebroadcast
-                    Await BroadcastAsync(msg, clientName)
+                    Await HandleInboundAsync(msg, clientName)
                 End While
             Catch ex As Exception
-                RaiseEvent LogLine($"[RelayHub] {clientName} déconnecté: {ex.Message}")
+                RaiseEvent LogLine($"[RelayHub] {clientName} (TCP) déconnecté: {ex.Message}")
             Finally
-                SyncLock _clients
-                    If _clients.ContainsKey(clientName) Then _clients.Remove(clientName)
+                SyncLock _clientsTcp
+                    If _clientsTcp.ContainsKey(clientName) Then _clientsTcp.Remove(clientName)
                 End SyncLock
                 BroadcastPeers()
             End Try
         End Function
 
-        ' Envoi ciblé (utilisé par PRIV et fichiers) — retourne False si destinataire introuvable
-        Private Async Function TrySendToAsync(dest As String, payload As String) As Task(Of Boolean)
-            Dim target As NetworkStream = Nothing
-            SyncLock _clients
-                If _clients.ContainsKey(dest) Then target = _clients(dest)
-            End SyncLock
-            If target Is Nothing Then Return False
-            Dim data = Encoding.UTF8.GetBytes(payload)
+        ' =========================
+        ' == Boucle INetworkStream
+        ' =========================
+        Private Async Function ListenClientLoopP2pAsync(s As INetworkStream, clientName As String, ct As CancellationToken) As Task
             Try
-                Await target.WriteAsync(data, 0, data.Length)
-                Return True
-            Catch
-                Return False
+                While Not ct.IsCancellationRequested
+                    Dim data = Await s.ReceiveAsync(ct)
+                    If data Is Nothing OrElse data.Length = 0 Then Exit While
+
+                    Dim msg = Encoding.UTF8.GetString(data)
+                    Await HandleInboundAsync(msg, clientName)
+                End While
+            Catch ex As Exception
+                RaiseEvent LogLine($"[RelayHub] {clientName} (P2P) déconnecté: {ex.Message}")
+            Finally
+                SyncLock _clientsP2p
+                    If _clientsP2p.ContainsKey(clientName) Then _clientsP2p.Remove(clientName)
+                End SyncLock
+                BroadcastPeers()
             End Try
         End Function
 
-        ' Routing des fichiers: FILEMETA contient le dest, CHUNK/END utilisent une table logique (ici on route en broadcast si on ne peut pas déduire)
+        ' =========================
+        ' == Traitement générique ==
+        ' =========================
+        Private Async Function HandleInboundAsync(msg As String, clientName As String) As Task
+            RaiseEvent LogLine($"[RelayHub] {clientName} → {Preview(msg)}")
+
+            ' NAME: rename
+            If msg.StartsWith(Proto.TAG_NAME) Then
+                Dim newName = msg.Substring(Proto.TAG_NAME.Length).Trim()
+                If newName <> "" Then
+                    ' collision-safe
+                    Dim finalName = newName
+                    SyncLock _clientsTcp
+                        SyncLock _clientsP2p
+                            If _clientsTcp.ContainsKey(finalName) OrElse _clientsP2p.ContainsKey(finalName) Then
+                                finalName = $"{finalName}_{DateTime.UtcNow.Ticks}"
+                            End If
+                            ' déplace selon le pool
+                            If _clientsTcp.ContainsKey(clientName) Then
+                                Dim s = _clientsTcp(clientName)
+                                _clientsTcp.Remove(clientName)
+                                _clientsTcp(finalName) = s
+                            End If
+                            If _clientsP2p.ContainsKey(clientName) Then
+                                Dim p = _clientsP2p(clientName)
+                                _clientsP2p.Remove(clientName)
+                                _clientsP2p(finalName) = p
+                            End If
+                        End SyncLock
+                    End SyncLock
+                    RaiseEvent LogLine($"[RelayHub] Client renommé → {finalName}")
+                    BroadcastPeers()
+                    Return
+                End If
+            End If
+
+            ' PEERS côté client ignoré
+            If msg.StartsWith(Proto.TAG_PEERS) Then Return
+
+            ' MSG
+            If msg.StartsWith(Proto.TAG_MSG) Then
+                Dim parts = msg.Split(":"c, 3)
+                If parts.Length >= 3 Then
+                    RaiseEvent MessageArrived(parts(1), parts(2))
+                End If
+                Await BroadcastAsync(msg, clientName)
+                Return
+            End If
+
+            ' PRIV
+            If msg.StartsWith(Proto.TAG_PRIV) Then
+                ' PRIV:sender:dest:text
+                Dim parts = msg.Split(":"c, 4)
+                If parts.Length >= 4 Then
+                    Dim sender = parts(1)
+                    Dim dest = parts(2)
+                    Dim text = parts(3)
+                    RaiseEvent PrivateArrived(sender, dest, text)
+                    If Not Await TrySendToAsync(dest, msg) Then
+                        Await BroadcastAsync(msg, clientName)
+                    End If
+                End If
+                Return
+            End If
+
+            ' FICHIERS
+            If msg.StartsWith(Proto.TAG_FILEMETA) Then
+                RaiseEvent FileSignal("FILEMETA", msg)
+                Await RouteFileLikeAsync(msg, clientName, isMeta:=True)
+                Return
+            End If
+            If msg.StartsWith(Proto.TAG_FILECHUNK) Then
+                RaiseEvent FileSignal("FILECHUNK", msg)
+                Await RouteFileLikeAsync(msg, clientName, isMeta:=False)
+                Return
+            End If
+            If msg.StartsWith(Proto.TAG_FILEEND) Then
+                RaiseEvent FileSignal("FILEEND", msg)
+                Await RouteFileLikeAsync(msg, clientName, isMeta:=False, endSig:=True)
+                Return
+            End If
+
+            ' ICE
+            If msg.StartsWith(Proto.TAG_ICE_OFFER) Then
+                RaiseEvent IceSignal("ICE_OFFER", msg)
+                Await BroadcastAsync(msg, clientName)
+                Return
+            End If
+            If msg.StartsWith(Proto.TAG_ICE_ANSWER) Then
+                RaiseEvent IceSignal("ICE_ANSWER", msg)
+                Await BroadcastAsync(msg, clientName)
+                Return
+            End If
+            If msg.StartsWith(Proto.TAG_ICE_CAND) Then
+                RaiseEvent IceSignal("ICE_CAND", msg)
+                Await BroadcastAsync(msg, clientName)
+                Return
+            End If
+
+            ' fallback
+            Await BroadcastAsync(msg, clientName)
+        End Function
+
+        ' ===== Routing ciblé / broadcast pour string =====
+        Private Async Function TrySendToAsync(dest As String, payload As String) As Task(Of Boolean)
+            Dim data = Encoding.UTF8.GetBytes(payload)
+
+            ' P2P ?
+            Dim p2p As INetworkStream = Nothing
+            SyncLock _clientsP2p
+                If _clientsP2p.ContainsKey(dest) Then p2p = _clientsP2p(dest)
+            End SyncLock
+            If p2p IsNot Nothing Then
+                Try
+                    Await p2p.SendAsync(data, CancellationToken.None)
+                    Return True
+                Catch
+                    Return False
+                End Try
+            End If
+
+            ' TCP ?
+            Dim tcp As NetworkStream = Nothing
+            SyncLock _clientsTcp
+                If _clientsTcp.ContainsKey(dest) Then tcp = _clientsTcp(dest)
+            End SyncLock
+            If tcp IsNot Nothing Then
+                Try
+                    Await tcp.WriteAsync(data, 0, data.Length)
+                    Return True
+                Catch
+                    Return False
+                End Try
+            End If
+
+            Return False
+        End Function
+
+        Private Async Function BroadcastAsync(payload As String, sender As String) As Task
+            Dim data = Encoding.UTF8.GetBytes(payload)
+
+            Dim targetsP2p As List(Of INetworkStream)
+            Dim targetsTcp As List(Of NetworkStream)
+
+            SyncLock _clientsP2p
+                targetsP2p = New List(Of INetworkStream)(
+                    _clientsP2p.Where(Function(kv) kv.Key <> sender).Select(Function(kv) kv.Value)
+                )
+            End SyncLock
+            SyncLock _clientsTcp
+                targetsTcp = New List(Of NetworkStream)(
+                    _clientsTcp.Where(Function(kv) kv.Key <> sender).Select(Function(kv) kv.Value)
+                )
+            End SyncLock
+
+            For Each s In targetsP2p
+                Try : Await s.SendAsync(data, CancellationToken.None) : Catch : End Try
+            Next
+            For Each s In targetsTcp
+                Try : Await s.WriteAsync(data, 0, data.Length) : Catch : End Try
+            Next
+        End Function
+
+        ' Fichiers : route META au destinataire si possible, sinon broadcast; CHUNK/END broadcast fallback
         Private Async Function RouteFileLikeAsync(msg As String, sender As String, isMeta As Boolean, Optional endSig As Boolean = False) As Task
             If isMeta Then
-                ' FILEMETA:tid:from:dest:filename:size
-                Dim parts = msg.Split(":"c, 6)
+                Dim parts = msg.Split(":"c, 6) ' FILEMETA:tid:from:dest:filename:size
                 If parts.Length >= 6 Then
                     Dim dest = parts(3)
                     If Await TrySendToAsync(dest, msg) Then Return
                 End If
             End If
-            ' fallback : broadcast aux autres
             Await BroadcastAsync(msg, sender)
-        End Function
-
-        Private Async Function BroadcastAsync(msg As String, sender As String) As Task
-            Dim data = Encoding.UTF8.GetBytes(msg)
-            Dim targets As New List(Of NetworkStream)
-            SyncLock _clients
-                For Each kvp In _clients
-                    If kvp.Key <> sender Then targets.Add(kvp.Value)
-                Next
-            End SyncLock
-
-            For Each t In targets
-                Try
-                    Await t.WriteAsync(data, 0, data.Length)
-                Catch
-                End Try
-            Next
         End Function
 
         Private Sub BroadcastPeers()
             Dim peers As New List(Of String)
-            SyncLock _clients
-                peers.Add(HostDisplayName)
-                peers.AddRange(_clients.Keys)
+            SyncLock _clientsTcp
+                peers.AddRange(_clientsTcp.Keys)
             End SyncLock
+            SyncLock _clientsP2p
+                peers.AddRange(_clientsP2p.Keys)
+            End SyncLock
+
+            ' ajouter le host en tête
+            peers.Insert(0, HostDisplayName)
 
             Dim peersStr = String.Join(";", peers)
             Dim msg = Proto.TAG_PEERS & peersStr
@@ -260,22 +358,22 @@ Namespace ChatP2P.App
             RaiseEvent PeerListUpdated(New List(Of String)(peers))
 
             Try
-                ' on envoie aux clients (host n’a pas besoin de s’envoyer à lui-même)
-                BroadcastAsync(msg, "").Wait()
+                ' informer les clients
+                BroadcastAsync(msg, sender:="").Wait()
             Catch
             End Try
         End Sub
 
         ' ======== API attendue par Form1 ========
 
-        ''' <summary>Envoi ciblé à un destinataire par nom.</summary>
+        ''' <summary>Envoi ciblé à un destinataire par nom (payload string).</summary>
         Public Async Function SendToAsync(dest As String, payload As String) As Task
             If Not Await TrySendToAsync(dest, payload) Then
                 RaiseEvent LogLine($"[RelayHub] Destinataire '{dest}' introuvable (SendToAsync).")
             End If
         End Function
 
-        ''' <summary>Broadcast depuis le host à tous les clients.</summary>
+        ''' <summary>Broadcast depuis le host à tous les clients (payload string).</summary>
         Public Async Function BroadcastFromHostAsync(payload As String) As Task
             Await BroadcastAsync(payload, sender:="")
         End Function
@@ -283,8 +381,8 @@ Namespace ChatP2P.App
         ' ======== Outils ========
         Private Shared Function Preview(s As String) As String
             If String.IsNullOrEmpty(s) Then Return ""
-            If s.Length <= 120 Then Return s
-            Return s.Substring(0, 120) & "..."
+            If s.Length <= 160 Then Return s
+            Return s.Substring(0, 160) & "..."
         End Function
 
     End Class
