@@ -56,11 +56,14 @@ Partial Class Form1
         ' 
         ' GroupBox1
         ' 
+        GroupBox1.BackColor = Color.Transparent
         GroupBox1.Controls.Add(txtFilePort)
         GroupBox1.Controls.Add(Label5)
         GroupBox1.Controls.Add(btnStartHost)
         GroupBox1.Controls.Add(txtLocalPort)
         GroupBox1.Controls.Add(Label1)
+        GroupBox1.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox1.ForeColor = Color.Lime
         GroupBox1.Location = New Point(12, 32)
         GroupBox1.Name = "GroupBox1"
         GroupBox1.Size = New Size(367, 139)
@@ -72,7 +75,7 @@ Partial Class Form1
         ' 
         txtFilePort.Location = New Point(113, 80)
         txtFilePort.Name = "txtFilePort"
-        txtFilePort.Size = New Size(130, 31)
+        txtFilePort.Size = New Size(130, 34)
         txtFilePort.TabIndex = 4
         ' 
         ' Label5
@@ -80,24 +83,25 @@ Partial Class Form1
         Label5.AutoSize = True
         Label5.Location = New Point(21, 76)
         Label5.Name = "Label5"
-        Label5.Size = New Size(75, 25)
+        Label5.Size = New Size(83, 28)
         Label5.TabIndex = 3
         Label5.Text = "File Port"
         ' 
         ' btnStartHost
         ' 
+        btnStartHost.BackColor = Color.Black
         btnStartHost.Location = New Point(249, 76)
         btnStartHost.Name = "btnStartHost"
         btnStartHost.Size = New Size(101, 34)
         btnStartHost.TabIndex = 2
         btnStartHost.Text = "Start Host"
-        btnStartHost.UseVisualStyleBackColor = True
+        btnStartHost.UseVisualStyleBackColor = False
         ' 
         ' txtLocalPort
         ' 
         txtLocalPort.Location = New Point(114, 37)
         txtLocalPort.Name = "txtLocalPort"
-        txtLocalPort.Size = New Size(129, 31)
+        txtLocalPort.Size = New Size(129, 34)
         txtLocalPort.TabIndex = 1
         ' 
         ' Label1
@@ -105,7 +109,7 @@ Partial Class Form1
         Label1.AutoSize = True
         Label1.Location = New Point(19, 37)
         Label1.Name = "Label1"
-        Label1.Size = New Size(44, 25)
+        Label1.Size = New Size(48, 28)
         Label1.TabIndex = 0
         Label1.Text = "Port"
         ' 
@@ -114,39 +118,43 @@ Partial Class Form1
         chkVerbose.AutoSize = True
         chkVerbose.Location = New Point(24, 374)
         chkVerbose.Name = "chkVerbose"
-        chkVerbose.Size = New Size(145, 29)
+        chkVerbose.Size = New Size(156, 32)
         chkVerbose.TabIndex = 8
         chkVerbose.Text = "Logs détaillés"
         chkVerbose.UseVisualStyleBackColor = True
         ' 
         ' GroupBox2
         ' 
+        GroupBox2.BackColor = Color.Transparent
         GroupBox2.Controls.Add(btnConnect)
         GroupBox2.Controls.Add(txtRemotePort)
         GroupBox2.Controls.Add(Label3)
         GroupBox2.Controls.Add(txtRemoteIp)
         GroupBox2.Controls.Add(Label2)
+        GroupBox2.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox2.ForeColor = Color.Lime
         GroupBox2.Location = New Point(397, 32)
         GroupBox2.Name = "GroupBox2"
-        GroupBox2.Size = New Size(396, 139)
+        GroupBox2.Size = New Size(473, 139)
         GroupBox2.TabIndex = 1
         GroupBox2.TabStop = False
         GroupBox2.Text = "Remote Connect"
         ' 
         ' btnConnect
         ' 
-        btnConnect.Location = New Point(290, 83)
+        btnConnect.BackColor = Color.Black
+        btnConnect.Location = New Point(349, 81)
         btnConnect.Name = "btnConnect"
-        btnConnect.Size = New Size(98, 34)
+        btnConnect.Size = New Size(106, 34)
         btnConnect.TabIndex = 4
         btnConnect.Text = "Connect"
-        btnConnect.UseVisualStyleBackColor = True
+        btnConnect.UseVisualStyleBackColor = False
         ' 
         ' txtRemotePort
         ' 
-        txtRemotePort.Location = New Point(134, 82)
+        txtRemotePort.Location = New Point(163, 80)
         txtRemotePort.Name = "txtRemotePort"
-        txtRemotePort.Size = New Size(150, 31)
+        txtRemotePort.Size = New Size(150, 34)
         txtRemotePort.TabIndex = 3
         ' 
         ' Label3
@@ -154,15 +162,15 @@ Partial Class Form1
         Label3.AutoSize = True
         Label3.Location = New Point(24, 88)
         Label3.Name = "Label3"
-        Label3.Size = New Size(110, 25)
+        Label3.Size = New Size(120, 28)
         Label3.TabIndex = 2
         Label3.Text = "Remote Port"
         ' 
         ' txtRemoteIp
         ' 
-        txtRemoteIp.Location = New Point(134, 42)
+        txtRemoteIp.Location = New Point(163, 37)
         txtRemoteIp.Name = "txtRemoteIp"
-        txtRemoteIp.Size = New Size(254, 31)
+        txtRemoteIp.Size = New Size(292, 34)
         txtRemoteIp.TabIndex = 1
         ' 
         ' Label2
@@ -170,12 +178,13 @@ Partial Class Form1
         Label2.AutoSize = True
         Label2.Location = New Point(24, 45)
         Label2.Name = "Label2"
-        Label2.Size = New Size(88, 25)
+        Label2.Size = New Size(95, 28)
         Label2.TabIndex = 0
         Label2.Text = "RemoteIP"
         ' 
         ' GroupBox3
         ' 
+        GroupBox3.BackColor = Color.Transparent
         GroupBox3.Controls.Add(chkVerbose)
         GroupBox3.Controls.Add(btnChooseRecvFolder)
         GroupBox3.Controls.Add(lblRecvProgress)
@@ -189,39 +198,43 @@ Partial Class Form1
         GroupBox3.Controls.Add(btnSend)
         GroupBox3.Controls.Add(txtMessage)
         GroupBox3.Controls.Add(txtLog)
-        GroupBox3.Location = New Point(38, 334)
+        GroupBox3.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox3.ForeColor = Color.Lime
+        GroupBox3.Location = New Point(12, 214)
         GroupBox3.Name = "GroupBox3"
-        GroupBox3.Size = New Size(755, 476)
+        GroupBox3.Size = New Size(858, 498)
         GroupBox3.TabIndex = 2
         GroupBox3.TabStop = False
         GroupBox3.Text = "Messaging"
         ' 
         ' btnChooseRecvFolder
         ' 
-        btnChooseRecvFolder.Location = New Point(615, 374)
+        btnChooseRecvFolder.BackColor = Color.Black
+        btnChooseRecvFolder.Location = New Point(625, 374)
         btnChooseRecvFolder.Name = "btnChooseRecvFolder"
-        btnChooseRecvFolder.Size = New Size(120, 34)
+        btnChooseRecvFolder.Size = New Size(119, 34)
         btnChooseRecvFolder.TabIndex = 8
         btnChooseRecvFolder.Text = "Dossier"
-        btnChooseRecvFolder.UseVisualStyleBackColor = True
+        btnChooseRecvFolder.UseVisualStyleBackColor = False
         ' 
         ' lblRecvProgress
         ' 
         lblRecvProgress.AutoSize = True
         lblRecvProgress.Location = New Point(615, 415)
         lblRecvProgress.Name = "lblRecvProgress"
-        lblRecvProgress.Size = New Size(129, 25)
+        lblRecvProgress.Size = New Size(140, 28)
         lblRecvProgress.TabIndex = 6
         lblRecvProgress.Text = "Réception : 0%"
         ' 
         ' btnSendFile
         ' 
-        btnSendFile.Location = New Point(616, 327)
+        btnSendFile.BackColor = Color.Black
+        btnSendFile.Location = New Point(625, 323)
         btnSendFile.Name = "btnSendFile"
         btnSendFile.Size = New Size(119, 34)
         btnSendFile.TabIndex = 6
         btnSendFile.Text = "Send File"
-        btnSendFile.UseVisualStyleBackColor = True
+        btnSendFile.UseVisualStyleBackColor = False
         ' 
         ' pbSend
         ' 
@@ -235,12 +248,13 @@ Partial Class Form1
         lblSendProgress.AutoSize = True
         lblSendProgress.Location = New Point(617, 446)
         lblSendProgress.Name = "lblSendProgress"
-        lblSendProgress.Size = New Size(94, 25)
+        lblSendProgress.Size = New Size(101, 28)
         lblSendProgress.TabIndex = 4
         lblSendProgress.Text = "Envoi : 0%"
         ' 
         ' pbRecv
         ' 
+        pbRecv.BackColor = Color.Black
         pbRecv.Location = New Point(1, 415)
         pbRecv.Name = "pbRecv"
         pbRecv.Size = New Size(610, 31)
@@ -248,11 +262,13 @@ Partial Class Form1
         ' 
         ' lstPeers
         ' 
+        lstPeers.BackColor = Color.Black
+        lstPeers.ForeColor = Color.Lime
         lstPeers.FormattingEnabled = True
-        lstPeers.ItemHeight = 25
-        lstPeers.Location = New Point(616, 36)
+        lstPeers.ItemHeight = 28
+        lstPeers.Location = New Point(625, 36)
         lstPeers.Name = "lstPeers"
-        lstPeers.Size = New Size(128, 279)
+        lstPeers.Size = New Size(128, 256)
         lstPeers.TabIndex = 5
         ' 
         ' Label4
@@ -260,35 +276,42 @@ Partial Class Form1
         Label4.AutoSize = True
         Label4.Location = New Point(184, 327)
         Label4.Name = "Label4"
-        Label4.Size = New Size(59, 25)
+        Label4.Size = New Size(64, 28)
         Label4.TabIndex = 4
         Label4.Text = "Name"
         ' 
         ' txtName
         ' 
-        txtName.Location = New Point(19, 327)
+        txtName.BackColor = Color.Black
+        txtName.ForeColor = Color.Lime
+        txtName.Location = New Point(21, 328)
         txtName.Name = "txtName"
-        txtName.Size = New Size(150, 31)
+        txtName.Size = New Size(150, 34)
         txtName.TabIndex = 3
         ' 
         ' btnSend
         ' 
-        btnSend.Location = New Point(282, 325)
+        btnSend.BackColor = Color.Black
+        btnSend.Location = New Point(509, 325)
         btnSend.Name = "btnSend"
         btnSend.Size = New Size(86, 35)
         btnSend.TabIndex = 2
         btnSend.Text = "Send"
-        btnSend.UseVisualStyleBackColor = True
+        btnSend.UseVisualStyleBackColor = False
         ' 
         ' txtMessage
         ' 
+        txtMessage.BackColor = Color.Black
+        txtMessage.ForeColor = Color.Lime
         txtMessage.Location = New Point(23, 284)
         txtMessage.Name = "txtMessage"
-        txtMessage.Size = New Size(572, 31)
+        txtMessage.Size = New Size(572, 34)
         txtMessage.TabIndex = 1
         ' 
         ' txtLog
         ' 
+        txtLog.BackColor = Color.Black
+        txtLog.ForeColor = Color.Lime
         txtLog.Location = New Point(23, 36)
         txtLog.Name = "txtLog"
         txtLog.Size = New Size(587, 227)
@@ -297,13 +320,13 @@ Partial Class Form1
         ' 
         ' Form1
         ' 
-        AutoScaleDimensions = New SizeF(10F, 25F)
+        AutoScaleDimensions = New SizeF(10.0F, 25.0F)
         AutoScaleMode = AutoScaleMode.Font
         AutoSize = True
         BackColor = SystemColors.ActiveBorder
         BackgroundImage = CType(resources.GetObject("$this.BackgroundImage"), Image)
-        BackgroundImageLayout = ImageLayout.Center
-        ClientSize = New Size(822, 868)
+        BackgroundImageLayout = ImageLayout.Stretch
+        ClientSize = New Size(887, 861)
         Controls.Add(GroupBox3)
         Controls.Add(GroupBox2)
         Controls.Add(GroupBox1)
