@@ -1,12 +1,13 @@
 ﻿' ChatP2P.UI.WinForms/Form1.vb
 Option Strict On
-Imports System.Net
 Imports System.IO
+Imports System.Net
+Imports System.Net.Sockets
 Imports System.Text
 Imports System.Threading
-Imports ChatP2P.Core                    ' P2PManager, PeerDescriptor, IdentityBundle, INetworkStream, DirectPath
 Imports ChatP2P.App                     ' RelayHub
 Imports ChatP2P.App.Protocol            ' Tags module namespace
+Imports ChatP2P.Core                    ' P2PManager, PeerDescriptor, IdentityBundle, INetworkStream, DirectPath
 Imports Proto = ChatP2P.App.Protocol.Tags
 
 Public Class Form1
@@ -142,23 +143,16 @@ Public Class Form1
         _displayName = If(String.IsNullOrWhiteSpace(txtName.Text), "Host", txtName.Text.Trim())
         _isHost = True
         SaveSettings()
-
-        ' --- DirectPath écoute sur le port et accepte les clients entrants ---
-        _path = New DirectPath(port)
-
-        Dim localPeer As New PeerDescriptor With {
-        .Identity = New IdentityBundle With {.DisplayName = _displayName},
-        .Endpoints = New List(Of IPEndPoint) From {New IPEndPoint(IPAddress.Any, port)}
-    }
-
-        Dim res = Await _path.ProbeAsync(localPeer, Nothing, CancellationToken.None)
-        Log($"Hosting on port {port}: {res.Notes}")
-        If Not res.Success Then Return
-
-        _cts = New CancellationTokenSource()
-
-        ' --- Hub (sans écoute TCP intégrée) : brancher les événements vers l’UI ---
-        _hub = New RelayHub() With {.HostDisplayName = _displayName}
+        P2PManager.Init(
+    sendSignal:=Function(dest As String, line As String)
+                    Dim bytes = Encoding.UTF8.GetBytes(line)
+                    Return _hub.SendToAsync(dest, bytes)
+                End Function,
+    localDisplayName:=_displayName
+)
+        ' IMPORTANT : on ne démarre plus DirectPath côté host pour éviter tout conflit de port.
+        ' Le hub TCP joue le rôle de serveur (relais + signalisation).
+        _hub = New RelayHub(port) With {.HostDisplayName = _displayName}
 
         AddHandler _hub.PeerListUpdated, Sub(names As List(Of String)) UpdatePeers(names)
         AddHandler _hub.LogLine, Sub(t As String) Log(t)
@@ -172,31 +166,10 @@ Public Class Form1
             End If
         End Sub
         AddHandler _hub.FileSignal, New RelayHub.FileSignalEventHandler(AddressOf OnHubFileSignal)
-        AddHandler _hub.IceSignal, New RelayHub.IceSignalEventHandler(AddressOf OnHubIceSignal)
 
-        Log($"Hub initialisé (host='{_displayName}'). En attente de connexions…")
 
-        ' --- Accepte plusieurs clients en boucle via DirectPath, puis ajoute au hub ---
-        Task.Run(Async Sub()
-                     While Not _cts.IsCancellationRequested
-                         Try
-                             Dim s = Await _path.ConnectAsync(Nothing, _cts.Token) ' accepte un client entrant
-                             Dim clientName As String
-                             SyncLock _clients
-                                 clientName = $"Client{_clients.Count + 1}"
-                                 _clients(clientName) = s
-                                 _revIndex(s) = clientName
-                             End SyncLock
-                             Log($"{clientName} connecté.")
-                             ' Important : brancher le stream côté hub
-                             _hub.AddClient(clientName, s)
-                         Catch ex As Exception
-                             If Not _cts.IsCancellationRequested Then
-                                 Log("Accept failed: " & ex.Message)
-                             End If
-                         End Try
-                     End While
-                 End Sub)
+        _hub.Start()
+        Log($"Hub en écoute sur {port} (host='{_displayName}').")
     End Sub
 
 
@@ -204,13 +177,6 @@ Public Class Form1
     ' ================ CLIENT ==================
     ' =========================================
     Private Async Sub btnConnect_Click(sender As Object, e As EventArgs) Handles btnConnect.Click
-        ' Mode client (legacy direct vers host) : on garde _stream pour envoyer au host.
-        ' Ici, on se connecte au hub via TCP ? Ton binaire client actuel utilisait DirectPath.
-        ' Pour rester compatible sans tout casser, on garde DirectPath côté client.
-        ' => PRÉREQUIS : côté host, lance un composant équivalent qui parle la même "framing".
-        ' Si tu utilises désormais uniquement le Hub TCP, tu peux remplacer ce bloc
-        ' par une connexion TcpClient et affecter _stream via un wrapper.
-
         Dim ip As IPAddress
         If Not IPAddress.TryParse(txtRemoteIp.Text, ip) Then Log("IP invalide.") : Return
 
@@ -221,25 +187,34 @@ Public Class Form1
         _isHost = False
         SaveSettings()
 
-        If _path Is Nothing Then _path = New DirectPath(0)
+        P2PManager.Init(
+    sendSignal:=Function(dest As String, line As String)
+                    Dim bytes = Encoding.UTF8.GetBytes(line)
+                    Return _stream.SendAsync(bytes, CancellationToken.None)
+                End Function,
+    localDisplayName:=_displayName
+)
 
-        Dim remotePeer As New PeerDescriptor With {
-            .Identity = New IdentityBundle With {.DisplayName = _displayName},
-            .Endpoints = New List(Of IPEndPoint) From {New IPEndPoint(ip, port)}
-        }
 
         Try
             _cts = New CancellationTokenSource()
-            _stream = Await _path.ConnectAsync(remotePeer, _cts.Token)
-            Log($"Connected to {ip}:{port}")
+
+            ' >>> Connexion au HUB TCP (plus DirectPath ici)
+            Dim tcp = New TcpClient()
+            Await tcp.ConnectAsync(ip.ToString(), port)
+            _stream = New TcpNetworkStreamAdapter(tcp)
+
+            Log($"Connected to {ip}:{port} (Hub TCP)")
+            ' S'annoncer au hub
             Await _stream.SendAsync(Encoding.UTF8.GetBytes(Proto.TAG_NAME & _displayName), CancellationToken.None)
 
-            ' Démarre la boucle d’écoute côté client
+            ' Boucle de réception des messages du hub
             ListenIncomingClient(_stream, _cts.Token)
         Catch ex As Exception
             Log($"Connect failed: {ex.Message}")
         End Try
     End Sub
+
 
     ' =========================================
     ' =============== ENVOI CHAT ===============
@@ -253,7 +228,7 @@ Public Class Form1
 
         If _isHost Then
             If _hub Is Nothing Then Log("Hub non initialisé.") : Return
-            Await _hub.BroadcastFromHostAsync(data)
+            Await _hub.BroadcastFromHostAsync(Encoding.UTF8.GetBytes(payload))
         Else
             If _stream Is Nothing Then Log("Not connected.") : Return
             Await _stream.SendAsync(data, CancellationToken.None)
@@ -665,30 +640,7 @@ Public Class Form1
         If raw.StartsWith(Proto.TAG_FILEEND) Then HandleFileEnd(raw)
     End Sub
 
-    Private Sub OnHubIceSignal(raw As String)
-        Try
-            If raw.StartsWith(Proto.TAG_ICE_OFFER) Then
-                Dim p = raw.Substring(Proto.TAG_ICE_OFFER.Length).Split(":"c, 3)
-                Dim fromPeer = p(0)
-                Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
-                P2PManager.HandleOffer(fromPeer, sdp, New String() {"stun:stun.l.google.com:19302"})
 
-            ElseIf raw.StartsWith(Proto.TAG_ICE_ANSWER) Then
-                Dim p = raw.Substring(Proto.TAG_ICE_ANSWER.Length).Split(":"c, 3)
-                Dim fromPeer = p(0)
-                Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
-                P2PManager.HandleAnswer(fromPeer, sdp)
-
-            ElseIf raw.StartsWith(Proto.TAG_ICE_CAND) Then
-                Dim p = raw.Substring(Proto.TAG_ICE_CAND.Length).Split(":"c, 3)
-                Dim fromPeer = p(0)
-                Dim cand = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
-                P2PManager.HandleCandidate(fromPeer, cand)
-            End If
-        Catch ex As Exception
-            Log("[ICE] parse error: " & ex.Message, verbose:=True)
-        End Try
-    End Sub
 
     ' =========================================
     ' ========= Fenêtres chat privé ============
