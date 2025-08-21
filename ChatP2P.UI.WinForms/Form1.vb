@@ -76,6 +76,15 @@ Public Class Form1
                         End Function,
             localDisplayName:=_displayName
         )
+        ' Quand un texte P2P arrive → ouvrir/activer la fenêtre correspondante
+        AddHandler P2PManager.OnP2PText,
+            Sub(peer As String, text As String)
+                If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+                    Me.BeginInvoke(Sub() EnsurePrivateChat(peer))
+                Else
+                    EnsurePrivateChat(peer)
+                End If
+            End Sub
         AddHandler P2PManager.OnP2PState,
     Sub(peer As String, connected As Boolean)
         Log($"[P2P] {peer}: " & If(connected, "connecté", "déconnecté"), verbose:=True)
