@@ -1,5 +1,4 @@
-﻿' ChatP2P.App/RelayHub.vb
-Option Strict On
+﻿Option Strict On
 Imports System.Net
 Imports System.Net.Sockets
 Imports System.Text
@@ -10,24 +9,27 @@ Imports Proto = ChatP2P.App.Protocol.Tags
 Namespace ChatP2P.App
 
     ''' <summary>
-    ''' Hub TCP (relay + peers + routage ICE/Fichier).
-    ''' - Gère la liste des pairs.
-    ''' - Relaye MSG/PRIV/FILE*.
-    ''' - Relaye ICE_* au destinataire indiqué (format: ICE_{X}:from:to:base64payload).
+    ''' Hub TCP très simple : accepte des clients, gère le renommage (NAME:xxx),
+    ''' diffuse la liste des pairs, relaye les messages (MSG/PRIV/FILE*/ICE_*).
+    ''' Tous les messages sont des LIGNES UTF8 terminées par \n (vbLf).
     ''' </summary>
     Public Class RelayHub
 
-        ' --- Events UI ---
+        ' ---- Events vers l’UI ----
         Public Event PeerListUpdated(names As List(Of String))
         Public Event LogLine(line As String)
         Public Event MessageArrived(sender As String, text As String)
         Public Event PrivateArrived(sender As String, dest As String, text As String)
+
         Public Delegate Sub FileSignalEventHandler(raw As String)
         Public Event FileSignal As FileSignalEventHandler
 
-        Public Property HostDisplayName As String = "Server"
+        Public Delegate Sub IceSignalEventHandler(raw As String)
+        Public Event IceSignal As IceSignalEventHandler
 
-        ' --- Etat interne ---
+        Public Property HostDisplayName As String = "Host"
+
+        ' ---- Etat interne ----
         Private ReadOnly _gate As New Object()
         Private ReadOnly _clients As New Dictionary(Of String, TcpClient)(StringComparer.OrdinalIgnoreCase)
         Private ReadOnly _rev As New Dictionary(Of TcpClient, String)()
@@ -38,19 +40,23 @@ Namespace ChatP2P.App
             _listener = New TcpListener(IPAddress.Any, port)
         End Sub
 
+        ' Petit utilitaire: s’assure que le buffer finit par \n
+        Private Shared Function EnsureLine(data As Byte()) As Byte()
+            If data Is Nothing OrElse data.Length = 0 Then
+                Return Encoding.UTF8.GetBytes(vbLf)
+            End If
+            If data(data.Length - 1) = AscW(vbLf) Then Return data
+            Dim s = Encoding.UTF8.GetString(data)
+            Return Encoding.UTF8.GetBytes(s & vbLf)
+        End Function
+
         Public Sub Start()
             _cts = New CancellationTokenSource()
             _listener.Start()
-
-            ' Récupérer le port effectivement écouté
-            Dim ep = TryCast(_listener.LocalEndpoint, IPEndPoint)
-            Dim portInfo As String = If(ep IsNot Nothing, ep.Port.ToString(), "?")
-            RaiseEvent LogLine($"[Hub] Listening on port {portInfo}")
-
-            ' Lancer la boucle d'acceptation en fire-and-forget
-            Dim _ignore As Task = AcceptLoop(_cts.Token)
+            RaiseEvent LogLine($"[Hub] Listening on port {_DirectCastPort()}")
+            ' fire-and-forget propre
+            AcceptLoop(_cts.Token)
         End Sub
-
 
         Public Sub [Stop]()
             Try
@@ -62,14 +68,15 @@ Namespace ChatP2P.App
 
         Private Function _DirectCastPort() As Integer
             Try
-                Return DirectCast(_listener.LocalEndpoint, IPEndPoint).Port
+                Dim ep = DirectCast(_listener.LocalEndpoint, IPEndPoint)
+                Return ep.Port
             Catch
-                Return 0
+                Return -1
             End Try
         End Function
 
         ' === accept ===
-        Private Async Function AcceptLoop(ct As CancellationToken) As Task
+        Private Async Sub AcceptLoop(ct As CancellationToken)
             While Not ct.IsCancellationRequested
                 Try
                     Dim cli = Await _listener.AcceptTcpClientAsync().ConfigureAwait(False)
@@ -83,172 +90,216 @@ Namespace ChatP2P.App
                     RaiseEvent LogLine($"[Hub] Nouveau client connecté: {name}")
                     BroadcastPeers()
 
-                    Dim _ignore As Task = ListenClientLoopAsync(cli, ct)
+                    ' fire-and-forget propre
+                    ListenClientLoopAsync(cli, ct)
                 Catch ex As Exception
                     If Not ct.IsCancellationRequested Then
                         RaiseEvent LogLine($"[Hub] Accept error: {ex.Message}")
                     End If
                 End Try
             End While
-        End Function
+        End Sub
 
-        ' === read per client ===
-        Private Async Function ListenClientLoopAsync(cli As TcpClient, ct As CancellationToken) As Task
-            Dim ns = cli.GetStream()
-            Dim buffer(8192 - 1) As Byte
-
-            Dim myName As String
-            SyncLock _gate
-                myName = If(_rev.ContainsKey(cli), _rev(cli), "?")
-            End SyncLock
-
+        ' lecture par LIGNES (UTF8 + \n)
+        Private Async Sub ListenClientLoopAsync(cli As TcpClient, ct As CancellationToken)
+            Dim ns As NetworkStream = Nothing
+            Dim sb As New StringBuilder()
+            Dim myName As String = ""
             Try
-                While Not ct.IsCancellationRequested
-                    Dim read = Await ns.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(False)
+                ns = cli.GetStream()
+                Dim buf(4095) As Byte
+
+                While Not ct.IsCancellationRequested AndAlso cli.Connected
+                    Dim read = Await ns.ReadAsync(buf, 0, buf.Length, ct).ConfigureAwait(False)
                     If read <= 0 Then Exit While
 
-                    Dim msg = Encoding.UTF8.GetString(buffer, 0, read)
-                    RaiseEvent LogLine($"[Hub] {myName} → {Left(msg, Math.Min(100, msg.Length))}")
+                    Dim chunk = Encoding.UTF8.GetString(buf, 0, read)
+                    ' découpe par lignes
+                    Dim lines = ExtractLines(sb, chunk)
+                    For Each msg In lines
+                        Dim currentName As String
+                        SyncLock _gate
+                            currentName = If(_rev.ContainsKey(cli), _rev(cli), "")
+                        End SyncLock
 
-                    ' ====== ROUTAGE ======
-                    If msg.StartsWith(Proto.TAG_NAME) Then
-                        Dim newName = msg.Substring(Proto.TAG_NAME.Length).Trim()
-                        If Not String.IsNullOrWhiteSpace(newName) Then
-                            SyncLock _gate
-                                If _clients.ContainsKey(myName) Then _clients.Remove(myName)
-                                _clients(newName) = cli
-                                _rev(cli) = newName
-                                myName = newName
-                            End SyncLock
-                            RaiseEvent LogLine($"[Hub] Client renommé en {myName}")
-                            BroadcastPeers()
+                        RaiseEvent LogLine($"[Hub] {If(currentName, "?")} → {Trunc80(msg)}")
+
+                        If msg.StartsWith(Proto.TAG_NAME) Then
+                            Dim newName = msg.Substring(Proto.TAG_NAME.Length).Trim()
+                            If newName <> "" Then
+                                SyncLock _gate
+                                    Dim oldName As String = If(_rev.ContainsKey(cli), _rev(cli), "")
+                                    If oldName <> "" AndAlso _clients.ContainsKey(oldName) Then
+                                        _clients.Remove(oldName)
+                                    End If
+                                    ' collision éventuelle
+                                    Dim finalName = newName
+                                    If _clients.ContainsKey(finalName) Then
+                                        finalName &= "_" & DateTime.UtcNow.Ticks.ToString()
+                                    End If
+                                    _clients(finalName) = cli
+                                    _rev(cli) = finalName
+                                    myName = finalName
+                                End SyncLock
+                                RaiseEvent LogLine($"[Hub] Client renommé en {myName}")
+                                BroadcastPeers()
+                            End If
+
+                        ElseIf msg.StartsWith(Proto.TAG_MSG) Then
+                            ' MSG:sender:text  => broadcast
+                            RaiseEvent MessageArrived(myName, msg.Substring(Proto.TAG_MSG.Length))
+                            Await BroadcastAsync(Encoding.UTF8.GetBytes(msg), myName).ConfigureAwait(False)
+
+                        ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
+                            ' PRIV:sender:dest:text
+                            Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
+                            Dim parts = rest.Split(":"c, 3)
+                            If parts.Length = 3 Then
+                                Dim senderName = parts(0)
+                                Dim dest = parts(1)
+                                Dim body = parts(2)
+                                RaiseEvent PrivateArrived(senderName, dest, body)
+                                Await SendToAsync(dest, Encoding.UTF8.GetBytes(msg)).ConfigureAwait(False)
+                            End If
+
+                        ElseIf msg.StartsWith(Proto.TAG_FILEMETA) _
+                            OrElse msg.StartsWith(Proto.TAG_FILECHUNK) _
+                            OrElse msg.StartsWith(Proto.TAG_FILEEND) Then
+                            RaiseEvent FileSignal(msg)
+                            ' forward au destinataire si PRIV dans la ligne (META inclut le dest)
+                            If msg.StartsWith(Proto.TAG_FILEMETA) Then
+                                ' FILEMETA:tid:from:dest:filename:size
+                                Dim p = msg.Split(":"c, 6)
+                                If p.Length >= 6 Then
+                                    Dim dest = p(3)
+                                    Await SendToAsync(dest, Encoding.UTF8.GetBytes(msg)).ConfigureAwait(False)
+                                End If
+                            Else
+                                ' CHUNK/END : broadcast intelligent (simple) : tout le monde reçoit (client côté UI filtre)
+                                Await BroadcastAsync(Encoding.UTF8.GetBytes(msg), myName).ConfigureAwait(False)
+                            End If
+
+                        ElseIf msg.StartsWith(Proto.TAG_ICE_OFFER) _
+                            OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER) _
+                            OrElse msg.StartsWith(Proto.TAG_ICE_CAND) Then
+                            RaiseEvent IceSignal(msg)
+                            ' FORMAT: ICE_XXX:from:to:BASE64
+                            Dim body = msg
+                            Dim p = body.Substring(body.IndexOf(":"c) + 1).Split(":"c, 3)
+                            If p.Length = 3 Then
+                                Dim toName = p(1)
+                                Await SendToAsync(toName, Encoding.UTF8.GetBytes(msg)).ConfigureAwait(False)
+                            End If
+
+                        ElseIf msg.StartsWith(Proto.TAG_PEERS) Then
+                            ' ignoré (la liste est envoyée par hub)
                         End If
-
-                    ElseIf msg.StartsWith(Proto.TAG_MSG) Then
-                        ' broadcast texte simple
-                        RaiseEvent MessageArrived(myName, msg.Substring(Proto.TAG_MSG.Length))
-                        Await BroadcastRawAsync(msg, exceptName:=myName).ConfigureAwait(False)
-
-                    ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
-                        ' PRIV:sender:dest:message
-                        Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
-                        Dim parts = rest.Split(":"c, 3)
-                        If parts.Length = 3 Then
-                            Dim dest = parts(1)
-                            RaiseEvent PrivateArrived(parts(0), parts(1), parts(2))
-                            Await SendRawToAsync(dest, msg).ConfigureAwait(False)
-                        End If
-
-                    ElseIf msg.StartsWith(Proto.TAG_FILEMETA) _
-                        OrElse msg.StartsWith(Proto.TAG_FILECHUNK) _
-                        OrElse msg.StartsWith(Proto.TAG_FILEEND) Then
-
-                        ' Laisse l’UI voir le signal si besoin
-                        RaiseEvent FileSignal(msg)
-
-                        ' filemeta: ...:dest:...
-                        Dim dest As String = Nothing
-                        If msg.StartsWith(Proto.TAG_FILEMETA) Then
-                            Dim p = msg.Split(":"c, 6)
-                            If p.Length >= 6 Then dest = p(3)
-                        End If
-                        If String.IsNullOrEmpty(dest) Then
-                            ' chunks / end routés à partir de l’émetteur précédent si tu veux,
-                            ' ou laisse le client qui a reçu le meta rediriger source→dest.
-                            ' Ici on broadcast par simplicité:
-                            Await BroadcastRawAsync(msg, exceptName:=myName).ConfigureAwait(False)
-                        Else
-                            Await SendRawToAsync(dest, msg).ConfigureAwait(False)
-                        End If
-
-                    ElseIf msg.StartsWith(Proto.TAG_ICE_OFFER) _
-                        OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER) _
-                        OrElse msg.StartsWith(Proto.TAG_ICE_CAND) Then
-
-                        ' Format attendu: TAG:from:to:BASE64
-                        Dim rest = msg.Substring(msg.IndexOf(":"c) + 1)
-                        Dim parts = rest.Split(":"c, 3)
-                        If parts.Length = 3 Then
-                            Dim toPeer = parts(1)
-                            ' Relais direct vers le destinataire (pas d’event UI requis)
-                            Await SendRawToAsync(toPeer, msg).ConfigureAwait(False)
-                        End If
-                    End If
+                    Next
                 End While
-
             Catch ex As Exception
-                RaiseEvent LogLine($"[Hub] {myName} déconnecté: {ex.Message}")
-
+                RaiseEvent LogLine($"[Hub] client loop err: {ex.Message}")
             Finally
+                ' cleanup
                 SyncLock _gate
-                    If _clients.ContainsKey(myName) Then _clients.Remove(myName)
-                    If _rev.ContainsKey(cli) Then _rev.Remove(cli)
+                    If _rev.ContainsKey(cli) Then
+                        Dim n = _rev(cli)
+                        _rev.Remove(cli)
+                        If _clients.ContainsKey(n) Then _clients.Remove(n)
+                    End If
                 End SyncLock
-                Try : cli.Close() : Catch : End Try
                 BroadcastPeers()
+                Try
+                    ns?.Close()
+                Catch
+                End Try
+                Try
+                    cli.Close()
+                Catch
+                End Try
             End Try
+        End Sub
+
+        ' Découpe un flux texte en lignes (\n)
+        Private Shared Function ExtractLines(sb As StringBuilder, chunk As String) As List(Of String)
+            sb.Append(chunk)
+            Dim res As New List(Of String)
+            While True
+                Dim txt = sb.ToString()
+                Dim idx = txt.IndexOf(vbLf, StringComparison.Ordinal)
+                If idx < 0 Then Exit While
+                Dim line = txt.Substring(0, idx)
+                res.Add(line)
+                sb.Remove(0, idx + 1)
+            End While
+            Return res
         End Function
 
-        ' === helpers d’envoi ===
-        Private Async Function SendRawToAsync(targetName As String, payload As String) As Task
-            Dim cli As TcpClient = Nothing
-            SyncLock _gate
-                If _clients.ContainsKey(targetName) Then cli = _clients(targetName)
-            End SyncLock
-            If cli Is Nothing Then
-                RaiseEvent LogLine($"[Hub] Destinataire introuvable: {targetName}")
-                Exit Function
-            End If
-
-            Dim data = Encoding.UTF8.GetBytes(payload)
-            Try
-                Await cli.GetStream().WriteAsync(data, 0, data.Length).ConfigureAwait(False)
-            Catch ex As Exception
-                RaiseEvent LogLine($"[Hub] SendTo {targetName} failed: {ex.Message}")
-            End Try
+        Private Shared Function Trunc80(s As String) As String
+            If s Is Nothing Then Return ""
+            If s.Length <= 80 Then Return s
+            Return s.Substring(0, 80)
         End Function
 
-        Private Async Function BroadcastRawAsync(payload As String, Optional exceptName As String = Nothing) As Task
-            Dim data = Encoding.UTF8.GetBytes(payload)
+        ' --- Broadcast texte (string) au format ligne ---
+        Private Async Function BroadcastAsync(payload As Byte(), sender As String) As Task
+            Dim data = EnsureLine(payload)
             Dim targets As List(Of TcpClient)
             SyncLock _gate
-                targets = _clients.
-                    Where(Function(kv) String.IsNullOrEmpty(exceptName) OrElse Not kv.Key.Equals(exceptName, StringComparison.OrdinalIgnoreCase)).
-                    Select(Function(kv) kv.Value).
-                    ToList()
+                targets = _clients.Where(Function(kv) Not kv.Key.Equals(sender, StringComparison.OrdinalIgnoreCase)) _
+                                  .Select(Function(kv) kv.Value).ToList()
             End SyncLock
-
-            For Each cli In targets
+            For Each c In targets
                 Try
-                    Await cli.GetStream().WriteAsync(data, 0, data.Length).ConfigureAwait(False)
+                    Dim ns = c.GetStream()
+                    Await ns.WriteAsync(data, 0, data.Length).ConfigureAwait(False)
                 Catch
                 End Try
             Next
         End Function
 
-        ' === peers ===
-        Private Sub BroadcastPeers()
-            Dim names As New List(Of String) From {HostDisplayName}
+        Public Async Function BroadcastFromHostAsync(data As Byte()) As Task
+            Dim payload = EnsureLine(data)
+            Dim targets As List(Of TcpClient)
             SyncLock _gate
+                targets = _clients.Values.ToList()
+            End SyncLock
+            For Each c In targets
+                Try
+                    Dim ns = c.GetStream()
+                    Await ns.WriteAsync(payload, 0, payload.Length).ConfigureAwait(False)
+                Catch
+                End Try
+            Next
+        End Function
+
+        Public Async Function SendToAsync(target As String, data As Byte()) As Task
+            Dim payload = EnsureLine(data)
+            Dim cli As TcpClient = Nothing
+            SyncLock _gate
+                If _clients.ContainsKey(target) Then cli = _clients(target)
+            End SyncLock
+            If cli Is Nothing Then Exit Function
+            Try
+                Dim ns = cli.GetStream()
+                Await ns.WriteAsync(payload, 0, payload.Length).ConfigureAwait(False)
+            Catch
+            End Try
+        End Function
+
+        ' --- Envoie la liste des pairs (TAG_PEERS + nomHost + noms clients) ---
+        Private Sub BroadcastPeers()
+            Dim names As New List(Of String)
+            SyncLock _gate
+                names.Add(HostDisplayName)
                 names.AddRange(_clients.Keys)
             End SyncLock
 
             RaiseEvent PeerListUpdated(names)
 
-            Dim line = Proto.TAG_PEERS & String.Join(";", names)
-            Dim _ignore As Task = BroadcastRawAsync(line)
+            Dim msg = Proto.TAG_PEERS & String.Join(";", names)
+            ' fire-and-forget propre
+            BroadcastFromHostAsync(Encoding.UTF8.GetBytes(msg))
         End Sub
-
-        ' === API utilisé par le host si besoin (non requis pour le routage ICE désormais) ===
-        Public Async Function BroadcastFromHostAsync(data As Byte()) As Task
-            Dim s = Encoding.UTF8.GetString(data)
-            Await BroadcastRawAsync(s).ConfigureAwait(False)
-        End Function
-
-        Public Async Function SendToAsync(dest As String, data As Byte()) As Task
-            Dim s = Encoding.UTF8.GetString(data)
-            Await SendRawToAsync(dest, s).ConfigureAwait(False)
-        End Function
 
     End Class
 End Namespace
