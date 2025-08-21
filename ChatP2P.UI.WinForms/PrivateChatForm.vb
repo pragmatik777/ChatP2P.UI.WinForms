@@ -1,9 +1,9 @@
-﻿Imports System.Windows.Forms
+﻿Option Strict On
+Imports System
+Imports System.Windows.Forms
 Imports System.Text
-
-' Référence au gestionnaire P2P que tu as ajouté (P2PManager.vb)
-' Il doit être dans le même projet UI ou visible depuis lui.
-' Events exposés : OnLog(peer, line), OnP2PState(peer, connected), OnP2PText(peer, text)
+Imports ChatP2P.Core                  ' <-- rend le module P2PManager visible
+Imports PM = ChatP2P.Core.P2PManager  ' <-- alias pratique
 
 Public Class PrivateChatForm
     Inherits Form
@@ -87,13 +87,16 @@ Public Class PrivateChatForm
         Me.Controls.Add(txtInput)
         Me.Controls.Add(pnlTop)
 
-        ' --- Abonnements P2PManager ---
-        AddHandler P2PManager.OnLog, AddressOf OnP2PLog
-        AddHandler P2PManager.OnP2PState, AddressOf OnP2PState
-        AddHandler P2PManager.OnP2PText, AddressOf OnP2PText
+        ' --- Abonnements P2PManager (module statique) ---
+        AddHandler PM.OnLog, AddressOf OnP2PLog
+        AddHandler PM.OnP2PState, AddressOf OnP2PState
+        AddHandler PM.OnP2PText, AddressOf OnP2PText
+
+        ' --- Etat initial du label selon l’état courant du P2P ---
+        UpdateStateText(PM.IsConnected(_peerName))
     End Sub
 
-    ' Expose (lecture seule) le nom du peer pour l'extérieur si besoin
+    ' Expose (lecture seule) le nom du peer
     Public ReadOnly Property PeerName As String
         Get
             Return _peerName
@@ -106,6 +109,8 @@ Public Class PrivateChatForm
         _peerName = newName
         Try
             Me.Text = $"Chat privé avec {_peerName}"
+            ' met aussi à jour le label selon le nouvel interlocuteur
+            UpdateStateText(PM.IsConnected(_peerName))
         Catch
         End Try
     End Sub
@@ -145,17 +150,7 @@ Public Class PrivateChatForm
         AppendMessage(_myName, msg)
         txtInput.Clear()
 
-        ' 1) Tentative P2P (si connecté)
-        Try
-            If P2PManager.TrySendP2P(_peerName, msg) Then
-                ' envoyé direct via DataChannel
-                Exit Sub
-            End If
-        Catch
-            ' on ignore, on tentera le hub
-        End Try
-
-        ' 2) Fallback : via le hub / Form1 (_sendAction)
+        ' ⚠️ Envoi par défaut via le relais (pas de tentative P2P ici)
         Try
             _sendAction?.Invoke(msg)
         Catch ex As Exception
@@ -165,11 +160,16 @@ Public Class PrivateChatForm
 
     ' Bouton pour déclencher la négociation ICE
     Private Sub BtnP2P_Click(sender As Object, e As EventArgs)
-        ' On lance la session ICE (caller)
         Try
-            P2PManager.StartP2P(_peerName, New String() {"stun:stun.l.google.com:19302"})
+            ' feedback immédiat non bloquant
+            lblP2PState.Text = "P2P: en cours…"
+            btnP2P.Enabled = False
+
+            ' démarre la nego (asynchrone via le manager)
+            PM.StartP2P(_peerName, New String() {"stun:stun.l.google.com:19302"})
             SafeLog($"[P2P] Négociation démarrée vers {_peerName}")
         Catch ex As Exception
+            btnP2P.Enabled = True
             SafeLog("[P2P] Démarrage échoué: " & ex.Message)
         End Try
     End Sub
@@ -219,9 +219,8 @@ Public Class PrivateChatForm
     ' Nettoyage : on se désabonne des events statiques
     Protected Overrides Sub OnFormClosed(e As FormClosedEventArgs)
         MyBase.OnFormClosed(e)
-        RemoveHandler P2PManager.OnLog, AddressOf OnP2PLog
-        RemoveHandler P2PManager.OnP2PState, AddressOf OnP2PState
-        RemoveHandler P2PManager.OnP2PText, AddressOf OnP2PText
+        RemoveHandler PM.OnLog, AddressOf OnP2PLog
+        RemoveHandler PM.OnP2PState, AddressOf OnP2PState
+        RemoveHandler PM.OnP2PText, AddressOf OnP2PText
     End Sub
-
 End Class
