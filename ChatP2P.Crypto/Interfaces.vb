@@ -2,13 +2,7 @@ Option Strict On
 
 Namespace ChatP2P.Crypto
 
-    Public Interface IAead
-        ReadOnly Property Name As String
-        Function NonceSize() As Integer
-        Function KeySize() As Integer
-        Function Encrypt(nonce As Byte(), aad As Byte(), plaintext As Byte()) As Byte()
-        Function Decrypt(nonce As Byte(), aad As Byte(), ciphertextWithTag As Byte()) As Byte()
-    End Interface
+
 
     Public Interface IKexClassic
         ReadOnly Property Name As String
