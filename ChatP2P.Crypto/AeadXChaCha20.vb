@@ -1,40 +1,46 @@
-' ChatP2P.Crypto/AeadXChaCha20.vb
 Option Strict On
 Imports System
-Imports Sodium
 
 Namespace ChatP2P.Crypto
+    ' AEAD XChaCha20-Poly1305 (libsodium)
     Public NotInheritable Class AeadXChaCha20
         Implements IAead
 
-        Public Const KeySize As Integer = 32
-        Public Const NonceSize As Integer = 24
-
-        Private ReadOnly _key As Byte()
+        Public Const NonceLen As Integer = 24
+        Public Const TagLen As Integer = 16
+        Private ReadOnly _key As Byte() ' 32B
 
         Public Sub New(key32 As Byte())
-            If key32 Is Nothing OrElse key32.Length <> KeySize Then Throw New ArgumentException("Clé AEAD invalide (32 octets).", NameOf(key32))
+            If key32 Is Nothing OrElse key32.Length <> 32 Then
+                Throw New ArgumentException("key32 must be 32 bytes.")
+            End If
             _key = CType(key32.Clone(), Byte())
         End Sub
 
-        Public ReadOnly Property Key As Byte() Implements IAead.Key
+        Public ReadOnly Property NonceSize As Integer Implements IAead.NonceSize
             Get
-                Return CType(_key.Clone(), Byte())
+                Return NonceLen
+            End Get
+        End Property
+
+        Public ReadOnly Property TagSize As Integer Implements IAead.TagSize
+            Get
+                Return TagLen
             End Get
         End Property
 
         Public Function Seal(nonce As Byte(), plaintext As Byte(), Optional aad As Byte() = Nothing) As Byte() Implements IAead.Seal
-            If nonce Is Nothing OrElse nonce.Length <> NonceSize Then Throw New ArgumentException("Nonce XChaCha20 = 24 octets requis.", NameOf(nonce))
+            If nonce Is Nothing OrElse nonce.Length <> NonceLen Then Throw New ArgumentException("nonce must be 24 bytes.")
             If plaintext Is Nothing Then plaintext = Array.Empty(Of Byte)()
-            If aad Is Nothing Then aad = Array.Empty(Of Byte)()
-            Return SecretAeadXChaCha20Poly1305.Encrypt(plaintext, aad, nonce, _key)
+            Return Sodium.SecretAeadXChaCha20Poly1305.Encrypt(plaintext, nonce, _key, aad)
         End Function
 
-        Public Function Open(nonce As Byte(), ciphertext As Byte(), Optional aad As Byte() = Nothing) As Byte() Implements IAead.Open
-            If nonce Is Nothing OrElse nonce.Length <> NonceSize Then Throw New ArgumentException("Nonce XChaCha20 = 24 octets requis.", NameOf(nonce))
-            If ciphertext Is Nothing Then ciphertext = Array.Empty(Of Byte)()
-            If aad Is Nothing Then aad = Array.Empty(Of Byte)()
-            Return SecretAeadXChaCha20Poly1305.Decrypt(ciphertext, aad, nonce, _key)
+        Public Function Open(nonce As Byte(), ciphertextAndTag As Byte(), Optional aad As Byte() = Nothing) As Byte() Implements IAead.Open
+            If nonce Is Nothing OrElse nonce.Length <> NonceLen Then Throw New ArgumentException("nonce must be 24 bytes.")
+            If ciphertextAndTag Is Nothing OrElse ciphertextAndTag.Length < TagLen Then
+                Throw New ArgumentException("ciphertext+tag is invalid.")
+            End If
+            Return Sodium.SecretAeadXChaCha20Poly1305.Decrypt(ciphertextAndTag, nonce, _key, aad)
         End Function
     End Class
 End Namespace

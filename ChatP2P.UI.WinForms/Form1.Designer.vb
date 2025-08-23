@@ -62,7 +62,7 @@ Partial Class Form1
         GroupBox1.Controls.Add(btnStartHost)
         GroupBox1.Controls.Add(txtLocalPort)
         GroupBox1.Controls.Add(Label1)
-        GroupBox1.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox1.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox1.ForeColor = Color.Lime
         GroupBox1.Location = New Point(12, 32)
         GroupBox1.Name = "GroupBox1"
@@ -90,6 +90,7 @@ Partial Class Form1
         ' btnStartHost
         ' 
         btnStartHost.BackColor = Color.Black
+        btnStartHost.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnStartHost.Location = New Point(249, 76)
         btnStartHost.Name = "btnStartHost"
         btnStartHost.Size = New Size(101, 34)
@@ -131,7 +132,7 @@ Partial Class Form1
         GroupBox2.Controls.Add(Label3)
         GroupBox2.Controls.Add(txtRemoteIp)
         GroupBox2.Controls.Add(Label2)
-        GroupBox2.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox2.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox2.ForeColor = Color.Lime
         GroupBox2.Location = New Point(397, 32)
         GroupBox2.Name = "GroupBox2"
@@ -143,9 +144,10 @@ Partial Class Form1
         ' btnConnect
         ' 
         btnConnect.BackColor = Color.Black
+        btnConnect.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnConnect.Location = New Point(349, 81)
         btnConnect.Name = "btnConnect"
-        btnConnect.Size = New Size(106, 34)
+        btnConnect.Size = New Size(106, 35)
         btnConnect.TabIndex = 4
         btnConnect.Text = "Connect"
         btnConnect.UseVisualStyleBackColor = False
@@ -198,7 +200,7 @@ Partial Class Form1
         GroupBox3.Controls.Add(btnSend)
         GroupBox3.Controls.Add(txtMessage)
         GroupBox3.Controls.Add(txtLog)
-        GroupBox3.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox3.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox3.ForeColor = Color.Lime
         GroupBox3.Location = New Point(12, 214)
         GroupBox3.Name = "GroupBox3"
@@ -210,6 +212,7 @@ Partial Class Form1
         ' btnChooseRecvFolder
         ' 
         btnChooseRecvFolder.BackColor = Color.Black
+        btnChooseRecvFolder.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnChooseRecvFolder.Location = New Point(625, 374)
         btnChooseRecvFolder.Name = "btnChooseRecvFolder"
         btnChooseRecvFolder.Size = New Size(119, 34)
@@ -229,6 +232,7 @@ Partial Class Form1
         ' btnSendFile
         ' 
         btnSendFile.BackColor = Color.Black
+        btnSendFile.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnSendFile.Location = New Point(625, 323)
         btnSendFile.Name = "btnSendFile"
         btnSendFile.Size = New Size(119, 34)
@@ -292,6 +296,7 @@ Partial Class Form1
         ' btnSend
         ' 
         btnSend.BackColor = Color.Black
+        btnSend.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnSend.Location = New Point(509, 325)
         btnSend.Name = "btnSend"
         btnSend.Size = New Size(86, 35)
@@ -320,7 +325,7 @@ Partial Class Form1
         ' 
         ' Form1
         ' 
-        AutoScaleDimensions = New SizeF(10.0F, 25.0F)
+        AutoScaleDimensions = New SizeF(10F, 25F)
         AutoScaleMode = AutoScaleMode.Font
         AutoSize = True
         BackColor = SystemColors.ActiveBorder

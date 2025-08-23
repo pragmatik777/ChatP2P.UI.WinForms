@@ -5,7 +5,8 @@ Imports System.Net.Sockets
 Imports System.IO
 Imports System.Text
 Imports System.Threading
-Imports ChatP2P.Core                    ' P2PManager, PeerDescriptor, IdentityBundle, INetworkStream
+Imports System.Security.Cryptography
+Imports ChatP2P.Core                    ' P2PManager, INetworkStream
 Imports ChatP2P.App                     ' RelayHub
 Imports ChatP2P.App.Protocol
 Imports Proto = ChatP2P.App.Protocol.Tags
@@ -19,20 +20,47 @@ Public Class Form1
         Public Received As Long
     End Class
 
-    ' État de réception par transfertId (tid)
-    Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)()
+    ' === Conteneur simple pour l'identité Ed25519 (évite les tuples) ===
+    Private Class Ed25519Identity
+        Public Pub As Byte()
+        Public Priv As Byte()
+    End Class
 
+    Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)()
     Private _cts As CancellationTokenSource
     Private _isHost As Boolean = False
 
-    Private _stream As INetworkStream         ' côté client (TcpNetworkStreamAdapter)
+    Private _stream As INetworkStream
     Private _displayName As String = "Me"
     Private _recvFolder As String = ""
     Private _hub As RelayHub
+
+    ' TabControl privé (si pas dans le Designer)
+    Private tabPrivates As TabControl
+
+    ' Si tu utilises des fenêtres privées
     Private ReadOnly _privateChats As New Dictionary(Of String, PrivateChatForm)()
 
     ' ===== Load / Settings =====
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        ' Crée un TabControl si besoin
+        If tabPrivates Is Nothing Then
+            tabPrivates = New TabControl() With {
+                .Name = "tabPrivates",
+                .Dock = DockStyle.Bottom,
+                .Height = 200
+            }
+            Controls.Add(tabPrivates)
+        End If
+
+        ' === Identité: générer/persister Ed25519 si besoin (AppData\ChatP2P\id_ed25519.bin) ===
+        Try
+            Dim id As Ed25519Identity = LoadOrCreateEd25519Identity()
+            ChatP2P.Core.P2PManager.SetIdentity(id.Pub, id.Priv)
+        Catch ex As Exception
+            Log("[ID] init failed: " & ex.Message)
+        End Try
+
         Try
             If Not String.IsNullOrWhiteSpace(My.Settings.DisplayName) Then txtName.Text = My.Settings.DisplayName
             If Not String.IsNullOrWhiteSpace(My.Settings.LocalPort) Then txtLocalPort.Text = My.Settings.LocalPort
@@ -65,14 +93,26 @@ Public Class Form1
                         End Function,
             localDisplayName:=_displayName
         )
-        ' Ouvre/foreground la fenêtre privée à la réception d’un message P2P
+
+        ' P2P events
         AddHandler P2PManager.OnP2PText, AddressOf OnP2PText_FromP2P
         AddHandler P2PManager.OnP2PState,
             Sub(peer As String, connected As Boolean)
                 Log($"[P2P] {peer}: " & If(connected, "connecté", "déconnecté"), verbose:=True)
             End Sub
 
-
+        ' Log identité vérifiée / échec
+        AddHandler P2PManager.OnPeerIdentityVerified,
+            Sub(peer As String, idpub As Byte(), ok As Boolean)
+                Try
+                    Using sha As SHA256 = SHA256.Create()
+                        Dim fp = BitConverter.ToString(sha.ComputeHash(idpub)).Replace("-", "").ToLowerInvariant()
+                        Log($"[ID] {peer}: " & If(ok, "OK", "FAIL") & " pub=" & Convert.ToBase64String(idpub) & " fp256=" & fp)
+                    End Using
+                Catch
+                    Log($"[ID] {peer}: " & If(ok, "OK", "FAIL"))
+                End Try
+            End Sub
     End Sub
 
     ' Reçoit un message DataChannel depuis P2PManager
@@ -83,24 +123,24 @@ Public Class Form1
             Return
         End If
 
-        ' Ouvre la fenêtre privée si nécessaire
-        EnsurePrivateChat(peer)
-
-        ' Ajoute le message dans l’historique
-        AppendToPrivate(peer, peer, text)
-
-        ' Amène la fenêtre au premier plan
-        Dim frm As PrivateChatForm = Nothing
-        If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
-            Try
-                If Not frm.Visible Then frm.Show(Me)
-                frm.Activate()
-                frm.BringToFront()
-            Catch
-            End Try
+        If _privateChats.Count > 0 Then
+            EnsurePrivateChat(peer)
+            AppendToPrivate(peer, peer, text)
+            Dim frm As PrivateChatForm = Nothing
+            If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+                Try
+                    If Not frm.Visible Then frm.Show(Me)
+                    frm.Activate()
+                    frm.BringToFront()
+                Catch
+                End Try
+            End If
+            Return
         End If
-    End Sub
 
+        EnsurePrivateTab(peer)
+        AppendToPrivateTab(peer, peer, text)
+    End Sub
 
     Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
         SaveSettings()
@@ -143,7 +183,13 @@ Public Class Form1
         Dim sel = TryCast(lstPeers.SelectedItem, String)
         If String.IsNullOrWhiteSpace(sel) Then Return
         If String.Equals(sel, _displayName, StringComparison.OrdinalIgnoreCase) Then Return
-        OpenPrivateChat(sel)
+
+        If _privateChats IsNot Nothing Then
+            OpenPrivateChat(sel)
+        Else
+            EnsurePrivateTab(sel)
+            tabPrivates.SelectedTab = tabPrivates.TabPages(sel)
+        End If
     End Sub
 
     ' ===== Host =====
@@ -162,8 +208,13 @@ Public Class Form1
         AddHandler _hub.PrivateArrived,
             Sub(senderName, dest, text)
                 If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
-                    EnsurePrivateChat(senderName)
-                    AppendToPrivate(senderName, senderName, text)
+                    If _privateChats.Count > 0 Then
+                        EnsurePrivateChat(senderName)
+                        AppendToPrivate(senderName, senderName, text)
+                    Else
+                        EnsurePrivateTab(senderName)
+                        AppendToPrivateTab(senderName, senderName, text)
+                    End If
                 End If
             End Sub
         AddHandler _hub.FileSignal, New RelayHub.FileSignalEventHandler(AddressOf OnHubFileSignal)
@@ -188,7 +239,6 @@ Public Class Form1
         Try
             _cts = New CancellationTokenSource()
 
-            ' === Connexion TCP directe au Hub ===
             Dim cli As New TcpClient()
             Await cli.ConnectAsync(ip, port)
             _stream = New TcpNetworkStreamAdapter(cli)
@@ -399,14 +449,19 @@ Public Class Form1
 
                 ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
                     Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
-                    Dim parts = rest.Split(":"c, 3) ' sender:dest:body
+                    Dim parts = rest.Split(":"c, 3)
                     If parts.Length = 3 Then
                         Dim fromPeer = parts(0)
                         Dim toPeer = parts(1)
                         Dim body = parts(2)
                         If String.Equals(toPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then
-                            EnsurePrivateChat(fromPeer)
-                            AppendToPrivate(fromPeer, fromPeer, body)
+                            If _privateChats.Count > 0 Then
+                                EnsurePrivateChat(fromPeer)
+                                AppendToPrivate(fromPeer, fromPeer, body)
+                            Else
+                                EnsurePrivateTab(fromPeer)
+                                AppendToPrivateTab(fromPeer, fromPeer, body)
+                            End If
                         End If
                     End If
 
@@ -416,19 +471,14 @@ Public Class Form1
                     HandleFileChunk(msg)
                 ElseIf msg.StartsWith(Proto.TAG_FILEEND) Then
                     HandleFileEnd(msg)
-                    ' --- AJOUT : router les signaux ICE reçus côté client ---
+
                 ElseIf msg.StartsWith(Proto.TAG_ICE_OFFER) _
-    OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER) _
-    OrElse msg.StartsWith(Proto.TAG_ICE_CAND) Then
+                    OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER) _
+                    OrElse msg.StartsWith(Proto.TAG_ICE_CAND) Then
 
-                    ' petit log utile côté client
                     Log("[ICE] signal reçu: " & msg.Substring(0, Math.Min(80, msg.Length)), verbose:=True)
-
-                    ' réutilise le parseur commun (celui qu’on branche côté host)
                     OnHubIceSignal(msg)
-
                 End If
-
             End While
         Catch ex As Exception
             Log($"Déconnecté: {ex.Message}")
@@ -471,7 +521,7 @@ Public Class Form1
         End Try
     End Sub
 
-    ' ===== Fenêtres privées =====
+    ' ===== Fenêtres privées (option) =====
     Private Sub OpenPrivateChat(peer As String)
         Dim frm As PrivateChatForm = Nothing
         If _privateChats.TryGetValue(peer, frm) Then
@@ -505,6 +555,28 @@ Public Class Form1
         End If
     End Sub
 
+    ' ===== Onglets privés via TabControl (si pas de PrivateChatForm) =====
+    Private Sub EnsurePrivateTab(peer As String)
+        If tabPrivates Is Nothing Then Return
+        If Not tabPrivates.TabPages.ContainsKey(peer) Then
+            Dim tp As New TabPage(peer) With {.Name = peer}
+            Dim tb As New TextBox() With {
+                .Multiline = True,
+                .Dock = DockStyle.Fill,
+                .ScrollBars = ScrollBars.Vertical,
+                .ReadOnly = True
+            }
+            tp.Controls.Add(tb)
+            tabPrivates.TabPages.Add(tp)
+        End If
+    End Sub
+
+    Private Sub AppendToPrivateTab(peer As String, fromPeer As String, body As String)
+        If tabPrivates Is Nothing Then Return
+        If Not tabPrivates.TabPages.ContainsKey(peer) Then Return
+        Dim tb = TryCast(tabPrivates.TabPages(peer).Controls(0), TextBox)
+        If tb IsNot Nothing Then tb.AppendText($"{fromPeer}: {body}{Environment.NewLine}")
+    End Sub
 
     Private Async Sub SendPrivateMessage(dest As String, text As String)
         If String.IsNullOrWhiteSpace(dest) OrElse String.IsNullOrWhiteSpace(text) Then Return
@@ -571,4 +643,28 @@ Public Class Form1
     Private Sub txtRemotePort_KeyDown(sender As Object, e As KeyEventArgs) Handles txtRemotePort.KeyDown
         If e.KeyCode = Keys.Enter Then e.SuppressKeyPress = True : e.Handled = True : SaveSettings()
     End Sub
+
+    ' === Persistence identité (AppData) ===
+    Private Function LoadOrCreateEd25519Identity() As Ed25519Identity
+        Dim dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P")
+        Dim pathFile = Path.Combine(dir, "id_ed25519.bin") ' format: [32 pub][64 priv] (96 bytes)
+
+        If System.IO.File.Exists(pathFile) Then
+            Dim all = System.IO.File.ReadAllBytes(pathFile)
+            If all IsNot Nothing AndAlso all.Length = 96 Then
+                Dim pub(31) As Byte, priv(63) As Byte
+                Buffer.BlockCopy(all, 0, pub, 0, 32)
+                Buffer.BlockCopy(all, 32, priv, 0, 64)
+                Return New Ed25519Identity With {.Pub = pub, .Priv = priv}
+            End If
+        End If
+
+        Directory.CreateDirectory(dir)
+        Dim kp = Sodium.PublicKeyAuth.GenerateKeyPair() ' pub=32, priv=64
+        Dim blob(95) As Byte
+        Buffer.BlockCopy(kp.PublicKey, 0, blob, 0, 32)
+        Buffer.BlockCopy(kp.PrivateKey, 0, blob, 32, 64)
+        System.IO.File.WriteAllBytes(pathFile, blob)
+        Return New Ed25519Identity With {.Pub = kp.PublicKey, .Priv = kp.PrivateKey}
+    End Function
 End Class
