@@ -202,9 +202,9 @@ Partial Class Form1
         GroupBox3.Controls.Add(txtLog)
         GroupBox3.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox3.ForeColor = Color.Lime
-        GroupBox3.Location = New Point(12, 214)
+        GroupBox3.Location = New Point(60, 208)
         GroupBox3.Name = "GroupBox3"
-        GroupBox3.Size = New Size(858, 498)
+        GroupBox3.Size = New Size(792, 498)
         GroupBox3.TabIndex = 2
         GroupBox3.TabStop = False
         GroupBox3.Text = "Messaging"
@@ -233,7 +233,7 @@ Partial Class Form1
         ' 
         btnSendFile.BackColor = Color.Black
         btnSendFile.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnSendFile.Location = New Point(625, 323)
+        btnSendFile.Location = New Point(625, 329)
         btnSendFile.Name = "btnSendFile"
         btnSendFile.Size = New Size(119, 34)
         btnSendFile.TabIndex = 6
@@ -272,7 +272,7 @@ Partial Class Form1
         lstPeers.ItemHeight = 28
         lstPeers.Location = New Point(625, 36)
         lstPeers.Name = "lstPeers"
-        lstPeers.Size = New Size(128, 256)
+        lstPeers.Size = New Size(128, 228)
         lstPeers.TabIndex = 5
         ' 
         ' Label4
@@ -297,9 +297,9 @@ Partial Class Form1
         ' 
         btnSend.BackColor = Color.Black
         btnSend.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnSend.Location = New Point(509, 325)
+        btnSend.Location = New Point(625, 284)
         btnSend.Name = "btnSend"
-        btnSend.Size = New Size(86, 35)
+        btnSend.Size = New Size(68, 35)
         btnSend.TabIndex = 2
         btnSend.Text = "Send"
         btnSend.UseVisualStyleBackColor = False
@@ -319,7 +319,7 @@ Partial Class Form1
         txtLog.ForeColor = Color.Lime
         txtLog.Location = New Point(23, 36)
         txtLog.Name = "txtLog"
-        txtLog.Size = New Size(587, 227)
+        txtLog.Size = New Size(572, 227)
         txtLog.TabIndex = 0
         txtLog.Text = ""
         ' 
@@ -330,8 +330,7 @@ Partial Class Form1
         AutoSize = True
         BackColor = SystemColors.ActiveBorder
         BackgroundImage = CType(resources.GetObject("$this.BackgroundImage"), Image)
-        BackgroundImageLayout = ImageLayout.Stretch
-        ClientSize = New Size(887, 861)
+        ClientSize = New Size(876, 747)
         Controls.Add(GroupBox3)
         Controls.Add(GroupBox2)
         Controls.Add(GroupBox1)
