@@ -631,22 +631,20 @@ Public Class Form1
         End Try
     End Sub
 
-
     ' ======== Texte P2P reçu ========
     Private Sub OnP2PText_FromP2P(peer As String, text As String)
         If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
             Me.BeginInvoke(Sub() OnP2PText_FromP2P(peer, text))
             Return
         End If
+
         Dim norm As String = Canon(text)
         If SeenRecently(peer, norm) Then Return
 
-        ' Ajoute un log explicite P2P
-        Log($"[P2P] {peer} → moi: {norm}")
-
         EnsurePrivateChat(peer)
-        AppendToPrivate(peer, peer, norm)
+        AppendToPrivate(peer, peer, "[P2P] " & norm) ' <= tag ici
     End Sub
+
 
     ' ======== Privé : helpers fenêtres ========
     Private Sub OpenPrivateChat(peer As String)
@@ -704,23 +702,27 @@ Public Class Form1
         End If
     End Sub
 
-    ' Form1.vb → SendPrivateMessage
     Private Async Sub SendPrivateMessage(dest As String, text As String)
         If String.IsNullOrWhiteSpace(dest) OrElse String.IsNullOrWhiteSpace(text) Then Return
+
         Dim canonText As String = Canon(text)
 
         Try
+            ' Tentative P2P directe
             If ChatP2P.Core.P2PManager.TrySendP2P(dest, canonText) Then
-                ' Marque clairement l’envoi P2P
+                ' Affichage UNE SEULE FOIS côté émetteur, avec le tag [P2P]
                 Log($"[P2P] moi → {dest}: {canonText}")
+                AppendToPrivate(dest, _displayName, "[P2P] " & canonText)
                 Exit Sub
             End If
         Catch
+            ' ignore et on retombe en relay
         End Try
 
-        ' Sinon fallback relais
+        ' --- Chemin relay ---
         Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{canonText}{MSG_TERM}"
         Dim data = Encoding.UTF8.GetBytes(payload)
+
         If _isHost Then
             If _hub Is Nothing Then Log("[Privé] Hub non initialisé.") : Return
             Await _hub.SendToAsync(dest, data)
@@ -728,7 +730,12 @@ Public Class Form1
             If _stream Is Nothing Then Log("[Privé] Non connecté au host.") : Return
             Await _stream.SendAsync(data, CancellationToken.None)
         End If
+
+        ' Affichage UNE SEULE FOIS côté émetteur, sans tag (puisque c'est relay)
+        AppendToPrivate(dest, _displayName, canonText)
     End Sub
+
+
 
 
     ' ======== Signaling vers Core (Init) ========

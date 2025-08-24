@@ -146,17 +146,17 @@ Public Class PrivateChatForm
         Dim msg = txtInput.Text.Trim()
         If msg = "" Then Return
 
-        ' Affiche localement d'abord
-        AppendMessage(_myName, msg)
+        ' On ne fait PLUS l’écho local ici.
+        ' On délègue à Form1 via _sendAction, qui décidera d’afficher [P2P] ou non.
         txtInput.Clear()
 
-        ' ⚠️ Envoi par défaut via le relais (pas de tentative P2P ici)
         Try
             _sendAction?.Invoke(msg)
         Catch ex As Exception
             MessageBox.Show("Envoi privé échoué: " & ex.Message, "Chat privé", MessageBoxButtons.OK, MessageBoxIcon.Warning)
         End Try
     End Sub
+
 
     ' Bouton pour déclencher la négociation ICE
     ' ... dans BtnP2P_Click
