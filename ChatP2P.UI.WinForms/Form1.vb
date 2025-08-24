@@ -70,6 +70,10 @@ Public Class Form1
         Return r.TrimEnd()
     End Function
 
+
+
+
+
     Private Function SeenRecently(peer As String, text As String) As Boolean
         Dim nowUtc = DateTime.UtcNow
         Dim list As List(Of (DateTime, String)) = Nothing
@@ -133,6 +137,16 @@ Public Class Form1
             Sub(peer As String, connected As Boolean)
                 _p2pConn(peer) = connected
                 If Not connected Then _cryptoActive(peer) = False
+
+                ' pousse l'état dans la fenêtre privée de CE peer si ouverte
+                Dim frm As PrivateChatForm = Nothing
+                If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+                    frm.SetP2PState(connected)
+                    frm.SetCryptoState(_cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer))
+                    frm.SetAuthState(_idVerified.ContainsKey(peer) AndAlso _idVerified(peer))
+                End If
+
+                ' met aussi à jour si ce peer est sélectionné dans la liste
                 UpdateSelectedPeerStatuses()
             End Sub
 
@@ -171,7 +185,7 @@ Public Class Form1
         End If
     End Sub
 
-    ' Met à jour les étiquettes d’état (auth/crypto) selon le peer sélectionné.
+    ' Met à jour l’état affiché dans la fenêtre privée si elle est OUVERTE.
     Private Sub UpdateSelectedPeerStatuses()
         If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
             Me.BeginInvoke(New MethodInvoker(AddressOf UpdateSelectedPeerStatuses))
@@ -179,28 +193,23 @@ Public Class Form1
         End If
 
         If lstPeers Is Nothing OrElse lstPeers.SelectedItem Is Nothing Then
-            If lblAuthStatus IsNot Nothing Then lblAuthStatus.Text = "Auth: —"
-            If lblCryptoStatus IsNot Nothing Then lblCryptoStatus.Text = "Crypto: —"
-            Return
+            Return ' plus de labels dans Form1
         End If
 
         Dim peer As String = CStr(lstPeers.SelectedItem)
 
-        Dim p2p As Boolean = False
-        If _p2pConn.ContainsKey(peer) Then p2p = _p2pConn(peer)
+        Dim frm As PrivateChatForm = Nothing
+        If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+            Dim authOk As Boolean = _idVerified.ContainsKey(peer) AndAlso _idVerified(peer)
+            Dim cryptoActive As Boolean = _cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer)
+            Dim connected As Boolean = _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer)
 
-        Dim cry As Boolean = False
-        If _cryptoActive.ContainsKey(peer) Then cry = _cryptoActive(peer)
-
-        If lblAuthStatus IsNot Nothing Then
-            lblAuthStatus.Text = "Auth: —"
-        End If
-
-        If lblCryptoStatus IsNot Nothing Then
-            Dim cryptoText As String = If(cry AndAlso p2p, "ON", If(p2p, "P2P", "OFF"))
-            lblCryptoStatus.Text = "Crypto: " & cryptoText
+            frm.SetAuthState(authOk)
+            frm.SetCryptoState(cryptoActive)
+            frm.SetP2PState(connected)
         End If
     End Sub
+
 
     Private Sub UpdatePeers(peers As List(Of String))
         If lstPeers Is Nothing Then Return
@@ -208,7 +217,6 @@ Public Class Form1
             lstPeers.BeginInvoke(Sub() UpdatePeers(peers))
             Return
         End If
-        ' nettoie & déduplique
         Dim cleaned = peers.
             Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
             Select(Function(p) p.Trim()).
@@ -669,6 +677,15 @@ Public Class Form1
 
         frm = New PrivateChatForm(_displayName, peer, sendCb)
         _privateChats(peer) = frm
+
+        ' ➜ pousse l'état courant dès l'ouverture
+        Dim authOk As Boolean = _idVerified.ContainsKey(peer) AndAlso _idVerified(peer)
+        Dim cryptoActive As Boolean = _cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer)
+        Dim connected As Boolean = _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer)
+        frm.SetAuthState(authOk)
+        frm.SetCryptoState(cryptoActive)
+        frm.SetP2PState(connected)
+
         frm.Show(Me)
         frm.Activate()
         frm.BringToFront()
@@ -734,9 +751,6 @@ Public Class Form1
         ' Affichage UNE SEULE FOIS côté émetteur, sans tag (puisque c'est relay)
         AppendToPrivate(dest, _displayName, canonText)
     End Sub
-
-
-
 
     ' ======== Signaling vers Core (Init) ========
     Private Sub InitP2PManager()
