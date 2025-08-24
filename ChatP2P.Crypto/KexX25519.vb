@@ -1,37 +1,42 @@
-' ChatP2P.Crypto/KexX25519.vb
+ï»¿' ChatP2P.Crypto/KexX25519.vb
 Option Strict On
-Imports System
 Imports Sodium
 
 Namespace ChatP2P.Crypto
-    ''' <summary>ECDH X25519 (ScalarMult) – secret partagé = 32 octets.</summary>
+    ''' <summary>
+    ''' Wrapper minimal X25519 pour KEX (Curve25519) via libsodium.
+    ''' Fournit les mÃ©thodes recherchÃ©es par rÃ©flexion :
+    ''' - GenerateKeyPair()
+    ''' - GetPublic(priv)
+    ''' - SharedSecret(priv, peerPub)
+    ''' </summary>
     Public NotInheritable Class KexX25519
-        Implements IKeyAgreement
 
-        Private ReadOnly _sk As Byte()   ' 32
-        Private ReadOnly _pk As Byte()   ' 32
-
-        Public Sub New()
-            ' Clé privée 32o random (libsodium côté ScalarMult)
-            _sk = SodiumCore.GetRandomBytes(32)
-            _pk = ScalarMult.Base(_sk)
-        End Sub
-
-        Public Sub New(privateKey32 As Byte())
-            If privateKey32 Is Nothing OrElse privateKey32.Length <> 32 Then Throw New ArgumentException("Clé privée X25519 invalide (32 octets).", NameOf(privateKey32))
-            _sk = CType(privateKey32.Clone(), Byte())
-            _pk = ScalarMult.Base(_sk)
-        End Sub
-
-        Public ReadOnly Property PublicKey As Byte() Implements IKeyAgreement.PublicKey
-            Get
-                Return CType(_pk.Clone(), Byte())
-            End Get
-        End Property
-
-        Public Function DeriveSharedSecret(peerPublic As Byte()) As Byte() Implements IKeyAgreement.DeriveSharedSecret
-            If peerPublic Is Nothing OrElse peerPublic.Length <> 32 Then Throw New ArgumentException("Clé publique X25519 invalide (32 octets).", NameOf(peerPublic))
-            Return ScalarMult.Mult(_sk, peerPublic) ' 32 bytes
+        ''' <summary>
+        ''' GÃ©nÃ¨re une paire X25519 (Curve25519) : pub(32), priv(32).
+        ''' Utilise PublicKeyBox (keys Curve25519).
+        ''' </summary>
+        Public Shared Function GenerateKeyPair() As (pub As Byte(), priv As Byte())
+            Dim kp = PublicKeyBox.GenerateKeyPair() ' Curve25519 (X25519)
+            Return (kp.PublicKey, kp.PrivateKey)
         End Function
+
+        ''' <summary>
+        ''' Calcule la clÃ© publique Ã  partir de la clÃ© privÃ©e X25519 (32).
+        ''' </summary>
+        Public Shared Function GetPublic(ByVal priv As Byte()) As Byte()
+            If priv Is Nothing OrElse priv.Length <> 32 Then Throw New ArgumentException("X25519 priv must be 32 bytes.")
+            Return ScalarMult.Base(priv) ' X25519 scalar * basepoint
+        End Function
+
+        ''' <summary>
+        ''' Secret partagÃ© X25519 : scalar-mult(priv, peerPub) â†’ 32 bytes.
+        ''' </summary>
+        Public Shared Function SharedSecret(ByVal priv As Byte(), ByVal peerPub As Byte()) As Byte()
+            If priv Is Nothing OrElse priv.Length <> 32 Then Throw New ArgumentException("X25519 priv must be 32 bytes.")
+            If peerPub Is Nothing OrElse peerPub.Length <> 32 Then Throw New ArgumentException("X25519 peer pub must be 32 bytes.")
+            Return ScalarMult.Mult(priv, peerPub)
+        End Function
+
     End Class
 End Namespace

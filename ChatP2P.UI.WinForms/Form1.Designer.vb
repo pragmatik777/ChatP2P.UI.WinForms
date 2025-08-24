@@ -37,6 +37,7 @@ Partial Class Form1
         txtRemoteIp = New TextBox()
         Label2 = New Label()
         GroupBox3 = New GroupBox()
+        btnSecurity = New Button()
         btnChooseRecvFolder = New Button()
         lblRecvProgress = New Label()
         btnSendFile = New Button()
@@ -49,6 +50,8 @@ Partial Class Form1
         btnSend = New Button()
         txtMessage = New TextBox()
         txtLog = New RichTextBox()
+        lblCryptoStatus = New Label()
+        lblAuthStatus = New Label()
         GroupBox1.SuspendLayout()
         GroupBox2.SuspendLayout()
         GroupBox3.SuspendLayout()
@@ -62,7 +65,7 @@ Partial Class Form1
         GroupBox1.Controls.Add(btnStartHost)
         GroupBox1.Controls.Add(txtLocalPort)
         GroupBox1.Controls.Add(Label1)
-        GroupBox1.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox1.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox1.ForeColor = Color.Lime
         GroupBox1.Location = New Point(12, 32)
         GroupBox1.Name = "GroupBox1"
@@ -90,7 +93,7 @@ Partial Class Form1
         ' btnStartHost
         ' 
         btnStartHost.BackColor = Color.Black
-        btnStartHost.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        btnStartHost.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnStartHost.Location = New Point(249, 76)
         btnStartHost.Name = "btnStartHost"
         btnStartHost.Size = New Size(101, 34)
@@ -132,7 +135,7 @@ Partial Class Form1
         GroupBox2.Controls.Add(Label3)
         GroupBox2.Controls.Add(txtRemoteIp)
         GroupBox2.Controls.Add(Label2)
-        GroupBox2.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox2.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox2.ForeColor = Color.Lime
         GroupBox2.Location = New Point(397, 32)
         GroupBox2.Name = "GroupBox2"
@@ -144,7 +147,7 @@ Partial Class Form1
         ' btnConnect
         ' 
         btnConnect.BackColor = Color.Black
-        btnConnect.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        btnConnect.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnConnect.Location = New Point(349, 81)
         btnConnect.Name = "btnConnect"
         btnConnect.Size = New Size(106, 35)
@@ -187,6 +190,7 @@ Partial Class Form1
         ' GroupBox3
         ' 
         GroupBox3.BackColor = Color.Transparent
+        GroupBox3.Controls.Add(btnSecurity)
         GroupBox3.Controls.Add(chkVerbose)
         GroupBox3.Controls.Add(btnChooseRecvFolder)
         GroupBox3.Controls.Add(lblRecvProgress)
@@ -200,7 +204,7 @@ Partial Class Form1
         GroupBox3.Controls.Add(btnSend)
         GroupBox3.Controls.Add(txtMessage)
         GroupBox3.Controls.Add(txtLog)
-        GroupBox3.Font = New Font("Segoe UI", 10F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        GroupBox3.Font = New Font("Segoe UI", 10.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         GroupBox3.ForeColor = Color.Lime
         GroupBox3.Location = New Point(60, 208)
         GroupBox3.Name = "GroupBox3"
@@ -209,10 +213,20 @@ Partial Class Form1
         GroupBox3.TabStop = False
         GroupBox3.Text = "Messaging"
         ' 
+        ' btnSecurity
+        ' 
+        btnSecurity.BackColor = Color.Black
+        btnSecurity.Location = New Point(461, 348)
+        btnSecurity.Name = "btnSecurity"
+        btnSecurity.Size = New Size(112, 34)
+        btnSecurity.TabIndex = 9
+        btnSecurity.Text = "Security"
+        btnSecurity.UseVisualStyleBackColor = False
+        ' 
         ' btnChooseRecvFolder
         ' 
         btnChooseRecvFolder.BackColor = Color.Black
-        btnChooseRecvFolder.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        btnChooseRecvFolder.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnChooseRecvFolder.Location = New Point(625, 374)
         btnChooseRecvFolder.Name = "btnChooseRecvFolder"
         btnChooseRecvFolder.Size = New Size(119, 34)
@@ -232,7 +246,7 @@ Partial Class Form1
         ' btnSendFile
         ' 
         btnSendFile.BackColor = Color.Black
-        btnSendFile.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        btnSendFile.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnSendFile.Location = New Point(625, 329)
         btnSendFile.Name = "btnSendFile"
         btnSendFile.Size = New Size(119, 34)
@@ -296,7 +310,7 @@ Partial Class Form1
         ' btnSend
         ' 
         btnSend.BackColor = Color.Black
-        btnSend.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        btnSend.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
         btnSend.Location = New Point(625, 284)
         btnSend.Name = "btnSend"
         btnSend.Size = New Size(68, 35)
@@ -323,14 +337,34 @@ Partial Class Form1
         txtLog.TabIndex = 0
         txtLog.Text = ""
         ' 
+        ' lblCryptoStatus
+        ' 
+        lblCryptoStatus.AutoSize = True
+        lblCryptoStatus.Location = New Point(31, 712)
+        lblCryptoStatus.Name = "lblCryptoStatus"
+        lblCryptoStatus.Size = New Size(63, 25)
+        lblCryptoStatus.TabIndex = 3
+        lblCryptoStatus.Text = "Label6"
+        ' 
+        ' lblAuthStatus
+        ' 
+        lblAuthStatus.AutoSize = True
+        lblAuthStatus.Location = New Point(140, 712)
+        lblAuthStatus.Name = "lblAuthStatus"
+        lblAuthStatus.Size = New Size(63, 25)
+        lblAuthStatus.TabIndex = 4
+        lblAuthStatus.Text = "Label7"
+        ' 
         ' Form1
         ' 
-        AutoScaleDimensions = New SizeF(10F, 25F)
+        AutoScaleDimensions = New SizeF(10.0F, 25.0F)
         AutoScaleMode = AutoScaleMode.Font
         AutoSize = True
         BackColor = SystemColors.ActiveBorder
         BackgroundImage = CType(resources.GetObject("$this.BackgroundImage"), Image)
-        ClientSize = New Size(876, 747)
+        ClientSize = New Size(876, 746)
+        Controls.Add(lblAuthStatus)
+        Controls.Add(lblCryptoStatus)
         Controls.Add(GroupBox3)
         Controls.Add(GroupBox2)
         Controls.Add(GroupBox1)
@@ -343,6 +377,7 @@ Partial Class Form1
         GroupBox3.ResumeLayout(False)
         GroupBox3.PerformLayout()
         ResumeLayout(False)
+        PerformLayout()
     End Sub
 
     Friend WithEvents GroupBox1 As GroupBox
@@ -371,5 +406,8 @@ Partial Class Form1
     Friend WithEvents lblRecvProgress As Label
     Friend WithEvents btnChooseRecvFolder As Button
     Friend WithEvents chkVerbose As CheckBox
+    Friend WithEvents btnSecurity As Button
+    Friend WithEvents lblCryptoStatus As Label
+    Friend WithEvents lblAuthStatus As Label
 
 End Class

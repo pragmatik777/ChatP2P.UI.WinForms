@@ -1,67 +1,115 @@
 ﻿' ChatP2P.UI.WinForms/Form1.vb
 Option Strict On
+Imports System
+Imports System.IO
 Imports System.Net
 Imports System.Net.Sockets
-Imports System.IO
 Imports System.Text
 Imports System.Threading
+Imports System.Globalization
 Imports System.Security.Cryptography
-Imports ChatP2P.Core                    ' P2PManager, SignalDescriptor, INetworkStream
-Imports ChatP2P.App                     ' RelayHub
+Imports ChatP2P.Core                 ' P2PManager
+Imports ChatP2P.App                  ' RelayHub
 Imports ChatP2P.App.Protocol
 Imports Proto = ChatP2P.App.Protocol.Tags
 
 Public Class Form1
 
-    ' === Réception fichiers (tous rôles) ===
+    ' ========== Const ==========
+    Private Const MSG_TERM As String = vbLf   ' délimiteur de messages TCP
+
+    ' ======== Types internes ========
     Private Class FileRecvState
         Public File As FileStream
-        Public FileName As String
+        Public FileName As String = ""
         Public Expected As Long
         Public Received As Long
+        Public LastTickUtc As DateTime
     End Class
 
-    Private Class Ed25519Identity
-        Public Pub As Byte()
-        Public Priv As Byte()
-    End Class
-
-    ' État de réception par transfertId (tid)
-    Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)()
-
+    ' ======== Champs UI/état ========
     Private _cts As CancellationTokenSource
     Private _isHost As Boolean = False
 
-    Private _stream As INetworkStream         ' côté client (TcpNetworkStreamAdapter)
+    Private _stream As INetworkStream ' côté client (TcpNetworkStreamAdapter)
     Private _displayName As String = "Me"
     Private _recvFolder As String = ""
     Private _hub As RelayHub
-    Private ReadOnly _privateChats As New Dictionary(Of String, PrivateChatForm)()
 
-    ' ===== Load / Settings =====
+    ' P2P/crypto/identité (affichage simple)
+    Private ReadOnly _idVerified As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _peerFp As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _p2pConn As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _cryptoActive As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
+
+    ' Chats privés par fenêtre
+    Private ReadOnly _privateChats As New Dictionary(Of String, PrivateChatForm)(StringComparer.OrdinalIgnoreCase)
+
+    ' Réception fichiers en cours
+    Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)(StringComparer.Ordinal)
+    Private _fileWatchdog As System.Windows.Forms.Timer
+
+    ' Fichier identité Ed25519 (persistant)
+    Private ReadOnly _idFilePath As String =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                     "ChatP2P", "identity.bin")
+
+    ' Buffer accumulateur pour découpe des messages réseau (client)
+    Private ReadOnly _cliBuf As New StringBuilder()
+
+    ' Anti‑doublons P2P: fenêtre 2s des derniers messages normalisés par pair
+    Private ReadOnly _recentP2P As New Dictionary(Of String, List(Of (DateTime, String)))(StringComparer.OrdinalIgnoreCase)
+
+    ' ========== Utils anti‑doublons / normalisation ==========
+    Private Function Canon(ByVal s As String) As String
+        If s Is Nothing Then Return String.Empty
+        Dim r As String = s.Replace(vbCr, "")
+        Do While r.EndsWith(vbLf, StringComparison.Ordinal)
+            r = r.Substring(0, r.Length - 1)
+        Loop
+        Return r.TrimEnd()
+    End Function
+
+    Private Function SeenRecently(peer As String, text As String) As Boolean
+        Dim nowUtc = DateTime.UtcNow
+        Dim list As List(Of (DateTime, String)) = Nothing
+        If Not _recentP2P.TryGetValue(peer, list) OrElse list Is Nothing Then
+            list = New List(Of (DateTime, String))()
+            _recentP2P(peer) = list
+        End If
+
+        ' purge > 2s
+        list.RemoveAll(Function(it) (nowUtc - it.Item1).TotalSeconds > 2.0)
+
+        Dim token = If(text, String.Empty)
+        If token.Length > 256 Then token = token.Substring(0, 256) & "#" & text.Length.ToString()
+
+        If list.Any(Function(it) it.Item2 = token) Then Return True
+        list.Add((nowUtc, token))
+        If list.Count > 20 Then list.RemoveAt(0)
+        Return False
+    End Function
+
+    ' ======== Form Load / Settings ========
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         ' Identité locale Ed25519 persistée (pub=32, priv=64)
         Try
             Dim id = LoadOrCreateEd25519Identity()
-            P2PManager.SetIdentity(id.Pub, id.Priv)
+            ' si tu as encore ces API côté core, décommente:
+            ' P2PManager.SetIdentity(id.Pub, id.Priv)
+            ' P2PManager.SetIdentityInfo(id.Pub)
         Catch ex As Exception
             Log("[ID] init failed: " & ex.Message)
         End Try
 
-        ' === Clé X25519 statique (requis par le signaling sécurisé)
+        ' Clé X25519 statique (facultatif selon ton core)
         Try
-            Dim kp = GenerateX25519KeyPairSodium()
-            P2PManager.InitializeCrypto(kp.priv, kp.pub)
-        Catch ex1 As Exception
-            ' Fallback éventuel si tu ajoutes plus tard un type KexX25519 dans ChatP2P.Crypto
-            Try
-                Dim kp2 = GenerateX25519KeyPairReflect()
-                P2PManager.InitializeCrypto(kp2.priv, kp2.pub)
-            Catch ex2 As Exception
-                Log("[KX] init failed: " & ex1.Message & " / reflect: " & ex2.Message)
-            End Try
+            Dim kp = ChatP2P.Crypto.KexX25519.GenerateKeyPair()
+            ' P2PManager.InitializeCrypto(kp.priv, kp.pub)
+        Catch
         End Try
 
+        ' Charger préférences UI
         Try
             If Not String.IsNullOrWhiteSpace(My.Settings.DisplayName) Then txtName.Text = My.Settings.DisplayName
             If Not String.IsNullOrWhiteSpace(My.Settings.LocalPort) Then txtLocalPort.Text = My.Settings.LocalPort
@@ -75,138 +123,26 @@ Public Class Form1
         _displayName = If(String.IsNullOrWhiteSpace(txtName.Text), "Me", txtName.Text.Trim())
 
         AddHandler lstPeers.DoubleClick, AddressOf lstPeers_DoubleClick
+        AddHandler lstPeers.SelectedIndexChanged, Sub() UpdateSelectedPeerStatuses()
 
-        ' Init P2PManager (routing signaling ICE sécurisé)
+        ' Init P2PManager (routing signaling ICE)
         InitP2PManager()
 
-        ' Log identité vérifiée
-        AddHandler P2PManager.OnPeerIdentityVerified,
-            Sub(peer As String, idpub As Byte(), ok As Boolean)
-                Try
-                    Using sha As SHA256 = SHA256.Create()
-                        Dim fp = BitConverter.ToString(sha.ComputeHash(idpub)).Replace("-", "").ToLowerInvariant()
-                        Log($"[ID] {peer}: " & If(ok, "OK", "FAIL") & " fp256=" & fp)
-                    End Using
-                Catch
-                    Log($"[ID] {peer}: " & If(ok, "OK", "FAIL"))
-                End Try
-            End Sub
-
-        ' Ouvre/foreground la fenêtre privée à la réception d’un message P2P
-        AddHandler P2PManager.OnP2PText, AddressOf OnP2PText_FromP2P
+        ' Suivi des évènements Core pour MAJ état
         AddHandler P2PManager.OnP2PState,
             Sub(peer As String, connected As Boolean)
-                Log($"[P2P] {peer}: " & If(connected, "connecté", "déconnecté"), verbose:=True)
+                _p2pConn(peer) = connected
+                If Not connected Then _cryptoActive(peer) = False
+                UpdateSelectedPeerStatuses()
             End Sub
-    End Sub
 
-    ' Factorise l’initialisation P2PManager avec le sendSignal enrichi K/I/S
-    Private Sub InitP2PManager()
-        P2PManager.Init(
-            sendSignal:=Function(dest As String, line As String)
-                            ' Si ce n’est pas une ligne ICE, envoie tel quel
-                            If Not (line.StartsWith(Proto.TAG_ICE_OFFER) OrElse line.StartsWith(Proto.TAG_ICE_ANSWER) OrElse line.StartsWith(Proto.TAG_ICE_CAND)) Then
-                                Return SendRawSignal(dest, line)
-                            End If
+        AddHandler P2PManager.OnP2PText, AddressOf OnP2PText_FromP2P
 
-                            ' 1) Construire SignalDescriptor (peer = dest) et tagger OFFER/ANSWER/CAND
-                            Dim kind As String, fromPeer As String, toPeer As String, b64 As String
-                            If Not TryParseIceHead(line, kind, fromPeer, toPeer, b64) Then
-                                Return SendRawSignal(dest, line) ' fallback
-                            End If
-                            Dim sig As New ChatP2P.Core.SignalDescriptor(dest)
-                            Select Case kind
-                                Case "OFFER" : sig.Tags("OFFER") = b64
-                                Case "ANSWER" : sig.Tags("ANSWER") = b64
-                                Case "CAND" : sig.Tags("CAND") = b64
-                            End Select
-
-                            ' 2) Enrichir via Core (PFS + Identité)
-                            P2PManager.HandleOutgoingSignalSecure(sig)
-
-                            ' 3) Reconstituer la ligne ICE avec segments K/I/S optionnels
-                            Dim lineOut = BuildIceLine(kind, fromPeer, toPeer, b64, sig)
-
-                            ' 4) Envoyer via hub/stream
-                            Return SendRawSignal(dest, lineOut)
-                        End Function,
-            localDisplayName:=_displayName
-        )
-    End Sub
-
-    Private Function SendRawSignal(dest As String, line As String) As Task
-        Dim bytes = Encoding.UTF8.GetBytes(line)
-        If _isHost Then
-            If _hub IsNot Nothing Then Return _hub.SendToAsync(dest, bytes)
-            Return Task.CompletedTask
-        Else
-            If _stream IsNot Nothing Then Return _stream.SendAsync(bytes, CancellationToken.None)
-            Return Task.CompletedTask
-        End If
-    End Function
-
-    ' ---------- Helpers sérialisation ICE sécurisée ----------
-    Private Function TryParseIceHead(line As String, ByRef kind As String, ByRef fromPeer As String, ByRef toPeer As String, ByRef b64 As String) As Boolean
-        kind = "" : fromPeer = "" : toPeer = "" : b64 = ""
-        Dim tag As String = Nothing
-        If line.StartsWith(Proto.TAG_ICE_OFFER) Then tag = Proto.TAG_ICE_OFFER : kind = "OFFER"
-        If line.StartsWith(Proto.TAG_ICE_ANSWER) Then tag = Proto.TAG_ICE_ANSWER : kind = "ANSWER"
-        If line.StartsWith(Proto.TAG_ICE_CAND) Then tag = Proto.TAG_ICE_CAND : kind = "CAND"
-        If tag Is Nothing Then Return False
-        Dim body = line.Substring(tag.Length)
-        Dim p = body.Split(":"c)
-        If p.Length < 3 Then Return False
-        fromPeer = p(0) : toPeer = p(1) : b64 = p(2)
-        Return True
-    End Function
-
-    Private Function BuildIceLine(kind As String, fromPeer As String, toPeer As String, b64 As String, sig As ChatP2P.Core.SignalDescriptor) As String
-        Dim head As String = If(kind = "OFFER", Proto.TAG_ICE_OFFER, If(kind = "ANSWER", Proto.TAG_ICE_ANSWER, Proto.TAG_ICE_CAND))
-        Dim line = New StringBuilder()
-        line.Append(head).Append(fromPeer).Append(":").Append(toPeer).Append(":").Append(b64)
-        If sig IsNot Nothing AndAlso sig.Tags IsNot Nothing Then
-            Dim val As String = Nothing
-            If sig.Tags.TryGetValue("KX_PUB", val) Then line.Append(":K=").Append(val)
-            If sig.Tags.TryGetValue("ID_PUB", val) Then line.Append(":I=").Append(val)
-            If sig.Tags.TryGetValue("ID_SIG", val) Then line.Append(":S=").Append(val)
-        End If
-        Return line.ToString()
-    End Function
-
-    Private Function ExtractSecureSegmentsToSig(line As String, ByRef sig As ChatP2P.Core.SignalDescriptor) As Boolean
-        Dim parts = line.Split(":"c)
-        If parts.Length < 4 Then Return False
-        Dim toPeer = parts(2)
-        sig = New ChatP2P.Core.SignalDescriptor(toPeer)
-        For i = 4 To parts.Length - 1
-            If parts(i).StartsWith("K=") Then sig.Tags("KX_PUB") = parts(i).Substring(2)
-            If parts(i).StartsWith("I=") Then sig.Tags("ID_PUB") = parts(i).Substring(2)
-            If parts(i).StartsWith("S=") Then sig.Tags("ID_SIG") = parts(i).Substring(2)
-        Next
-        Return sig.Tags.Count > 0
-    End Function
-    ' --------------------------------------------------------
-
-    ' Reçoit un message DataChannel depuis P2PManager (ouvre/maj la fenêtre privée)
-    Private Sub OnP2PText_FromP2P(peer As String, text As String)
-        If Me.IsDisposed Then Return
-        If Me.InvokeRequired Then
-            Me.BeginInvoke(Sub() OnP2PText_FromP2P(peer, text))
-            Return
-        End If
-
-        EnsurePrivateChat(peer)
-        AppendToPrivate(peer, peer, text)
-
-        Dim frm As PrivateChatForm = Nothing
-        If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
-            Try
-                If Not frm.Visible Then frm.Show(Me)
-                frm.Activate()
-                frm.BringToFront()
-            Catch
-            End Try
-        End If
+        ' --- Watchdog réceptions fichiers ---
+        _fileWatchdog = New System.Windows.Forms.Timer()
+        _fileWatchdog.Interval = 1500
+        AddHandler _fileWatchdog.Tick, AddressOf FileWatchdog_Tick
+        _fileWatchdog.Start()
     End Sub
 
     Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
@@ -225,42 +161,73 @@ Public Class Form1
         End Try
     End Sub
 
-    ' ===== UI helpers =====
+    ' ======== UI helpers ========
     Private Sub Log(s As String, Optional verbose As Boolean = False)
         If verbose AndAlso Not chkVerbose.Checked Then Return
-        If txtLog.InvokeRequired Then
-            txtLog.Invoke(Sub() txtLog.AppendText(s & Environment.NewLine))
-        Else
+        If txtLog IsNot Nothing AndAlso txtLog.IsHandleCreated AndAlso txtLog.InvokeRequired Then
+            txtLog.BeginInvoke(Sub() txtLog.AppendText(s & Environment.NewLine))
+        ElseIf txtLog IsNot Nothing Then
             txtLog.AppendText(s & Environment.NewLine)
         End If
     End Sub
 
-    Private Sub UpdatePeers(peers As List(Of String))
-        If lstPeers.InvokeRequired Then
-            lstPeers.Invoke(Sub() UpdatePeers(peers))
-        Else
-            lstPeers.Items.Clear()
-            For Each p In peers
-                If Not String.IsNullOrWhiteSpace(p) Then lstPeers.Items.Add(p)
-            Next
+    ' Met à jour les étiquettes d’état (auth/crypto) selon le peer sélectionné.
+    Private Sub UpdateSelectedPeerStatuses()
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(New MethodInvoker(AddressOf UpdateSelectedPeerStatuses))
+            Return
         End If
+
+        If lstPeers Is Nothing OrElse lstPeers.SelectedItem Is Nothing Then
+            If lblAuthStatus IsNot Nothing Then lblAuthStatus.Text = "Auth: —"
+            If lblCryptoStatus IsNot Nothing Then lblCryptoStatus.Text = "Crypto: —"
+            Return
+        End If
+
+        Dim peer As String = CStr(lstPeers.SelectedItem)
+
+        Dim p2p As Boolean = False
+        If _p2pConn.ContainsKey(peer) Then p2p = _p2pConn(peer)
+
+        Dim cry As Boolean = False
+        If _cryptoActive.ContainsKey(peer) Then cry = _cryptoActive(peer)
+
+        If lblAuthStatus IsNot Nothing Then
+            lblAuthStatus.Text = "Auth: —"
+        End If
+
+        If lblCryptoStatus IsNot Nothing Then
+            Dim cryptoText As String = If(cry AndAlso p2p, "ON", If(p2p, "P2P", "OFF"))
+            lblCryptoStatus.Text = "Crypto: " & cryptoText
+        End If
+    End Sub
+
+    Private Sub UpdatePeers(peers As List(Of String))
+        If lstPeers Is Nothing Then Return
+        If lstPeers.IsHandleCreated AndAlso lstPeers.InvokeRequired Then
+            lstPeers.BeginInvoke(Sub() UpdatePeers(peers))
+            Return
+        End If
+        ' nettoie & déduplique
+        Dim cleaned = peers.
+            Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+            Select(Function(p) p.Trim()).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+        lstPeers.Items.Clear()
+        For Each p In cleaned
+            lstPeers.Items.Add(p)
+        Next
     End Sub
 
     Private Sub lstPeers_DoubleClick(sender As Object, e As EventArgs)
         Dim sel = TryCast(lstPeers.SelectedItem, String)
         If String.IsNullOrWhiteSpace(sel) Then Return
         If String.Equals(sel, _displayName, StringComparison.OrdinalIgnoreCase) Then Return
-
-        ' === Prépare une clé X25519 éphémère pour ce peer (PFS) ===
-        Try
-            P2PManager.PrepareEphemeral(sel)
-        Catch
-        End Try
-
         OpenPrivateChat(sel)
     End Sub
 
-    ' ===== Host =====
+    ' ======== Host ========
     Private Sub btnStartHost_Click(sender As Object, e As EventArgs) Handles btnStartHost.Click
         Dim port As Integer
         If Not Integer.TryParse(txtLocalPort.Text, port) Then Log("Port invalide.") : Return
@@ -281,13 +248,13 @@ Public Class Form1
                 End If
             End Sub
         AddHandler _hub.FileSignal, New RelayHub.FileSignalEventHandler(AddressOf OnHubFileSignal)
-        AddHandler _hub.IceSignal, New RelayHub.IceSignalEventHandler(AddressOf OnHubIceSignal)
 
         _hub.Start()
+
         Log($"Hub en écoute sur {port} (host='{_displayName}').")
     End Sub
 
-    ' ===== Client =====
+    ' ======== Client ========
     Private Async Sub btnConnect_Click(sender As Object, e As EventArgs) Handles btnConnect.Click
         Dim ip As IPAddress
         If Not IPAddress.TryParse(txtRemoteIp.Text, ip) Then Log("IP invalide.") : Return
@@ -302,13 +269,12 @@ Public Class Form1
         Try
             _cts = New CancellationTokenSource()
 
-            ' === Connexion TCP directe au Hub ===
             Dim cli As New TcpClient()
             Await cli.ConnectAsync(ip, port)
             _stream = New TcpNetworkStreamAdapter(cli)
 
             Log($"Connecté au hub {ip}:{port}")
-            Await _stream.SendAsync(Encoding.UTF8.GetBytes(Proto.TAG_NAME & _displayName), CancellationToken.None)
+            Await _stream.SendAsync(Encoding.UTF8.GetBytes(Proto.TAG_NAME & _displayName & MSG_TERM), CancellationToken.None)
 
             ListenIncomingClient(_stream, _cts.Token)
         Catch ex As Exception
@@ -316,12 +282,12 @@ Public Class Form1
         End Try
     End Sub
 
-    ' ===== Envoi chat général =====
+    ' ======== Envoi chat général (relay) ========
     Private Async Sub btnSend_Click(sender As Object, e As EventArgs) Handles btnSend.Click
         Dim msg = txtMessage.Text.Trim()
         If msg = "" Then Return
 
-        Dim payload = $"{Proto.TAG_MSG}{_displayName}:{msg}"
+        Dim payload = $"{Proto.TAG_MSG}{_displayName}:{msg}{MSG_TERM}"
         Dim data = Encoding.UTF8.GetBytes(payload)
 
         If _isHost Then
@@ -336,7 +302,7 @@ Public Class Form1
         txtMessage.Clear()
     End Sub
 
-    ' ===== Fichiers (relay) =====
+    ' ======== Fichiers (relay) ========
     Private Async Sub btnSendFile_Click(sender As Object, e As EventArgs) Handles btnSendFile.Click
         If lstPeers.SelectedItem Is Nothing Then
             Log("Sélectionnez un destinataire.")
@@ -352,7 +318,7 @@ Public Class Form1
             If pbSend IsNot Nothing Then pbSend.Value = 0
             If lblSendProgress IsNot Nothing Then lblSendProgress.Text = "0%"
 
-            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}"
+            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}{MSG_TERM}"
             Dim metaBytes = Encoding.UTF8.GetBytes(meta)
 
             If _isHost Then
@@ -362,22 +328,20 @@ Public Class Form1
                 Using fs = fi.OpenRead()
                     Dim buffer(32768 - 1) As Byte
                     Dim totalSent As Long = 0
-                    Dim read As Integer
-                    Do
-                        read = fs.Read(buffer, 0, buffer.Length)
-                        If read > 0 Then
-                            Dim chunk = Convert.ToBase64String(buffer, 0, read)
-                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
-                            Await _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(chunkMsg))
-                            totalSent += read
-                            Dim percent = CInt((totalSent * 100L) \ fi.Length)
-                            If pbSend IsNot Nothing Then pbSend.Value = percent
-                            If lblSendProgress IsNot Nothing Then lblSendProgress.Text = percent & "%"
-                        End If
-                    Loop While read > 0
+                    While True
+                        Dim read = fs.Read(buffer, 0, buffer.Length)
+                        If read <= 0 Then Exit While
+                        Dim chunk = Convert.ToBase64String(buffer, 0, read)
+                        Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}{MSG_TERM}"
+                        Await _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(chunkMsg))
+                        totalSent += read
+                        Dim percent = CInt((totalSent * 100L) \ Math.Max(1L, fi.Length))
+                        If pbSend IsNot Nothing Then pbSend.Value = Math.Max(0, Math.Min(100, percent))
+                        If lblSendProgress IsNot Nothing Then lblSendProgress.Text = pbSend.Value & "%"
+                    End While
                 End Using
 
-                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}"
+                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
                 Await _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(endMsg))
             Else
                 If _stream Is Nothing Then Log("Not connected.") : Return
@@ -387,45 +351,48 @@ Public Class Form1
                 Using fs = fi.OpenRead()
                     Dim buffer(32768 - 1) As Byte
                     Dim totalSent As Long = 0
-                    Dim read As Integer
-                    Do
-                        read = fs.Read(buffer, 0, buffer.Length)
-                        If read > 0 Then
-                            Dim chunk = Convert.ToBase64String(buffer, 0, read)
-                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}"
-                            Await _stream.SendAsync(Encoding.UTF8.GetBytes(chunkMsg), CancellationToken.None)
-                            totalSent += read
-                            Dim percent = CInt((totalSent * 100L) \ fi.Length)
-                            If pbSend IsNot Nothing Then pbSend.Value = percent
-                            If lblSendProgress IsNot Nothing Then lblSendProgress.Text = percent & "%"
-                        End If
-                    Loop While read > 0
+                    While True
+                        Dim read = fs.Read(buffer, 0, buffer.Length)
+                        If read <= 0 Then Exit While
+                        Dim chunk = Convert.ToBase64String(buffer, 0, read)
+                        Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunk}{MSG_TERM}"
+                        Await _stream.SendAsync(Encoding.UTF8.GetBytes(chunkMsg), CancellationToken.None)
+                        totalSent += read
+                        Dim percent = CInt((totalSent * 100L) \ Math.Max(1L, fi.Length))
+                        If pbSend IsNot Nothing Then pbSend.Value = Math.Max(0, Math.Min(100, percent))
+                        If lblSendProgress IsNot Nothing Then lblSendProgress.Text = pbSend.Value & "%"
+                    End While
                 End Using
 
-                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}"
+                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
                 Await _stream.SendAsync(Encoding.UTF8.GetBytes(endMsg), CancellationToken.None)
             End If
 
-            Log($"Fichier {fi.Name} envoyé à {dest}")
+            Log($"[P2P] Fichier {fi.Name} envoyé à {dest}")
         End Using
     End Sub
 
-    ' ===== Handlers fichiers =====
+    ' ======== Réception fichiers ========
     Private Sub HandleFileMeta(msg As String)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() HandleFileMeta(msg))
+            Return
+        End If
+
         Dim parts = msg.Split(":"c, 6)
         If parts.Length < 6 Then Return
-        Dim tid = parts(1)
-        Dim fromName = parts(2)
-        Dim dest = parts(3)
-        Dim fname = parts(4)
-        Dim fsize = CLng(parts(5))
+        Dim tid = parts(1).Trim()
+        Dim fromName = parts(2).Trim()
+        Dim dest = parts(3).Trim()
+        Dim fname = parts(4).Trim()
+        Dim sizeStr = parts(5).Trim()
 
-        Dim iAmDest As Boolean
-        If _isHost Then
-            iAmDest = String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase)
-        Else
-            iAmDest = True
-        End If
+        Dim fsize As Long = 0
+        Long.TryParse(sizeStr, NumberStyles.Integer, CultureInfo.InvariantCulture, fsize)
+
+        Dim iAmDest As Boolean = If(_isHost,
+            String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase),
+            True)
         If Not iAmDest Then Return
 
         Dim savePath As String = ""
@@ -439,35 +406,48 @@ Public Class Form1
             End Using
         End If
 
-        Dim fs As New FileStream(savePath, FileMode.Create, FileAccess.Write)
-        Dim st As New FileRecvState With {.File = fs, .FileName = savePath, .Expected = fsize, .Received = 0}
+        Dim fs As New FileStream(savePath, FileMode.Create, FileAccess.Write, FileShare.Read, 32768, FileOptions.SequentialScan)
+        Dim st As New FileRecvState With {
+            .File = fs, .FileName = savePath, .Expected = fsize, .Received = 0, .LastTickUtc = DateTime.UtcNow
+        }
         SyncLock _fileRecv : _fileRecv(tid) = st : End SyncLock
 
         If pbRecv IsNot Nothing Then pbRecv.Value = 0
         If lblRecvProgress IsNot Nothing Then lblRecvProgress.Text = "0%"
-        Log($"Réception {fname} ({fsize} bytes) de {fromName}")
+        Log($"[FICHIER] META reçu de {fromName} → {fname} ({fsize} bytes)")
     End Sub
 
     Private Sub HandleFileChunk(msg As String)
         Dim parts = msg.Split(":"c, 3)
         If parts.Length < 3 Then Return
-        Dim tid = parts(1)
-        Dim chunkB64 = parts(2)
+        Dim tid = parts(1).Trim()
+        Dim chunkB64 = parts(2).Trim()
+
         Dim st As FileRecvState = Nothing
         SyncLock _fileRecv
             If _fileRecv.ContainsKey(tid) Then st = _fileRecv(tid)
         End SyncLock
         If st Is Nothing Then Return
 
-        Dim bytes = Convert.FromBase64String(chunkB64)
-        st.File.Write(bytes, 0, bytes.Length)
-        st.Received += bytes.Length
-        Dim percent As Integer = 0
-        If st.Expected > 0 Then
-            percent = CInt((st.Received * 100L) \ st.Expected)
-            If percent < 0 Then percent = 0
-            If percent > 100 Then percent = 100
-        End If
+        Dim bytes As Byte()
+        Try
+            bytes = Convert.FromBase64String(chunkB64)
+        Catch
+            Return
+        End Try
+
+        Try
+            st.File.Write(bytes, 0, bytes.Length)
+            st.Received += bytes.Length
+            st.LastTickUtc = DateTime.UtcNow
+        Catch ex As Exception
+            Log("[FICHIER] Erreur écriture: " & ex.Message)
+            Return
+        End Try
+
+        Dim percent = CInt((st.Received * 100L) \ Math.Max(1L, st.Expected))
+        If percent < 0 Then percent = 0
+        If percent > 100 Then percent = 100
         If pbRecv IsNot Nothing Then pbRecv.Value = percent
         If lblRecvProgress IsNot Nothing Then lblRecvProgress.Text = percent & "%"
     End Sub
@@ -475,7 +455,8 @@ Public Class Form1
     Private Sub HandleFileEnd(msg As String)
         Dim parts = msg.Split(":"c, 2)
         If parts.Length < 2 Then Return
-        Dim tid = parts(1)
+        Dim tid = parts(1).Trim()
+
         Dim st As FileRecvState = Nothing
         SyncLock _fileRecv
             If _fileRecv.ContainsKey(tid) Then
@@ -483,12 +464,42 @@ Public Class Form1
                 _fileRecv.Remove(tid)
             End If
         End SyncLock
+
         If st IsNot Nothing Then
-            Try : st.File.Flush() : st.File.Close() : Catch : End Try
+            Try
+                st.File.Flush()
+                st.File.Close()
+            Catch
+            End Try
+
             If pbRecv IsNot Nothing Then pbRecv.Value = 100
             If lblRecvProgress IsNot Nothing Then lblRecvProgress.Text = "100%"
-            Log($"Fichier reçu → {st.FileName}")
+            Log($"[FICHIER] Fichier reçu → {st.FileName}")
         End If
+    End Sub
+
+    Private Sub FileWatchdog_Tick(sender As Object, e As EventArgs)
+        Dim toClose As New List(Of String)()
+        SyncLock _fileRecv
+            For Each kv In _fileRecv
+                Dim st = kv.Value
+                If st IsNot Nothing Then
+                    Dim stalled As Boolean = (DateTime.UtcNow - st.LastTickUtc).TotalSeconds > 30.0
+                    If stalled AndAlso st.Received = 0 Then
+                        toClose.Add(kv.Key)
+                    End If
+                End If
+            Next
+            For Each tid In toClose
+                Try
+                    Dim st = _fileRecv(tid)
+                    Try : st.File.Flush() : st.File.Close() : Catch : End Try
+                    _fileRecv.Remove(tid)
+                    Log($"[FICHIER] Transfert {tid} abandonné: timeout d’inactivité")
+                Catch
+                End Try
+            Next
+        End SyncLock
     End Sub
 
     Private Function MakeUniquePath(path As String) As String
@@ -504,133 +515,205 @@ Public Class Form1
         Return candidate
     End Function
 
-    ' ===== Listen côté client =====
+    ' ======== Client listener (relay) ========
     Private Async Sub ListenIncomingClient(s As INetworkStream, ct As CancellationToken)
         Try
             While Not ct.IsCancellationRequested
                 Dim data = Await s.ReceiveAsync(ct)
-                Dim msg = Encoding.UTF8.GetString(data)
+                Dim chunk = Encoding.UTF8.GetString(data)
 
-                If msg.StartsWith(Proto.TAG_PEERS) Then
-                    Dim peers = msg.Substring(Proto.TAG_PEERS.Length).Split(";"c).ToList()
-                    UpdatePeers(peers)
+                _cliBuf.Append(chunk)
 
-                ElseIf msg.StartsWith(Proto.TAG_MSG) Then
-                    Dim parts = msg.Split(":"c, 3)
-                    If parts.Length = 3 Then Log($"{parts(1)}: {parts(2)}")
+                While True
+                    Dim full = _cliBuf.ToString()
+                    Dim idx = full.IndexOf(MSG_TERM, StringComparison.Ordinal)
+                    If idx < 0 Then Exit While
 
-                ElseIf msg.StartsWith(Proto.TAG_PRIV) Then
-                    Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
-                    Dim parts = rest.Split(":"c, 3) ' sender:dest:body
-                    If parts.Length = 3 Then
-                        Dim fromPeer = parts(0)
-                        Dim toPeer = parts(1)
-                        Dim body = parts(2)
-                        If String.Equals(toPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then
-                            EnsurePrivateChat(fromPeer)
-                            AppendToPrivate(fromPeer, fromPeer, body)
+                    Dim line = full.Substring(0, idx)
+                    _cliBuf.Remove(0, idx + MSG_TERM.Length)
+
+                    Dim msg = line.Trim()
+                    If msg.Length = 0 Then Continue While
+
+                    If msg.StartsWith(Proto.TAG_PEERS, StringComparison.Ordinal) Then
+                        Dim peers = msg.Substring(Proto.TAG_PEERS.Length).Split(";"c).ToList()
+                        UpdatePeers(peers)
+
+                    ElseIf msg.StartsWith(Proto.TAG_MSG, StringComparison.Ordinal) Then
+                        Dim parts = msg.Split(":"c, 3)
+                        If parts.Length = 3 Then
+                            Log(parts(1) & ": " & parts(2))
                         End If
+
+                    ElseIf msg.StartsWith(Proto.TAG_PRIV, StringComparison.Ordinal) Then
+                        Dim rest = msg.Substring(Proto.TAG_PRIV.Length)
+                        Dim parts = rest.Split(":"c, 3) ' sender:dest:body
+                        If parts.Length = 3 Then
+                            Dim fromPeer = parts(0)
+                            Dim toPeer = parts(1)
+                            Dim body = parts(2)
+                            If String.Equals(toPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then
+                                EnsurePrivateChat(fromPeer)
+                                AppendToPrivate(fromPeer, fromPeer, body)
+                            End If
+                        End If
+
+                    ElseIf msg.StartsWith(Proto.TAG_FILEMETA, StringComparison.Ordinal) Then
+                        HandleFileMeta(msg)
+                    ElseIf msg.StartsWith(Proto.TAG_FILECHUNK, StringComparison.Ordinal) Then
+                        HandleFileChunk(msg)
+                    ElseIf msg.StartsWith(Proto.TAG_FILEEND, StringComparison.Ordinal) Then
+                        HandleFileEnd(msg)
+
+                    ElseIf msg.StartsWith(Proto.TAG_ICE_OFFER, StringComparison.Ordinal) _
+                        OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER, StringComparison.Ordinal) _
+                        OrElse msg.StartsWith(Proto.TAG_ICE_CAND, StringComparison.Ordinal) Then
+
+                        Log("[ICE] signal reçu: " & msg.Substring(0, Math.Min(80, msg.Length)), verbose:=True)
+                        OnHubIceSignal(msg)
                     End If
-
-                ElseIf msg.StartsWith(Proto.TAG_FILEMETA) Then
-                    HandleFileMeta(msg)
-                ElseIf msg.StartsWith(Proto.TAG_FILECHUNK) Then
-                    HandleFileChunk(msg)
-                ElseIf msg.StartsWith(Proto.TAG_FILEEND) Then
-                    HandleFileEnd(msg)
-
-                ElseIf msg.StartsWith(Proto.TAG_ICE_OFFER) _
-                    OrElse msg.StartsWith(Proto.TAG_ICE_ANSWER) _
-                    OrElse msg.StartsWith(Proto.TAG_ICE_CAND) Then
-
-                    Log("[ICE] signal reçu: " & msg.Substring(0, Math.Min(80, msg.Length)), verbose:=True)
-                    OnHubIceSignal(msg)
-                End If
-
+                End While
             End While
         Catch ex As Exception
             Log($"Déconnecté: {ex.Message}")
         End Try
     End Sub
 
-    ' ===== ICE signals =====
+    ' ======== ICE signals dispatch ========
     Private Sub OnHubFileSignal(raw As String)
-        If raw.StartsWith(Proto.TAG_FILEMETA) Then HandleFileMeta(raw)
-        If raw.StartsWith(Proto.TAG_FILECHUNK) Then HandleFileChunk(raw)
-        If raw.StartsWith(Proto.TAG_FILEEND) Then HandleFileEnd(raw)
+        If raw.StartsWith(Proto.TAG_FILEMETA, StringComparison.Ordinal) Then HandleFileMeta(raw)
+        If raw.StartsWith(Proto.TAG_FILECHUNK, StringComparison.Ordinal) Then HandleFileChunk(raw)
+        If raw.StartsWith(Proto.TAG_FILEEND, StringComparison.Ordinal) Then HandleFileEnd(raw)
     End Sub
 
     Private Sub OnHubIceSignal(raw As String)
+        ' ✅ Empêche toute tentative de P2P côté host
+        If _isHost Then Exit Sub
+
         Try
-            ' 0) Extraire tête ICE et K/I/S éventuels → alimenter Core
-            Dim kind As String = "", fromPeer As String = "", toPeer As String = "", b64 As String = ""
-            If Not TryParseIceHead(raw, kind, fromPeer, toPeer, b64) Then Return
+            If raw.StartsWith(Proto.TAG_ICE_OFFER, StringComparison.Ordinal) Then
+                Dim p = raw.Substring(Proto.TAG_ICE_OFFER.Length).Split(":"c, 3)
+                If p.Length = 3 Then
+                    Dim fromPeer = p(0)
 
-            Dim sig As ChatP2P.Core.SignalDescriptor = Nothing
-            If ExtractSecureSegmentsToSig(raw, sig) Then
-                ChatP2P.Core.P2PManager.HandleIncomingSignalSecure(sig)
+                    ' ✅ Ignore les messages qui viendraient du host lui-même ou de soi-même
+                    If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
+                   OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
+
+                    Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
+                    P2PManager.HandleOffer(fromPeer, sdp, New String() {"stun:stun.l.google.com:19302"})
+                End If
+
+            ElseIf raw.StartsWith(Proto.TAG_ICE_ANSWER, StringComparison.Ordinal) Then
+                Dim p = raw.Substring(Proto.TAG_ICE_ANSWER.Length).Split(":"c, 3)
+                If p.Length = 3 Then
+                    Dim fromPeer = p(0)
+                    If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
+                   OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
+
+                    Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
+                    P2PManager.HandleAnswer(fromPeer, sdp)
+                End If
+
+            ElseIf raw.StartsWith(Proto.TAG_ICE_CAND, StringComparison.Ordinal) Then
+                Dim p = raw.Substring(Proto.TAG_ICE_CAND.Length).Split(":"c, 3)
+                If p.Length = 3 Then
+                    Dim fromPeer = p(0)
+                    If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
+                   OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
+
+                    Dim cand = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
+                    P2PManager.HandleCandidate(fromPeer, cand)
+                End If
             End If
-
-            ' 1) Acheminer SDP/candidate vers Core
-            If kind = "OFFER" Then
-                Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(b64))
-                P2PManager.HandleOffer(fromPeer, sdp, New String() {"stun:stun.l.google.com:19302"})
-            ElseIf kind = "ANSWER" Then
-                Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(b64))
-                P2PManager.HandleAnswer(fromPeer, sdp)
-            ElseIf kind = "CAND" Then
-                Dim cand = Encoding.UTF8.GetString(Convert.FromBase64String(b64))
-                P2PManager.HandleCandidate(fromPeer, cand)
-            End If
-
         Catch ex As Exception
             Log("[ICE] parse error: " & ex.Message, verbose:=True)
         End Try
     End Sub
 
-    ' ===== Fenêtres privées =====
+
+    ' ======== Texte P2P reçu ========
+    Private Sub OnP2PText_FromP2P(peer As String, text As String)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() OnP2PText_FromP2P(peer, text))
+            Return
+        End If
+
+        ' Normalisation stricte + anti‑doublons (fenêtre 2s)
+        Dim norm As String = Canon(text)
+        If SeenRecently(peer, norm) Then Return
+
+        EnsurePrivateChat(peer)
+        AppendToPrivate(peer, peer, norm)
+    End Sub
+
+    ' ======== Privé : helpers fenêtres ========
     Private Sub OpenPrivateChat(peer As String)
         If String.IsNullOrWhiteSpace(peer) Then Return
+
         Dim frm As PrivateChatForm = Nothing
         If _privateChats.TryGetValue(peer, frm) Then
             If frm IsNot Nothing AndAlso Not frm.IsDisposed Then
-                frm.BringToFront() : frm.Focus() : Exit Sub
+                If Not frm.Visible Then frm.Show(Me)
+                frm.Activate()
+                frm.BringToFront()
+                Exit Sub
             Else
                 _privateChats.Remove(peer)
             End If
         End If
-        frm = New PrivateChatForm(_displayName, peer, Sub(text) SendPrivateMessage(peer, text))
+
+        Dim sendCb As Action(Of String) =
+            Sub(text As String)
+                SendPrivateMessage(peer, text)
+            End Sub
+
+        frm = New PrivateChatForm(_displayName, peer, sendCb)
         _privateChats(peer) = frm
         frm.Show(Me)
+        frm.Activate()
+        frm.BringToFront()
     End Sub
 
     Private Sub EnsurePrivateChat(peer As String)
         If String.IsNullOrWhiteSpace(peer) Then Return
-        If Not _privateChats.ContainsKey(peer) Then OpenPrivateChat(peer)
+        Dim frm As PrivateChatForm = Nothing
+        If Not _privateChats.TryGetValue(peer, frm) OrElse frm Is Nothing OrElse frm.IsDisposed Then
+            OpenPrivateChat(peer)
+        End If
     End Sub
 
     Private Sub AppendToPrivate(peer As String, senderName As String, message As String)
-        EnsurePrivateChat(peer)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() AppendToPrivate(peer, senderName, message))
+            Return
+        End If
+
         Dim frm As PrivateChatForm = Nothing
         If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
             frm.AppendMessage(senderName, message)
-            Try
-                If Not frm.Visible Then frm.Show(Me)
-                frm.Activate()
-                frm.BringToFront()
-            Catch
-            End Try
+            If Not frm.Visible Then frm.Show(Me)
+            frm.Activate()
+            frm.BringToFront()
+        Else
+            OpenPrivateChat(peer)
+            If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+                frm.AppendMessage(senderName, message)
+            End If
         End If
     End Sub
 
     Private Async Sub SendPrivateMessage(dest As String, text As String)
         If String.IsNullOrWhiteSpace(dest) OrElse String.IsNullOrWhiteSpace(text) Then Return
+
+        Dim canonText As String = Canon(text)
+
         Try
-            If ChatP2P.Core.P2PManager.TrySendP2P(dest, text) Then Exit Sub
+            If ChatP2P.Core.P2PManager.TrySendP2P(dest, canonText) Then Exit Sub
         Catch
         End Try
 
-        Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{text}"
+        Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{canonText}{MSG_TERM}"
         Dim data = Encoding.UTF8.GetBytes(payload)
 
         If _isHost Then
@@ -642,7 +725,30 @@ Public Class Form1
         End If
     End Sub
 
-    ' ===== Entrées clavier =====
+    ' ======== Signaling vers Core (Init) ========
+    Private Sub InitP2PManager()
+        P2PManager.Init(
+            sendSignal:=Function(dest As String, line As String)
+                            Dim bytes = Encoding.UTF8.GetBytes(line & MSG_TERM)
+                            If _isHost Then
+                                If _hub IsNot Nothing Then
+                                    Return _hub.SendToAsync(dest, bytes)
+                                End If
+                                Return Threading.Tasks.Task.CompletedTask
+                            Else
+                                If _stream IsNot Nothing Then
+                                    Return _stream.SendAsync(bytes, CancellationToken.None)
+                                End If
+                                Return Threading.Tasks.Task.CompletedTask
+                            End If
+                        End Function,
+            localDisplayName:=_displayName
+        )
+
+        AddHandler P2PManager.OnLog, Sub(peer, l) Log("[P2P] " & l, verbose:=True)
+    End Sub
+
+    ' ======== Saisie/Prefs ========
     Private Sub txtMessage_KeyDown(sender As Object, e As KeyEventArgs) Handles txtMessage.KeyDown
         If e.KeyCode = Keys.Enter Then e.SuppressKeyPress = True : e.Handled = True : btnSend.PerformClick()
     End Sub
@@ -655,11 +761,10 @@ Public Class Form1
             _displayName = newName
             SaveSettings()
 
-            ' Ré-init pour que le callback sendSignal embarque le nouveau name
             InitP2PManager()
 
             If (Not _isHost) AndAlso (_stream IsNot Nothing) Then
-                Dim data = Encoding.UTF8.GetBytes(Proto.TAG_NAME & newName)
+                Dim data = Encoding.UTF8.GetBytes(Proto.TAG_NAME & newName & MSG_TERM)
                 _stream.SendAsync(data, CancellationToken.None)
                 Log($"[Info] Client name → {newName} (notif au hub)")
             ElseIf _isHost Then
@@ -678,58 +783,66 @@ Public Class Form1
         If e.KeyCode = Keys.Enter Then e.SuppressKeyPress = True : e.Handled = True : SaveSettings()
     End Sub
 
-    ' === Persistence identité (AppData) ===
-    Private Function LoadOrCreateEd25519Identity() As Ed25519Identity
-        Dim dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P")
-        Dim pathFile = Path.Combine(dir, "id_ed25519.bin")
-        If System.IO.File.Exists(pathFile) Then
-            Dim all = System.IO.File.ReadAllBytes(pathFile)
-            If all IsNot Nothing AndAlso all.Length = 96 Then
-                Dim pub(31) As Byte, priv(63) As Byte
-                Buffer.BlockCopy(all, 0, pub, 0, 32)
-                Buffer.BlockCopy(all, 32, priv, 0, 64)
-                Return New Ed25519Identity With {.Pub = pub, .Priv = priv}
+    ' ======= Utilitaires identité (Ed25519) & KEX (X25519) =======
+    Private Function LoadOrCreateEd25519Identity() As (Pub As Byte(), Priv As Byte())
+        Dim dir = Path.GetDirectoryName(_idFilePath)
+        If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
+        If File.Exists(_idFilePath) Then
+            Dim all = File.ReadAllBytes(_idFilePath)
+            If all IsNot Nothing AndAlso all.Length = (32 + 64) Then
+                Dim pubKey(31) As Byte, privKey(63) As Byte
+                Buffer.BlockCopy(all, 0, pubKey, 0, 32)
+                Buffer.BlockCopy(all, 32, privKey, 0, 64)
+                Return (pubKey, privKey)
             End If
         End If
-        Directory.CreateDirectory(dir)
-        Dim kp = Sodium.PublicKeyAuth.GenerateKeyPair() ' pub=32, priv=64
-        Dim blob(95) As Byte
-        Buffer.BlockCopy(kp.PublicKey, 0, blob, 0, 32)
-        Buffer.BlockCopy(kp.PrivateKey, 0, blob, 32, 64)
-        System.IO.File.WriteAllBytes(pathFile, blob)
-        Return New Ed25519Identity With {.Pub = kp.PublicKey, .Priv = kp.PrivateKey}
+        ' Génération par réflexion (utilise ChatP2P.Crypto.Ed25519 si présent)
+        Dim edType As Type = Nothing
+        For Each asm In AppDomain.CurrentDomain.GetAssemblies()
+            edType = asm.GetType("ChatP2P.Crypto.Ed25519", False)
+            If edType IsNot Nothing Then Exit For
+        Next
+        If edType Is Nothing Then Throw New MissingMethodException("ChatP2P.Crypto.Ed25519 type not found.")
+        Dim m = edType.GetMethod("GenerateKeyPair", Reflection.BindingFlags.Public Or Reflection.BindingFlags.Static)
+        If m Is Nothing Then Throw New MissingMethodException("Ed25519.GenerateKeyPair not found.")
+        Dim kv = m.Invoke(Nothing, Nothing)
+        Dim pubKey2 As Byte() = TryGetFieldOrProp(Of Byte())(kv, {"pub", "Pub", "PublicKey"})
+        Dim privKey2 As Byte() = TryGetFieldOrProp(Of Byte())(kv, {"priv", "Priv", "PrivateKey", "SecretKey"})
+        If pubKey2 Is Nothing OrElse privKey2 Is Nothing Then Throw New Exception("Invalid Ed25519 pair.")
+        Dim all2(32 + 64 - 1) As Byte
+        Buffer.BlockCopy(pubKey2, 0, all2, 0, 32)
+        Buffer.BlockCopy(privKey2, 0, all2, 32, 64)
+        File.WriteAllBytes(_idFilePath, all2)
+        Return (pubKey2, privKey2)
     End Function
 
-    ' === Génération X25519 via libsodium (crypto_box) ===
-    Private Function GenerateX25519KeyPairSodium() As (priv As Byte(), pub As Byte())
-        ' Libsodium: crypto_box_* utilise Curve25519 (X25519) pour le KEX
-        Dim kp = Sodium.PublicKeyBox.GenerateKeyPair() ' PublicKey:32, PrivateKey:32
-        If kp Is Nothing OrElse kp.PublicKey Is Nothing OrElse kp.PrivateKey Is Nothing _
-           OrElse kp.PublicKey.Length <> 32 OrElse kp.PrivateKey.Length <> 32 Then
-            Throw New InvalidOperationException("libsodium: génération X25519 invalide.")
-        End If
-        Return (priv:=kp.PrivateKey, pub:=kp.PublicKey)
-    End Function
-
-    ' === Génération X25519 via réflexion (optionnel) ===
     Private Function GenerateX25519KeyPairReflect() As (priv As Byte(), pub As Byte())
         Dim kexType As Type = Nothing
-        For Each asm In AppDomain.CurrentDomain.GetAssemblies()
-            kexType = asm.GetType("ChatP2P.Crypto.KexX25519", False)
-            If kexType IsNot Nothing Then Exit For
-        Next
+
+        kexType = Type.GetType("ChatP2P.Crypto.KexX25519, ChatP2P.Crypto", throwOnError:=False)
+        If kexType Is Nothing Then
+            Try
+                Dim asm = System.Reflection.Assembly.Load("ChatP2P.Crypto")
+                kexType = asm.GetType("ChatP2P.Crypto.KexX25519", throwOnError:=False)
+            Catch
+            End Try
+        End If
+        If kexType Is Nothing Then
+            For Each asm In AppDomain.CurrentDomain.GetAssemblies()
+                Dim t = asm.GetType("ChatP2P.Crypto.KexX25519", False)
+                If t IsNot Nothing Then kexType = t : Exit For
+            Next
+        End If
         If kexType Is Nothing Then Throw New MissingMethodException("ChatP2P.Crypto.KexX25519 type not found.")
-        Dim cand = New String() {"GenerateKeyPair", "GenerateKeypair", "NewKeyPair", "CreateKeyPair"}
-        For Each nm In cand
-            Dim m = kexType.GetMethod(nm, Reflection.BindingFlags.Public Or Reflection.BindingFlags.Static, Nothing, Type.EmptyTypes, Nothing)
-            If m IsNot Nothing Then
-                Dim kv = m.Invoke(Nothing, Nothing)
-                Dim priv As Byte() = TryGetFieldOrProp(Of Byte())(kv, New String() {"priv", "Priv", "PrivateKey"})
-                Dim pub As Byte() = TryGetFieldOrProp(Of Byte())(kv, New String() {"pub", "Pub", "PublicKey"})
-                If priv IsNot Nothing AndAlso pub IsNot Nothing Then Return (priv, pub)
-            End If
-        Next
-        Throw New MissingMethodException("No X25519 keypair generator found on KexX25519.")
+
+        Dim m = kexType.GetMethod("GenerateKeyPair", Reflection.BindingFlags.Public Or Reflection.BindingFlags.Static)
+        If m Is Nothing Then Throw New MissingMethodException("KexX25519.GenerateKeyPair not found.")
+        Dim kv = m.Invoke(Nothing, Nothing)
+
+        Dim pub As Byte() = TryGetFieldOrProp(Of Byte())(kv, New String() {"pub", "Pub", "PublicKey"})
+        Dim priv As Byte() = TryGetFieldOrProp(Of Byte())(kv, New String() {"priv", "Priv", "PrivateKey"})
+        If priv Is Nothing OrElse pub Is Nothing Then Throw New Exception("Invalid X25519 keypair object returned.")
+        Return (priv, pub)
     End Function
 
     Private Function TryGetFieldOrProp(Of TRes)(obj As Object, names As IEnumerable(Of String)) As TRes
@@ -749,5 +862,26 @@ Public Class Form1
         Next
         Return Nothing
     End Function
+
+    ' ======== Security Center (bouton) ========
+    Private Sub btnSecurity_Click(sender As Object, e As EventArgs) Handles btnSecurity.Click
+        Try
+            Dim f As New SecurityCenterForm(_idFilePath) With {
+                .PeersProvider = Function() _peerFp.Keys.ToList(),
+                .PeerStatusProvider = Function(peer As String)
+                                          Dim st = (Verified:=False, Fp:="", P2PConnected:=False, CryptoActive:=False)
+                                          If _idVerified.ContainsKey(peer) Then st.Verified = _idVerified(peer)
+                                          If _peerFp.ContainsKey(peer) Then st.Fp = _peerFp(peer)
+                                          If _p2pConn.ContainsKey(peer) Then st.P2PConnected = _p2pConn(peer)
+                                          If _cryptoActive.ContainsKey(peer) Then st.CryptoActive = _cryptoActive(peer)
+                                          Return st
+                                      End Function
+            }
+            f.ShowDialog(Me)
+        Catch ex As Exception
+            MessageBox.Show("Erreur à l'ouverture du Security Center: " & ex.Message,
+                            "Security Center", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
 
 End Class

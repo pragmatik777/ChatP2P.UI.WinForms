@@ -90,7 +90,7 @@ Public Class PrivateChatForm
         ' --- Abonnements P2PManager (module statique) ---
         AddHandler PM.OnLog, AddressOf OnP2PLog
         AddHandler PM.OnP2PState, AddressOf OnP2PState
-        AddHandler PM.OnP2PText, AddressOf OnP2PText
+
 
         ' --- Etat initial du label selon l’état courant du P2P ---
         UpdateStateText(PM.IsConnected(_peerName))
@@ -159,20 +159,20 @@ Public Class PrivateChatForm
     End Sub
 
     ' Bouton pour déclencher la négociation ICE
+    ' ... dans BtnP2P_Click
     Private Sub BtnP2P_Click(sender As Object, e As EventArgs)
         Try
-            ' feedback immédiat non bloquant
             lblP2PState.Text = "P2P: en cours…"
             btnP2P.Enabled = False
-
-            ' démarre la nego (asynchrone via le manager)
             PM.StartP2P(_peerName, New String() {"stun:stun.l.google.com:19302"})
-            SafeLog($"[P2P] Négociation démarrée vers {_peerName}")
+            ' SUPPRIMER la ligne locale qui doublonnait le log :
+            ' SafeLog($"[P2P] Négociation démarrée vers {_peerName}")
         Catch ex As Exception
             btnP2P.Enabled = True
             SafeLog("[P2P] Démarrage échoué: " & ex.Message)
         End Try
     End Sub
+
 
     ' ======================
     ' ==  Handlers P2P   ===
@@ -199,11 +199,7 @@ Public Class PrivateChatForm
         btnP2P.Enabled = Not connected
     End Sub
 
-    ' Texte reçu via DataChannel P2P (filtré par peer)
-    Private Sub OnP2PText(peer As String, text As String)
-        If Not String.Equals(peer, _peerName, StringComparison.OrdinalIgnoreCase) Then Return
-        AppendMessage(peer, text)
-    End Sub
+
 
     ' Utilitaire log thread-safe
     Private Sub SafeLog(line As String)
@@ -221,6 +217,10 @@ Public Class PrivateChatForm
         MyBase.OnFormClosed(e)
         RemoveHandler PM.OnLog, AddressOf OnP2PLog
         RemoveHandler PM.OnP2PState, AddressOf OnP2PState
-        RemoveHandler PM.OnP2PText, AddressOf OnP2PText
+
+    End Sub
+
+    Private Sub PrivateChatForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+
     End Sub
 End Class
