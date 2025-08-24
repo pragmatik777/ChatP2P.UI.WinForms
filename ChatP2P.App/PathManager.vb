@@ -13,11 +13,11 @@ Namespace ChatP2P.App
                                              remote As PeerDescriptor,
                                              candidates As IEnumerable(Of INetworkPath),
                                              ct As Threading.CancellationToken) As Task(Of INetworkStream) Implements IPathManager.NegotiateAsync
-            For Each p In candidates
-                Dim pr = Await p.ProbeAsync(local, remote, ct).ConfigureAwait(False)
+            For Each cand As INetworkPath In candidates
+                Dim pr = Await cand.ProbeAsync(local, remote, ct).ConfigureAwait(False)
                 If pr.Success Then
-                    RaiseEvent PathChanged(p.Type, $"Using {p.Name} : {pr.Notes}")
-                    Dim s = Await p.ConnectAsync(remote, ct).ConfigureAwait(False)
+                    RaiseEvent PathChanged(cand.Type, $"Using {cand.Name} : {pr.Notes}")
+                    Dim s = Await cand.ConnectAsync(remote, ct).ConfigureAwait(False)
                     Return s
                 End If
             Next

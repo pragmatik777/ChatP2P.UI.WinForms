@@ -8,7 +8,8 @@ Imports System.Text
 Imports System.Threading
 Imports System.Globalization
 Imports System.Security.Cryptography
-Imports ChatP2P.Core                 ' P2PManager
+Imports System.Reflection
+Imports ChatP2P.Core                 ' P2PManager + LocalDb
 Imports ChatP2P.App                  ' RelayHub
 Imports ChatP2P.App.Protocol
 Imports Proto = ChatP2P.App.Protocol.Tags
@@ -45,6 +46,9 @@ Public Class Form1
     ' Chats privés par fenêtre
     Private ReadOnly _privateChats As New Dictionary(Of String, PrivateChatForm)(StringComparer.OrdinalIgnoreCase)
 
+    ' Historique déjà chargé (anti double‑injection)
+    Private ReadOnly _historyLoaded As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
     ' Réception fichiers en cours
     Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)(StringComparer.Ordinal)
     Private _fileWatchdog As System.Windows.Forms.Timer
@@ -70,10 +74,6 @@ Public Class Form1
         Return r.TrimEnd()
     End Function
 
-
-
-
-
     Private Function SeenRecently(peer As String, text As String) As Boolean
         Dim nowUtc = DateTime.UtcNow
         Dim list As List(Of (DateTime, String)) = Nothing
@@ -96,12 +96,16 @@ Public Class Form1
 
     ' ======== Form Load / Settings ========
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        ' DB locale
+        Try
+            ChatP2P.Core.LocalDb.Init()   ' crée %APPDATA%\ChatP2P\chat.db si absent
+        Catch ex As Exception
+            Log("[DB] init failed: " & ex.Message)
+        End Try
+
         ' Identité locale Ed25519 persistée (pub=32, priv=64)
         Try
             Dim id = LoadOrCreateEd25519Identity()
-            ' si tu as encore ces API côté core, décommente:
-            ' P2PManager.SetIdentity(id.Pub, id.Priv)
-            ' P2PManager.SetIdentityInfo(id.Pub)
         Catch ex As Exception
             Log("[ID] init failed: " & ex.Message)
         End Try
@@ -109,7 +113,6 @@ Public Class Form1
         ' Clé X25519 statique (facultatif selon ton core)
         Try
             Dim kp = ChatP2P.Crypto.KexX25519.GenerateKeyPair()
-            ' P2PManager.InitializeCrypto(kp.priv, kp.pub)
         Catch
         End Try
 
@@ -185,15 +188,103 @@ Public Class Form1
         End If
     End Sub
 
-    ' Met à jour l’état affiché dans la fenêtre privée si elle est OUVERTE.
+    ' ======== DB: insert / select ========
+    Private Sub EnsurePeerRow(peer As String)
+        Try
+            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+            LocalDb.ExecNonQuery(
+                "INSERT OR IGNORE INTO Peers(Name, LastSeenUtc) VALUES(@n,@ts);",
+                LocalDb.P("@n", peer), LocalDb.P("@ts", nowIso)
+            )
+            ' MAJ LastSeen à chaque passage (facultatif)
+            LocalDb.ExecNonQuery(
+                "UPDATE Peers SET LastSeenUtc=@ts WHERE Name=@n;",
+                LocalDb.P("@ts", nowIso), LocalDb.P("@n", peer)
+            )
+        Catch ex As Exception
+            Log("[DB] ensure peer failed: " & ex.Message, verbose:=True)
+        End Try
+    End Sub
+
+    Private Sub StoreMsg(peer As String, outgoing As Boolean, body As String, viaP2P As Boolean)
+        Try
+            EnsurePeerRow(peer)
+            Dim createdIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+            Dim senderVal As String = If(outgoing, "me", peer)
+            Dim dirVal As String = If(outgoing, "send", "recv")
+            Dim isp2p As Integer = If(viaP2P, 1, 0)
+
+            LocalDb.ExecNonQuery(
+                "INSERT INTO Messages(PeerName, Sender, Body, IsP2P, Direction, CreatedUtc)
+                 VALUES(@p,@s,@b,@i,@d,@c);",
+                LocalDb.P("@p", peer),
+                LocalDb.P("@s", senderVal),
+                LocalDb.P("@b", body),
+                LocalDb.P("@i", isp2p),
+                LocalDb.P("@d", dirVal),
+                LocalDb.P("@c", createdIso)
+            )
+        Catch ex As Exception
+            Log("[DB] store failed: " & ex.Message, verbose:=True)
+        End Try
+    End Sub
+
+    Private Sub LoadHistoryIntoPrivate(peer As String, frm As PrivateChatForm)
+        Try
+            ' on prend les 200 derniers, puis on remet dans l’ordre chronologique
+            Dim dt = LocalDb.Query(
+                "SELECT Sender, Body, IsP2P, Direction, CreatedUtc
+                   FROM Messages
+                  WHERE PeerName=@p
+               ORDER BY CreatedUtc DESC
+                  LIMIT @lim;",
+                LocalDb.P("@p", peer), LocalDb.P("@lim", 200)
+            )
+            If dt Is Nothing OrElse dt.Rows.Count = 0 Then Exit Sub
+
+            Dim rows = New List(Of DataRow)
+            For Each r As DataRow In dt.Rows
+                rows.Add(r)
+            Next
+            rows.Reverse() ' repasse en ASC
+
+            Dim push As Action =
+                Sub()
+                    For Each r In rows
+                        Dim dir As String = TryCast(r!Direction, String)
+                        Dim body As String = TryCast(r!Body, String)
+                        Dim isp2p As Boolean = False
+                        If Not IsDBNull(r!IsP2P) Then
+                            isp2p = (Convert.ToInt32(r!IsP2P, CultureInfo.InvariantCulture) <> 0)
+                        End If
+                        Dim sender As String =
+                            If(String.Equals(dir, "recv", StringComparison.OrdinalIgnoreCase),
+                               peer, _displayName)
+
+                        Dim show = (If(isp2p, "[P2P] ", "") & body)
+                        frm.AppendMessage(sender, show)
+                    Next
+                End Sub
+
+            If frm.IsHandleCreated AndAlso frm.InvokeRequired Then
+                frm.BeginInvoke(push)
+            Else
+                push()
+            End If
+        Catch ex As Exception
+            Log("[DB] history inject error: " & ex.Message, verbose:=True)
+        End Try
+    End Sub
+
+    ' ======== Met à jour l’état affiché dans la fenêtre privée si elle est OUVERTE. ========
     Private Sub UpdateSelectedPeerStatuses()
         If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
-            Me.BeginInvoke(New MethodInvoker(AddressOf UpdateSelectedPeerStatuses))
+            Me.BeginInvoke(New Action(AddressOf UpdateSelectedPeerStatuses))
             Return
         End If
 
         If lstPeers Is Nothing OrElse lstPeers.SelectedItem Is Nothing Then
-            Return ' plus de labels dans Form1
+            Return
         End If
 
         Dim peer As String = CStr(lstPeers.SelectedItem)
@@ -210,7 +301,6 @@ Public Class Form1
         End If
     End Sub
 
-
     Private Sub UpdatePeers(peers As List(Of String))
         If lstPeers Is Nothing Then Return
         If lstPeers.IsHandleCreated AndAlso lstPeers.InvokeRequired Then
@@ -223,8 +313,8 @@ Public Class Form1
             Distinct(StringComparer.OrdinalIgnoreCase).
             ToList()
         lstPeers.Items.Clear()
-        For Each p In cleaned
-            lstPeers.Items.Add(p)
+        For Each peerName In cleaned
+            lstPeers.Items.Add(peerName)
         Next
     End Sub
 
@@ -253,6 +343,8 @@ Public Class Form1
                 If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
                     EnsurePrivateChat(senderName)
                     AppendToPrivate(senderName, senderName, text)
+                    ' store relay incoming (host-side receive)
+                    StoreMsg(senderName, outgoing:=False, body:=Canon(text), viaP2P:=False)
                 End If
             End Sub
         AddHandler _hub.FileSignal, New RelayHub.FileSignalEventHandler(AddressOf OnHubFileSignal)
@@ -563,6 +655,8 @@ Public Class Form1
                             If String.Equals(toPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then
                                 EnsurePrivateChat(fromPeer)
                                 AppendToPrivate(fromPeer, fromPeer, body)
+                                ' store relay incoming (client-side receive)
+                                StoreMsg(fromPeer, outgoing:=False, body:=Canon(body), viaP2P:=False)
                             End If
                         End If
 
@@ -604,7 +698,7 @@ Public Class Form1
                 If p.Length = 3 Then
                     Dim fromPeer = p(0)
 
-                    ' ✅ Ignore les messages qui viendraient du host lui-même ou de soi-même
+                    ' ✅ Ignore host/soi-même
                     If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
                    OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
 
@@ -649,10 +743,12 @@ Public Class Form1
         Dim norm As String = Canon(text)
         If SeenRecently(peer, norm) Then Return
 
-        EnsurePrivateChat(peer)
-        AppendToPrivate(peer, peer, "[P2P] " & norm) ' <= tag ici
-    End Sub
+        ' store P2P incoming
+        StoreMsg(peer, outgoing:=False, body:=norm, viaP2P:=True)
 
+        EnsurePrivateChat(peer)
+        AppendToPrivate(peer, peer, "[P2P] " & norm) ' tag affichage
+    End Sub
 
     ' ======== Privé : helpers fenêtres ========
     Private Sub OpenPrivateChat(peer As String)
@@ -664,6 +760,11 @@ Public Class Form1
                 If Not frm.Visible Then frm.Show(Me)
                 frm.Activate()
                 frm.BringToFront()
+                ' injecte l'historique une seule fois
+                If Not _historyLoaded.Contains(peer) Then
+                    LoadHistoryIntoPrivate(peer, frm)
+                    _historyLoaded.Add(peer)
+                End If
                 Exit Sub
             Else
                 _privateChats.Remove(peer)
@@ -678,13 +779,19 @@ Public Class Form1
         frm = New PrivateChatForm(_displayName, peer, sendCb)
         _privateChats(peer) = frm
 
-        ' ➜ pousse l'état courant dès l'ouverture
+        ' pousse l'état courant dès l'ouverture
         Dim authOk As Boolean = _idVerified.ContainsKey(peer) AndAlso _idVerified(peer)
         Dim cryptoActive As Boolean = _cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer)
         Dim connected As Boolean = _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer)
         frm.SetAuthState(authOk)
         frm.SetCryptoState(cryptoActive)
         frm.SetP2PState(connected)
+
+        ' injecte l'historique une fois
+        If Not _historyLoaded.Contains(peer) Then
+            LoadHistoryIntoPrivate(peer, frm)
+            _historyLoaded.Add(peer)
+        End If
 
         frm.Show(Me)
         frm.Activate()
@@ -727,6 +834,9 @@ Public Class Form1
         Try
             ' Tentative P2P directe
             If ChatP2P.Core.P2PManager.TrySendP2P(dest, canonText) Then
+                ' store OUT p2p
+                StoreMsg(dest, outgoing:=True, body:=canonText, viaP2P:=True)
+
                 ' Affichage UNE SEULE FOIS côté émetteur, avec le tag [P2P]
                 Log($"[P2P] moi → {dest}: {canonText}")
                 AppendToPrivate(dest, _displayName, "[P2P] " & canonText)
@@ -748,7 +858,10 @@ Public Class Form1
             Await _stream.SendAsync(data, CancellationToken.None)
         End If
 
-        ' Affichage UNE SEULE FOIS côté émetteur, sans tag (puisque c'est relay)
+        ' store OUT relay
+        StoreMsg(dest, outgoing:=True, body:=canonText, viaP2P:=False)
+
+        ' Affichage UNE SEULE FOIS côté émetteur, sans tag (relay)
         AppendToPrivate(dest, _displayName, canonText)
     End Sub
 
@@ -876,12 +989,12 @@ Public Class Form1
         If obj Is Nothing Then Return Nothing
         Dim tp = obj.GetType()
         For Each nm In names
-            Dim pi = tp.GetProperty(nm, Reflection.BindingFlags.Public Or Reflection.BindingFlags.Instance)
+            Dim pi = tp.GetProperty(nm, BindingFlags.Public Or BindingFlags.Instance)
             If pi IsNot Nothing Then
                 Dim v = pi.GetValue(obj, Nothing)
                 If TypeOf v Is TRes Then Return CType(v, TRes)
             End If
-            Dim fi = tp.GetField(nm, Reflection.BindingFlags.Public Or Reflection.BindingFlags.Instance)
+            Dim fi = tp.GetField(nm, BindingFlags.Public Or BindingFlags.Instance)
             If fi IsNot Nothing Then
                 Dim v = fi.GetValue(obj)
                 If TypeOf v Is TRes Then Return CType(v, TRes)
