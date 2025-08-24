@@ -638,10 +638,11 @@ Public Class Form1
             Me.BeginInvoke(Sub() OnP2PText_FromP2P(peer, text))
             Return
         End If
-
-        ' Normalisation stricte + anti‑doublons (fenêtre 2s)
         Dim norm As String = Canon(text)
         If SeenRecently(peer, norm) Then Return
+
+        ' Ajoute un log explicite P2P
+        Log($"[P2P] {peer} → moi: {norm}")
 
         EnsurePrivateChat(peer)
         AppendToPrivate(peer, peer, norm)
@@ -703,19 +704,23 @@ Public Class Form1
         End If
     End Sub
 
+    ' Form1.vb → SendPrivateMessage
     Private Async Sub SendPrivateMessage(dest As String, text As String)
         If String.IsNullOrWhiteSpace(dest) OrElse String.IsNullOrWhiteSpace(text) Then Return
-
         Dim canonText As String = Canon(text)
 
         Try
-            If ChatP2P.Core.P2PManager.TrySendP2P(dest, canonText) Then Exit Sub
+            If ChatP2P.Core.P2PManager.TrySendP2P(dest, canonText) Then
+                ' Marque clairement l’envoi P2P
+                Log($"[P2P] moi → {dest}: {canonText}")
+                Exit Sub
+            End If
         Catch
         End Try
 
+        ' Sinon fallback relais
         Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{dest}:{canonText}{MSG_TERM}"
         Dim data = Encoding.UTF8.GetBytes(payload)
-
         If _isHost Then
             If _hub Is Nothing Then Log("[Privé] Hub non initialisé.") : Return
             Await _hub.SendToAsync(dest, data)
@@ -724,6 +729,7 @@ Public Class Form1
             Await _stream.SendAsync(data, CancellationToken.None)
         End If
     End Sub
+
 
     ' ======== Signaling vers Core (Init) ========
     Private Sub InitP2PManager()
