@@ -63,12 +63,13 @@ Public Class SecurityCenterForm
         lblTrusted = New Label() With {.AutoSize = True, .Location = New Point(240, 20), .Text = "Trusted: ?"}
         lblDtlsFp = New TextBox() With {.Location = New Point(240, 50), .Width = 460, .ReadOnly = True}
         btnCopyFp = New Button() With {.Location = New Point(240, 80), .Width = 120, .Text = "Copier FP"}
-        AddHandler btnCopyFp.Click, Sub()
-                                        If lblDtlsFp.Text.Length > 0 Then
-                                            Clipboard.SetText(lblDtlsFp.Text)
-                                            MessageBox.Show("Empreinte copiée.", "Security", MessageBoxButtons.OK, MessageBoxIcon.Information)
-                                        End If
-                                    End Sub
+        AddHandler btnCopyFp.Click,
+            Sub()
+                If lblDtlsFp.Text.Length > 0 Then
+                    Clipboard.SetText(lblDtlsFp.Text)
+                    MessageBox.Show("Empreinte copiée.", "Security", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                End If
+            End Sub
 
         btnTrust = New Button() With {.Location = New Point(380, 80), .Width = 140, .Text = "Marquer de confiance"}
         AddHandler btnTrust.Click, AddressOf OnTrustClick
@@ -117,8 +118,8 @@ Public Class SecurityCenterForm
         Try
             ' Source 1: provider (si dispo)
             If PeersProvider IsNot Nothing Then
-                For Each p As String In PeersProvider.Invoke()
-                    If Not String.IsNullOrWhiteSpace(p) Then all.Add(p)
+                For Each P As String In PeersProvider.Invoke()
+                    If Not String.IsNullOrWhiteSpace(P) Then all.Add(P)
                 Next
             End If
             ' Source 2: DB
@@ -154,10 +155,10 @@ Public Class SecurityCenterForm
             Exit Sub
         End If
 
-        ' Un seul paramètre @n réutilisé PARTOUT
-        Dim pN As System.Data.SQLite.SQLiteParameter = LocalDb.P("@n", CType(peer, Object))
+        ' 1) Préparer le paramètre @n UNE fois
+        Dim pN = LocalDb.P("@n", CType(peer, Object))
 
-        ' Trusted ?
+        ' 2) Trusted ?
         Dim trusted As Boolean = False
         Try
             Dim vObj = LocalDb.ExecScalar(Of Object)(
@@ -171,7 +172,7 @@ Public Class SecurityCenterForm
         End Try
         lblTrusted.Text = "Trusted: " & If(trusted, "✓", "×")
 
-        ' Empreinte DTLS
+        ' 3) Empreinte DTLS
         Dim fp As String = ""
         Try
             fp = LocalDb.ExecScalar(Of String)(
@@ -182,7 +183,7 @@ Public Class SecurityCenterForm
         End Try
         lblDtlsFp.Text = If(fp, "")
 
-        ' Note
+        ' 4) Note
         Dim note As String = ""
         Try
             note = LocalDb.ExecScalar(Of String)(
