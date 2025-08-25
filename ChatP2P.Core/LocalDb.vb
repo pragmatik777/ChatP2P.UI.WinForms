@@ -3,14 +3,11 @@ Option Strict On
 Imports System
 Imports System.Data
 Imports System.Data.SQLite
-Imports System.IO
 Imports System.Globalization
+Imports System.IO
 
 Namespace ChatP2P.Core
 
-    ''' <summary>
-    ''' Base SQLite locale (fichier .db dans %APPDATA%\ChatP2P)
-    ''' </summary>
     Public Module LocalDb
 
         Private _dbPath As String
@@ -22,6 +19,8 @@ Namespace ChatP2P.Core
                 Return _dbPath
             End Get
         End Property
+
+        ' ------------------ Init / Schema ------------------
 
         Public Sub Init(Optional appFolderName As String = "ChatP2P", Optional dbFileName As String = "chat.db")
             Dim dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), appFolderName)
@@ -43,10 +42,9 @@ Namespace ChatP2P.Core
 
             If isNew Then
                 CreateSchema()
+            Else
+                Try : EnsureSchemaUpgrades() : Catch : End Try
             End If
-
-            ' Toujours tenter la migration légère
-            Migrate()
         End Sub
 
         Private Sub CreateSchema()
@@ -54,21 +52,23 @@ Namespace ChatP2P.Core
 "CREATE TABLE IF NOT EXISTS Peers(
     Id INTEGER PRIMARY KEY AUTOINCREMENT,
     Name TEXT NOT NULL UNIQUE,
-    Fingerprint TEXT NULL,            -- réservé (identité applicative)
+    Fingerprint TEXT NULL,
     Verified INTEGER NOT NULL DEFAULT 0,
-    LastSeenUtc TEXT NULL
+    LastSeenUtc TEXT NULL,
+    Trusted INTEGER NOT NULL DEFAULT 0,
+    TrustNote TEXT NULL,
+    DtlsFingerprint TEXT NULL
 );
 
 CREATE TABLE IF NOT EXISTS Messages(
     Id INTEGER PRIMARY KEY AUTOINCREMENT,
     PeerName TEXT NOT NULL,
-    Sender TEXT NOT NULL,           -- 'me' ou le nom du peer
+    Sender TEXT NOT NULL,
     Body TEXT NOT NULL,
-    IsP2P INTEGER NOT NULL,         -- 0/1
-    Direction TEXT NOT NULL,        -- 'send' / 'recv'
+    IsP2P INTEGER NOT NULL,
+    Direction TEXT NOT NULL,
     CreatedUtc TEXT NOT NULL
 );
-
 CREATE INDEX IF NOT EXISTS IX_Messages_Peer_Created ON Messages(PeerName, CreatedUtc);
 
 CREATE TABLE IF NOT EXISTS Identities(
@@ -76,56 +76,51 @@ CREATE TABLE IF NOT EXISTS Identities(
     Ed25519Pub BLOB NULL,
     Ed25519Priv BLOB NULL
 );
-
 INSERT OR IGNORE INTO Identities(Id) VALUES(1);
 
 CREATE TABLE IF NOT EXISTS Kv(
     K TEXT PRIMARY KEY,
     V TEXT NULL
-);"
-            ExecNonQueryBatch(ddl)
-        End Sub
+);
 
-        ''' <summary>Migrations légères: colonnes trust/DTLS + nouvelles tables clés/sessions/audit.</summary>
-        Public Sub Migrate()
-            ' Colonnes Peers
-            Try : ExecNonQuery("ALTER TABLE Peers ADD COLUMN DtlsFingerprint TEXT NULL;") : Catch : End Try
-            Try : ExecNonQuery("ALTER TABLE Peers ADD COLUMN Trusted INTEGER NOT NULL DEFAULT 0;") : Catch : End Try
-            Try : ExecNonQuery("ALTER TABLE Peers ADD COLUMN TrustNote TEXT NULL;") : Catch : End Try
-
-            ' Tables clés, sessions, journal
-            Const ddl As String =
-"CREATE TABLE IF NOT EXISTS PeerKeys(
+CREATE TABLE IF NOT EXISTS PeerKeys(
     Id INTEGER PRIMARY KEY AUTOINCREMENT,
     PeerName TEXT NOT NULL,
-    Kind TEXT NOT NULL,                 -- 'mldsa','ed25519','mlkem','x25519', etc.
-    Pub BLOB NOT NULL,
+    Kind TEXT NOT NULL,
+    PublicKey BLOB NOT NULL,
     CreatedUtc TEXT NOT NULL,
     Revoked INTEGER NOT NULL DEFAULT 0,
     RevokedUtc TEXT NULL,
     Note TEXT NULL
 );
+CREATE INDEX IF NOT EXISTS IX_PeerKeys_Peer ON PeerKeys(PeerName, CreatedUtc);
 
 CREATE TABLE IF NOT EXISTS Sessions(
-    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-    PeerName TEXT NOT NULL UNIQUE,      -- une seule session active par pair
-    State BLOB NOT NULL,
-    UpdatedUtc TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS KeyExchanges(
-    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-    PeerName TEXT NOT NULL,
-    Direction TEXT NOT NULL,            -- 'init' / 'resp'
-    Proto TEXT NOT NULL,                -- 'HYBRID_KEM_V1'
-    TranscriptHash TEXT NOT NULL,
+    PeerName TEXT PRIMARY KEY,
+    Secret BLOB NOT NULL,
+    Kdf TEXT NOT NULL,
+    Cipher TEXT NOT NULL,
     CreatedUtc TEXT NOT NULL,
-    Note TEXT NULL
+    LastUsedUtc TEXT NULL
 );"
             ExecNonQueryBatch(ddl)
         End Sub
 
-        ' ----------------- Exécution bas niveau -----------------
+        Private Sub EnsureSchemaUpgrades()
+            Dim alterList As String() = {
+                "ALTER TABLE Peers ADD COLUMN Trusted INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE Peers ADD COLUMN TrustNote TEXT NULL;",
+                "ALTER TABLE Peers ADD COLUMN DtlsFingerprint TEXT NULL;"
+            }
+            For Each sql In alterList
+                Try : ExecNonQuery(sql) : Catch : End Try
+            Next
+            Try : ExecNonQuery("CREATE TABLE IF NOT EXISTS PeerKeys(Id INTEGER PRIMARY KEY AUTOINCREMENT, PeerName TEXT NOT NULL, Kind TEXT NOT NULL, PublicKey BLOB NOT NULL, CreatedUtc TEXT NOT NULL, Revoked INTEGER NOT NULL DEFAULT 0, RevokedUtc TEXT NULL, Note TEXT NULL);") : Catch : End Try
+            Try : ExecNonQuery("CREATE INDEX IF NOT EXISTS IX_PeerKeys_Peer ON PeerKeys(PeerName, CreatedUtc);") : Catch : End Try
+            Try : ExecNonQuery("CREATE TABLE IF NOT EXISTS Sessions(PeerName TEXT PRIMARY KEY, Secret BLOB NOT NULL, Kdf TEXT NOT NULL, Cipher TEXT NOT NULL, CreatedUtc TEXT NOT NULL, LastUsedUtc TEXT NULL);") : Catch : End Try
+        End Sub
+
+        ' ------------------ Low-level exec ------------------
 
         Private Function Open() As SQLiteConnection
             Dim cn As New SQLiteConnection(_connString)
@@ -192,101 +187,129 @@ CREATE TABLE IF NOT EXISTS KeyExchanges(
             End SyncLock
         End Function
 
-        ' --------- Shorthands paramètres ---------
+        ' Param helper
         Public Function P(name As String, value As Object) As SQLiteParameter
             Return New SQLiteParameter(name, value)
         End Function
 
-        ' ----------------- Helpers métier -----------------
+        ' ------------------ Utils ------------------
 
+        Private Function NowIso() As String
+            Return DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+        End Function
+
+        Private Function B2I(b As Boolean) As Integer
+            Return If(b, 1, 0)
+        End Function
+
+        ' ------------------ Peers ------------------
+
+        ''' <summary>Crée la ligne Peers si absente + update LastSeenUtc.</summary>
+        Public Sub TouchPeer(name As String)
+            Dim ts = NowIso()
+            ExecNonQuery("INSERT OR IGNORE INTO Peers(Name, LastSeenUtc) VALUES(@n,@ts);", P("@n", name), P("@ts", ts))
+            ExecNonQuery("UPDATE Peers SET LastSeenUtc=@ts WHERE Name=@n;", P("@ts", ts), P("@n", name))
+        End Sub
+
+        ' --- Compat shim pour anciens appels Form1 ---
         Public Sub EnsurePeer(name As String)
-            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-            ExecNonQuery("INSERT OR IGNORE INTO Peers(Name, LastSeenUtc) VALUES(@n,@ts);", P("@n", name), P("@ts", nowIso))
-            ExecNonQuery("UPDATE Peers SET LastSeenUtc=@ts WHERE Name=@n;", P("@ts", nowIso), P("@n", name))
+            TouchPeer(name)
         End Sub
 
-        ''' <summary>Met à jour la confiance et/ou l’empreinte DTLS (ne remplace pas l’empreinte si une différente est déjà présente, sauf explicitement demandé).</summary>
-        Public Sub UpsertPeerTrust(peer As String,
-                                   Optional trusted As Boolean? = Nothing,
-                                   Optional dtlsFp As String = Nothing,
-                                   Optional note As String = Nothing,
-                                   Optional overwriteFp As Boolean = False)
-            EnsurePeer(peer)
-            If trusted.HasValue Then
-                ExecNonQuery("UPDATE Peers SET Trusted=@t WHERE Name=@n;", P("@t", If(trusted.Value, 1, 0)), P("@n", peer))
-            End If
-            If note IsNot Nothing Then
-                ExecNonQuery("UPDATE Peers SET TrustNote=@x WHERE Name=@n;", P("@x", note), P("@n", peer))
-            End If
-            If dtlsFp IsNot Nothing Then
-                Dim cur As String = ExecScalar(Of String)("SELECT DtlsFingerprint FROM Peers WHERE Name=@n;", P("@n", peer))
-                If String.IsNullOrWhiteSpace(cur) OrElse overwriteFp OrElse String.Equals(cur, dtlsFp, StringComparison.OrdinalIgnoreCase) Then
-                    ExecNonQuery("UPDATE Peers SET DtlsFingerprint=@f WHERE Name=@n;", P("@f", dtlsFp), P("@n", peer))
-                End If
-            End If
-        End Sub
+        Public Function GetPeerDtlsFp(name As String) As String
+            Return ExecScalar(Of String)("SELECT DtlsFingerprint FROM Peers WHERE Name=@n;", P("@n", name))
+        End Function
 
-        Public Function GetPeerTrusted(peer As String) As Boolean
-            Dim v = ExecScalar(Of Object)("SELECT Trusted FROM Peers WHERE Name=@n;", P("@n", peer))
+        Public Function GetPeerTrusted(name As String) As Boolean
+            Dim v As Object = ExecScalar(Of Object)("SELECT Trusted FROM Peers WHERE Name=@n;", P("@n", name))
             If v Is Nothing OrElse v Is DBNull.Value Then Return False
             Return Convert.ToInt32(v, CultureInfo.InvariantCulture) <> 0
         End Function
+        ' ----------------------------------------------
 
-        Public Function GetPeerDtlsFp(peer As String) As String
-            Return ExecScalar(Of String)("SELECT DtlsFingerprint FROM Peers WHERE Name=@n;", P("@n", peer))
-        End Function
+        ''' <summary>Met à jour confiance/note/empreinte DTLS du peer.</summary>
+        Public Sub UpsertPeerTrust(name As String,
+                                   Optional trusted As Boolean? = Nothing,
+                                   Optional note As String = Nothing,
+                                   Optional dtlsFp As String = Nothing)
+            TouchPeer(name)
 
-        ' --- Gestion des clés ---
+            If trusted.HasValue Then
+                ExecNonQuery("UPDATE Peers SET Trusted=@t WHERE Name=@n;",
+                             P("@t", B2I(trusted.Value)), P("@n", name))
+            End If
 
-        Public Sub AddPeerKey(peer As String, kind As String, pub As Byte(), Optional note As String = Nothing)
-            EnsurePeer(peer)
-            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-            ExecNonQuery("INSERT INTO PeerKeys(PeerName,Kind,Pub,CreatedUtc,Note) VALUES(@p,@k,@b,@t,@n);",
-                         P("@p", peer), P("@k", kind), P("@b", pub), P("@t", nowIso), P("@n", If(note, CType(DBNull.Value, Object))))
-        End Sub
+            If note IsNot Nothing Then
+                ExecNonQuery("UPDATE Peers SET TrustNote=@note WHERE Name=@n;",
+                             P("@note", note), P("@n", name))
+            End If
 
-        Public Function GetPeerKeys(peer As String) As DataTable
-            Return Query("SELECT Id,Kind,CreatedUtc,Revoked,RevokedUtc,Note FROM PeerKeys WHERE PeerName=@p ORDER BY CreatedUtc DESC;", P("@p", peer))
-        End Function
-
-        Public Sub RevokePeerKey(id As Long, Optional note As String = Nothing)
-            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-            ExecNonQuery("UPDATE PeerKeys SET Revoked=1, RevokedUtc=@r, Note=COALESCE(Note,'') || CASE WHEN @n IS NULL THEN '' ELSE (' | '||@n) END WHERE Id=@id;",
-                         P("@r", nowIso), P("@n", If(note, CType(DBNull.Value, Object))), P("@id", id))
-        End Sub
-
-        Public Function GetActivePeerKey(peer As String, kind As String) As Byte()
-            Return ExecScalar(Of Byte())("SELECT Pub FROM PeerKeys WHERE PeerName=@p AND Kind=@k AND Revoked=0 ORDER BY CreatedUtc DESC LIMIT 1;",
-                                         P("@p", peer), P("@k", kind))
-        End Function
-
-        ' --- Sessions (ratchet/state) ---
-
-        Public Sub SaveSession(peer As String, state As Byte())
-            EnsurePeer(peer)
-            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-            Dim rows = ExecNonQuery("UPDATE Sessions SET State=@s, UpdatedUtc=@t WHERE PeerName=@p;",
-                                    P("@s", state), P("@t", nowIso), P("@p", peer))
-            If rows = 0 Then
-                ExecNonQuery("INSERT INTO Sessions(PeerName,State,UpdatedUtc) VALUES(@p,@s,@t);",
-                             P("@p", peer), P("@s", state), P("@t", nowIso))
+            If dtlsFp IsNot Nothing Then
+                ExecNonQuery("UPDATE Peers SET DtlsFingerprint=@fp WHERE Name=@n;",
+                             P("@fp", dtlsFp), P("@n", name))
             End If
         End Sub
 
-        Public Function LoadSession(peer As String) As Byte()
-            Return ExecScalar(Of Byte())("SELECT State FROM Sessions WHERE PeerName=@p;", P("@p", peer))
+        Public Sub SetPeerDtlsFingerprint(name As String, fp As String)
+            TouchPeer(name)
+            ExecNonQuery("UPDATE Peers SET DtlsFingerprint=@fp WHERE Name=@n;", P("@fp", fp), P("@n", name))
+        End Sub
+
+        ' ------------------ PeerKeys ------------------
+
+        Public Sub InsertPeerKey(peer As String, kind As String, publicKey As Byte(), Optional note As String = Nothing)
+            TouchPeer(peer)
+            ExecNonQuery(
+                "INSERT INTO PeerKeys(PeerName, Kind, PublicKey, CreatedUtc, Revoked, Note)
+                 VALUES(@p,@k,@pk,@c,0,@note);",
+                P("@p", peer), P("@k", kind), P("@pk", publicKey), P("@c", NowIso()), P("@note", If(note, CType(DBNull.Value, Object)))
+            )
+        End Sub
+
+        Public Sub RevokePeerKey(id As Long, Optional reasonNote As String = Nothing)
+            ExecNonQuery("UPDATE PeerKeys SET Revoked=1, RevokedUtc=@ru, Note=COALESCE(Note,'') || CASE WHEN @r IS NULL THEN '' ELSE (' | '||@r) END WHERE Id=@id;",
+                         P("@ru", NowIso()), P("@r", If(reasonNote, CType(DBNull.Value, Object))), P("@id", id))
+        End Sub
+
+        Public Function ListPeerKeys(Optional peer As String = Nothing) As DataTable
+            If String.IsNullOrWhiteSpace(peer) Then
+                Return Query("SELECT Id, PeerName, Kind, CreatedUtc, Revoked, RevokedUtc, Note FROM PeerKeys ORDER BY CreatedUtc DESC;")
+            Else
+                Return Query("SELECT Id, PeerName, Kind, CreatedUtc, Revoked, RevokedUtc, Note FROM PeerKeys WHERE PeerName=@p ORDER BY CreatedUtc DESC;",
+                             P("@p", peer))
+            End If
+        End Function
+
+        ' ------------------ Sessions ------------------
+
+        Public Sub UpsertSession(peer As String, secret As Byte(), kdf As String, cipher As String)
+            TouchPeer(peer)
+            Dim now = NowIso()
+            Dim n = ExecNonQuery(
+                "UPDATE Sessions SET Secret=@s, Kdf=@k, Cipher=@c, LastUsedUtc=@lu WHERE PeerName=@p;",
+                P("@s", secret), P("@k", kdf), P("@c", cipher), P("@lu", now), P("@p", peer)
+            )
+            If n = 0 Then
+                ExecNonQuery(
+                    "INSERT INTO Sessions(PeerName, Secret, Kdf, Cipher, CreatedUtc, LastUsedUtc)
+                     VALUES(@p,@s,@k,@c,@cr,@lu);",
+                    P("@p", peer), P("@s", secret), P("@k", kdf), P("@c", cipher), P("@cr", now), P("@lu", now)
+                )
+            End If
+        End Sub
+
+        Public Function GetSession(peer As String) As (Secret As Byte(), Kdf As String, Cipher As String)?
+            Dim dt = Query("SELECT Secret, Kdf, Cipher FROM Sessions WHERE PeerName=@p;", P("@p", peer))
+            If dt Is Nothing OrElse dt.Rows.Count = 0 Then Return Nothing
+            Dim r = dt.Rows(0)
+            Dim sec = CType(r!Secret, Byte())
+            Dim kdf = TryCast(r!Kdf, String)
+            Dim cph = TryCast(r!Cipher, String)
+            Return (sec, kdf, cph)
         End Function
 
         Public Sub DeleteSession(peer As String)
             ExecNonQuery("DELETE FROM Sessions WHERE PeerName=@p;", P("@p", peer))
-        End Sub
-
-        ' --- Journal des échanges de clés ---
-        Public Sub AddKeyExchange(peer As String, direction As String, proto As String, transcriptHash As String, Optional note As String = Nothing)
-            EnsurePeer(peer)
-            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-            ExecNonQuery("INSERT INTO KeyExchanges(PeerName,Direction,Proto,TranscriptHash,CreatedUtc,Note) VALUES(@p,@d,@r,@h,@t,@n);",
-                         P("@p", peer), P("@d", direction), P("@r", proto), P("@h", transcriptHash), P("@t", nowIso), P("@n", If(note, CType(DBNull.Value, Object))))
         End Sub
 
     End Module
