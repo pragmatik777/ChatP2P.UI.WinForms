@@ -92,7 +92,7 @@ Partial Class Form1
         ' 
         btnStartHost.BackColor = Color.Black
         btnStartHost.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnStartHost.Location = New Point(249, 76)
+        btnStartHost.Location = New Point(248, 77)
         btnStartHost.Name = "btnStartHost"
         btnStartHost.Size = New Size(101, 34)
         btnStartHost.TabIndex = 2
