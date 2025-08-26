@@ -7,7 +7,6 @@ Imports System.Net.Sockets
 Imports System.Text
 Imports System.Threading
 Imports System.Globalization
-Imports System.Security.Cryptography
 Imports System.Reflection
 Imports ChatP2P.Core                 ' P2PManager + LocalDb
 Imports ChatP2P.App                  ' RelayHub
@@ -35,19 +34,17 @@ Public Class Form1
     Private _hub As RelayHub
 
     Private ReadOnly _idVerified As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
-    Private ReadOnly _peerFp As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) ' on l’utilise pour FP DTLS
+    Private ReadOnly _peerFp As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
     Private ReadOnly _p2pConn As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
     Private ReadOnly _cryptoActive As New Dictionary(Of String, Boolean)(StringComparer.OrdinalIgnoreCase)
 
     Private ReadOnly _privateChats As New Dictionary(Of String, PrivateChatForm)(StringComparer.OrdinalIgnoreCase)
+
+    ' Pagination historisation
     Private ReadOnly _histCount As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
 
     Private ReadOnly _fileRecv As New Dictionary(Of String, FileRecvState)(StringComparer.Ordinal)
     Private _fileWatchdog As System.Windows.Forms.Timer
-
-    Private ReadOnly _idFilePath As String =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                     "ChatP2P", "identity.bin")
 
     Private ReadOnly _cliBuf As New StringBuilder()
     Private ReadOnly _recentP2P As New Dictionary(Of String, List(Of (DateTime, String)))(StringComparer.OrdinalIgnoreCase)
@@ -56,9 +53,7 @@ Public Class Form1
     Private Function Canon(ByVal s As String) As String
         If s Is Nothing Then Return String.Empty
         Dim r As String = s.Replace(vbCr, "")
-        Do While r.EndsWith(vbLf, StringComparison.Ordinal)
-            r = r.Substring(0, r.Length - 1)
-        Loop
+        Do While r.EndsWith(vbLf, StringComparison.Ordinal) : r = r.Substring(0, r.Length - 1) : Loop
         Return r.TrimEnd()
     End Function
 
@@ -80,13 +75,57 @@ Public Class Form1
         Return False
     End Function
 
+    ' ---------- Strict / Trust helpers ----------
+    Private Function IsStrictEnabled() As Boolean
+        Try
+            If chkStrictTrust IsNot Nothing Then Return chkStrictTrust.Checked
+        Catch
+        End Try
+        ' fallback My.Settings.StrictTrust si présent
+        Try
+            Dim pi = GetType(My.MySettings).GetProperty("StrictTrust", BindingFlags.Instance Or BindingFlags.Public)
+            If pi IsNot Nothing Then
+                Dim v = pi.GetValue(My.Settings, Nothing)
+                If v IsNot Nothing Then Return CBool(v)
+            End If
+        Catch
+        End Try
+        Return False
+    End Function
+
+    Private Function IsPeerTrusted(peer As String) As Boolean
+        Try
+            Dim obj = LocalDb.ExecScalar(Of Object)(
+                "SELECT Trusted FROM Peers WHERE Name=@n;",
+                LocalDb.P("@n", peer)
+            )
+            If obj Is Nothing OrElse obj Is DBNull.Value Then Return False
+            Return Convert.ToInt32(obj, CultureInfo.InvariantCulture) <> 0
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Sub PersistStrictToSettingsIfPossible()
+        Try
+            If chkStrictTrust Is Nothing Then Return
+            Dim pi = GetType(My.MySettings).GetProperty("StrictTrust", BindingFlags.Instance Or BindingFlags.Public)
+            If pi IsNot Nothing Then
+                pi.SetValue(My.Settings, chkStrictTrust.Checked, Nothing)
+                My.Settings.Save()
+            End If
+        Catch
+        End Try
+    End Sub
+
     ' ---------- Form ----------
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         ' DB
         Try : ChatP2P.Core.LocalDb.Init() : Catch ex As Exception : Log("[DB] init failed: " & ex.Message) : End Try
 
-        ' ID
-        Try : Dim id = LoadOrCreateEd25519Identity() : Catch ex As Exception : Log("[ID] init failed: " & ex.Message) : End Try
+        ' (SUPPR) Aucune lecture d'identity.bin / Ed25519 via fichier
+
+        ' (Optionnel) Génération X25519 si nécessaire par le core
         Try : Dim kp = ChatP2P.Crypto.KexX25519.GenerateKeyPair() : Catch : End Try
 
         ' Prefs
@@ -98,12 +137,24 @@ Public Class Form1
             If Not String.IsNullOrWhiteSpace(My.Settings.RecvFolder) AndAlso Directory.Exists(My.Settings.RecvFolder) Then
                 _recvFolder = My.Settings.RecvFolder
             End If
+            ' charger StrictTrust si dispo
+            Try
+                Dim pi = GetType(My.MySettings).GetProperty("StrictTrust", BindingFlags.Instance Or BindingFlags.Public)
+                If pi IsNot Nothing AndAlso chkStrictTrust IsNot Nothing Then
+                    Dim v = pi.GetValue(My.Settings, Nothing)
+                    If v IsNot Nothing Then chkStrictTrust.Checked = CBool(v)
+                End If
+            Catch
+            End Try
         Catch
         End Try
         _displayName = If(String.IsNullOrWhiteSpace(txtName.Text), "Me", txtName.Text.Trim())
 
         AddHandler lstPeers.DoubleClick, AddressOf lstPeers_DoubleClick
         AddHandler lstPeers.SelectedIndexChanged, Sub() UpdateSelectedPeerStatuses()
+        If chkStrictTrust IsNot Nothing Then
+            AddHandler chkStrictTrust.CheckedChanged, Sub() PersistStrictToSettingsIfPossible()
+        End If
 
         InitP2PManager()
 
@@ -118,7 +169,6 @@ Public Class Form1
                     frm.SetCryptoState(_cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer))
                     frm.SetAuthState(_idVerified.ContainsKey(peer) AndAlso _idVerified(peer))
                 End If
-
                 UpdateSelectedPeerStatuses()
             End Sub
 
@@ -140,6 +190,8 @@ Public Class Form1
             My.Settings.RemoteIp = txtRemoteIp.Text.Trim()
             My.Settings.RemotePort = txtRemotePort.Text.Trim()
             My.Settings.RecvFolder = _recvFolder
+            ' StrictTrust si dispo
+            PersistStrictToSettingsIfPossible()
             My.Settings.Save()
         Catch
         End Try
@@ -147,7 +199,7 @@ Public Class Form1
 
     ' ---------- Log ----------
     Private Sub Log(s As String, Optional verbose As Boolean = False)
-        If verbose AndAlso Not chkVerbose.Checked Then Return
+        If verbose AndAlso Not (chkVerbose IsNot Nothing AndAlso chkVerbose.Checked) Then Return
         If txtLog IsNot Nothing AndAlso txtLog.IsHandleCreated AndAlso txtLog.InvokeRequired Then
             txtLog.BeginInvoke(Sub() txtLog.AppendText(s & Environment.NewLine))
         ElseIf txtLog IsNot Nothing Then
@@ -158,7 +210,15 @@ Public Class Form1
     ' ---------- DB helpers ----------
     Private Sub EnsurePeerRow(peer As String)
         Try
-            LocalDb.EnsurePeer(peer)
+            Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+            LocalDb.ExecNonQuery(
+                "INSERT OR IGNORE INTO Peers(Name, LastSeenUtc) VALUES(@n,@ts);",
+                LocalDb.P("@n", peer), LocalDb.P("@ts", nowIso)
+            )
+            LocalDb.ExecNonQuery(
+                "UPDATE Peers SET LastSeenUtc=@ts WHERE Name=@n;",
+                LocalDb.P("@ts", nowIso), LocalDb.P("@n", peer)
+            )
         Catch ex As Exception
             Log("[DB] ensure peer failed: " & ex.Message, verbose:=True)
         End Try
@@ -215,7 +275,7 @@ Public Class Form1
         End If
         Dim rows = New List(Of Data.DataRow)
         For Each r As Data.DataRow In dt.Rows : rows.Add(r) : Next
-        rows.Reverse() ' chronologique
+        rows.Reverse() ' ASC
 
         frm.ClearMessages()
         For Each r In rows
@@ -228,7 +288,7 @@ Public Class Form1
             Dim sender As String =
                 If(String.Equals(dir, "recv", StringComparison.OrdinalIgnoreCase),
                    peer, _displayName)
-            Dim show = If(isp2p, "[P2P] ", "[RELAY] ") & body
+            Dim show = If(isp2p, "[P2P] ", "") & body
             frm.AppendMessage(sender, show)
         Next
     End Sub
@@ -257,6 +317,7 @@ Public Class Form1
             Dim authOk As Boolean = _idVerified.ContainsKey(peer) AndAlso _idVerified(peer)
             Dim cryptoActive As Boolean = _cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer)
             Dim connected As Boolean = _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer)
+
             frm.SetAuthState(authOk)
             frm.SetCryptoState(cryptoActive)
             frm.SetP2PState(connected)
@@ -275,7 +336,7 @@ Public Class Form1
             Distinct(StringComparer.OrdinalIgnoreCase).
             ToList()
         lstPeers.Items.Clear()
-        For Each peerName In cleaned
+        For Each peerName As String In cleaned
             lstPeers.Items.Add(peerName)
         Next
     End Sub
@@ -303,9 +364,13 @@ Public Class Form1
         AddHandler _hub.PrivateArrived,
             Sub(senderName, dest, text)
                 If String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase) Then
-                    EnsurePeerRow(senderName)
+                    ' Strict: IN
+                    If IsStrictEnabled() AndAlso Not IsPeerTrusted(senderName) Then
+                        Log($"[SECURITY] Message RELAY IN bloqué (pair non de confiance): {senderName}")
+                        Exit Sub
+                    End If
                     EnsurePrivateChat(senderName)
-                    AppendToPrivate(senderName, senderName, "[RELAY] " & text)
+                    AppendToPrivate(senderName, senderName, text)
                     StoreMsg(senderName, outgoing:=False, body:=Canon(text), viaP2P:=False)
                 End If
             End Sub
@@ -445,6 +510,12 @@ Public Class Form1
         Dim iAmDest As Boolean = If(_isHost, String.Equals(dest, _displayName, StringComparison.OrdinalIgnoreCase), True)
         If Not iAmDest Then Return
 
+        ' Strict: on ne reçoit pas de fichiers de pairs non trusted
+        If IsStrictEnabled() AndAlso Not IsPeerTrusted(fromName) Then
+            Log($"[SECURITY] Fichier RELAY IN bloqué (pair non de confiance): {fromName}")
+            Return
+        End If
+
         Dim savePath As String = ""
         If Not String.IsNullOrEmpty(_recvFolder) AndAlso Directory.Exists(_recvFolder) Then
             savePath = MakeUniquePath(Path.Combine(_recvFolder, fname))
@@ -521,7 +592,7 @@ Public Class Form1
                     If stalled AndAlso st.Received = 0 Then toClose.Add(kv.Key)
                 End If
             Next
-            For Each tid In toClose
+            For Each tid As String In toClose
                 Try
                     Dim st = _fileRecv(tid)
                     Try : st.File.Flush() : st.File.Close() : Catch : End Try
@@ -581,10 +652,14 @@ Public Class Form1
                             Dim toPeer = parts(1)
                             Dim body = parts(2)
                             If String.Equals(toPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then
-                                EnsurePeerRow(fromPeer)
-                                EnsurePrivateChat(fromPeer)
-                                AppendToPrivate(fromPeer, fromPeer, "[RELAY] " & body)
-                                StoreMsg(fromPeer, outgoing:=False, body:=Canon(body), viaP2P:=False)
+                                ' Strict: IN
+                                If IsStrictEnabled() AndAlso Not IsPeerTrusted(fromPeer) Then
+                                    Log($"[SECURITY] Message RELAY IN bloqué (pair non de confiance): {fromPeer}")
+                                Else
+                                    EnsurePrivateChat(fromPeer)
+                                    AppendToPrivate(fromPeer, fromPeer, body)
+                                    StoreMsg(fromPeer, outgoing:=False, body:=Canon(body), viaP2P:=False)
+                                End If
                             End If
                         End If
 
@@ -608,7 +683,7 @@ Public Class Form1
         End Try
     End Sub
 
-    ' ---------- ICE dispatch + capture FP DTLS ----------
+    ' ---------- ICE dispatch ----------
     Private Sub OnHubFileSignal(raw As String)
         If raw.StartsWith(Proto.TAG_FILEMETA, StringComparison.Ordinal) Then HandleFileMeta(raw)
         If raw.StartsWith(Proto.TAG_FILECHUNK, StringComparison.Ordinal) Then HandleFileChunk(raw)
@@ -616,8 +691,7 @@ Public Class Form1
     End Sub
 
     Private Sub OnHubIceSignal(raw As String)
-        If _isHost Then Exit Sub
-
+        If _isHost Then Exit Sub ' le host ne fait pas de P2P ici
         Try
             If raw.StartsWith(Proto.TAG_ICE_OFFER, StringComparison.Ordinal) Then
                 Dim p = raw.Substring(Proto.TAG_ICE_OFFER.Length).Split(":"c, 3)
@@ -626,8 +700,13 @@ Public Class Form1
                     If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
                        OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
 
+                    ' Strict: ignorer offres d'un non-trusted
+                    If IsStrictEnabled() AndAlso Not IsPeerTrusted(fromPeer) Then
+                        Log($"[SECURITY] Offre ICE rejetée (pair non de confiance): {fromPeer}")
+                        Exit Sub
+                    End If
+
                     Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
-                    CaptureDtlsFingerprint(fromPeer, sdp)
                     P2PManager.HandleOffer(fromPeer, sdp, New String() {"stun:stun.l.google.com:19302"})
                 End If
 
@@ -638,8 +717,12 @@ Public Class Form1
                     If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
                        OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
 
+                    If IsStrictEnabled() AndAlso Not IsPeerTrusted(fromPeer) Then
+                        Log($"[SECURITY] Réponse ICE ignorée (pair non de confiance): {fromPeer}")
+                        Exit Sub
+                    End If
+
                     Dim sdp = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
-                    CaptureDtlsFingerprint(fromPeer, sdp)
                     P2PManager.HandleAnswer(fromPeer, sdp)
                 End If
 
@@ -650,6 +733,11 @@ Public Class Form1
                     If String.Equals(fromPeer, "Server", StringComparison.OrdinalIgnoreCase) _
                        OrElse String.Equals(fromPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then Exit Sub
 
+                    If IsStrictEnabled() AndAlso Not IsPeerTrusted(fromPeer) Then
+                        Log($"[SECURITY] Candidate ICE ignoré (pair non de confiance): {fromPeer}")
+                        Exit Sub
+                    End If
+
                     Dim cand = Encoding.UTF8.GetString(Convert.FromBase64String(p(2)))
                     P2PManager.HandleCandidate(fromPeer, cand)
                 End If
@@ -659,59 +747,17 @@ Public Class Form1
         End Try
     End Sub
 
-    Private Sub CaptureDtlsFingerprint(peer As String, sdp As String)
-        Try
-            If String.IsNullOrWhiteSpace(sdp) Then Return
-            Dim fp = TryExtractDtlsSha256Fingerprint(sdp)
-            If String.IsNullOrWhiteSpace(fp) Then Return
-
-            _peerFp(peer) = fp ' pour affichage éventuel
-            EnsurePeerRow(peer)
-
-            Dim stored = LocalDb.GetPeerDtlsFp(peer)
-            If String.IsNullOrWhiteSpace(stored) Then
-                ' Première fois: on stocke mais on ne marque pas trusted
-                LocalDb.UpsertPeerTrust(peer, dtlsFp:=fp)
-                _idVerified(peer) = False
-            Else
-                ' Compare + statut "Auth"
-                Dim match = String.Equals(stored, fp, StringComparison.OrdinalIgnoreCase)
-                Dim trusted = LocalDb.GetPeerTrusted(peer)
-                _idVerified(peer) = (match AndAlso trusted)
-                If Not match Then
-                    Log($"[SEC] Alerte: empreinte DTLS différente pour {peer}. Attendue={stored}, vue={fp}")
-                End If
-            End If
-
-            UpdateSelectedPeerStatuses()
-        Catch ex As Exception
-            Log("[SEC] capture DTLS FP error: " & ex.Message, verbose:=True)
-        End Try
-    End Sub
-
-    Private Function TryExtractDtlsSha256Fingerprint(sdp As String) As String
-        Dim lines = sdp.Replace(vbCr, "").Split(ControlChars.Lf)
-        For Each lnRaw In lines
-            Dim ln = lnRaw.Trim()
-            If ln.Length = 0 Then Continue For
-            If ln.StartsWith("a=fingerprint:", StringComparison.OrdinalIgnoreCase) Then
-                Dim rest = ln.Substring("a=fingerprint:".Length).Trim()
-                ' format: "sha-256 AB:CD:EF:..."
-                Dim sp = rest.Split({" "c, vbTab}, StringSplitOptions.RemoveEmptyEntries)
-                If sp.Length >= 2 AndAlso sp(0).Equals("sha-256", StringComparison.OrdinalIgnoreCase) Then
-                    Dim fp = sp(1).Trim().ToUpperInvariant()
-                    Return fp
-                End If
-            End If
-        Next
-        Return ""
-    End Function
-
     ' ---------- P2P texte ----------
     Private Sub OnP2PText_FromP2P(peer As String, text As String)
         If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
             Me.BeginInvoke(Sub() OnP2PText_FromP2P(peer, text)) : Return
         End If
+        ' Strict: IN P2P
+        If IsStrictEnabled() AndAlso Not IsPeerTrusted(peer) Then
+            Log($"[SECURITY] Message P2P IN bloqué (pair non de confiance): {peer}")
+            Return
+        End If
+
         Dim norm As String = Canon(text)
         If SeenRecently(peer, norm) Then Return
 
@@ -741,7 +787,7 @@ Public Class Form1
         Dim sendCb As Action(Of String) = Sub(text As String) SendPrivateMessage(peer, text)
         frm = New PrivateChatForm(_displayName, peer, sendCb)
 
-        ' Scroll-up & purge & bouton Start P2P
+        ' événements PrivateChatForm
         AddHandler frm.ScrollTopReached,
             Sub()
                 Dim stepSize As Integer = 50
@@ -751,7 +797,11 @@ Public Class Form1
             End Sub
 
         AddHandler frm.PurgeRequested, Sub() PurgeHistory(peer, frm)
-        AddHandler frm.StartP2PRequested, Sub() StartP2P(peer)
+
+        AddHandler frm.StartP2PRequested,
+            Sub()
+                StartP2P(peer)
+            End Sub
 
         _privateChats(peer) = frm
 
@@ -813,6 +863,12 @@ Public Class Form1
         If String.IsNullOrWhiteSpace(dest) OrElse String.IsNullOrWhiteSpace(text) Then Return
         Dim canonText As String = Canon(text)
 
+        ' Strict: OUT
+        If IsStrictEnabled() AndAlso Not IsPeerTrusted(dest) Then
+            Log($"[SECURITY] Envoi bloqué (pair non de confiance): {dest}")
+            Return
+        End If
+
         Try
             If ChatP2P.Core.P2PManager.TrySendP2P(dest, canonText) Then
                 StoreMsg(dest, outgoing:=True, body:=canonText, viaP2P:=True)
@@ -835,97 +891,61 @@ Public Class Form1
         End If
 
         StoreMsg(dest, outgoing:=True, body:=canonText, viaP2P:=False)
-        AppendToPrivate(dest, _displayName, "[RELAY] " & canonText)
+        AppendToPrivate(dest, _displayName, canonText)
     End Sub
 
-    ' ---------- Démarrage d’une session P2P ----------
+    ' ---------- Démarrage P2P ----------
     Private Sub StartP2P(peer As String)
+        ' Strict: blocage démarrage si non-trusted
+        If IsStrictEnabled() AndAlso Not IsPeerTrusted(peer) Then
+            Log($"[SECURITY] Démarrage P2P bloqué (pair non de confiance): {peer}")
+            Return
+        End If
+
         Try
-            If String.IsNullOrWhiteSpace(peer) Then
-                Log("[P2P] Peer invalide.")
-                Return
-            End If
-
             Log($"[P2P] Négociation démarrée vers {peer}")
-
-            Dim tp As Type = GetType(ChatP2P.Core.P2PManager)
-            Dim all = tp.GetMethods(Reflection.BindingFlags.Public Or Reflection.BindingFlags.Static)
-
-            ' 1) Essais par NOMS “classiques” (liste élargie)
-            Dim nameCandidates As String() = {
-            "StartNegotiation", "BeginNegotiation", "Negotiate", "Start",
-            "CreateOffer", "StartOffer", "Offer",
-            "Initiate", "InitiateNegotiation",
-            "Dial", "Call",
-            "ConnectToPeer", "Connect",
-            "StartP2P", "StartPeer", "Open", "OpenPeer", "StartSession"
-        }
-
-            Dim mi As Reflection.MethodInfo = Nothing
-
-            For Each nm In nameCandidates
-                mi = all.FirstOrDefault(Function(m) String.Equals(m.Name, nm, StringComparison.OrdinalIgnoreCase))
-                If mi IsNot Nothing Then Exit For
-            Next
-
-            ' 2) Sinon, essai par SIGNATURE (String, IEnumerable(Of String)) ou (String, String())
-            If mi Is Nothing Then
-                For Each m In all
-                    Dim ps = m.GetParameters()
-                    If ps.Length = 2 AndAlso ps(0).ParameterType Is GetType(String) Then
-                        Dim p2 = ps(1).ParameterType
-                        Dim ok As Boolean =
-                        GetType(IEnumerable(Of String)).IsAssignableFrom(p2) OrElse
-                        p2 Is GetType(String())
-                        If ok Then
-                            mi = m
-                            Exit For
-                        End If
-                    End If
-                Next
+            If Not TryStartNegotiation(peer, New String() {"stun:stun.l.google.com:19302"}) Then
+                Log("[P2P] Impossible de démarrer: méthode Core introuvable (StartNegotiation/BeginNegotiation/Negotiate/Start/StartP2P/Initiate).")
             End If
-
-            ' 3) Sinon, essai (String) seul
-            If mi Is Nothing Then
-                For Each m In all
-                    Dim ps = m.GetParameters()
-                    If ps.Length = 1 AndAlso ps(0).ParameterType Is GetType(String) Then
-                        mi = m
-                        Exit For
-                    End If
-                Next
-            End If
-
-            If mi Is Nothing Then
-                ' Rien trouvé : on logue les méthodes dispo pour debug
-                If chkVerbose IsNot Nothing AndAlso chkVerbose.Checked Then
-                    Dim sigs = String.Join(", ",
-                    all.Select(Function(m)
-                                   Dim pars = String.Join(", ", m.GetParameters().Select(Function(p) p.ParameterType.Name))
-                                   Return m.Name & "(" & pars & ")"
-                               End Function))
-                    Log("[P2P] Méthode Core introuvable. Méthodes publiques dispo: " & sigs, verbose:=True)
-                End If
-                Log("[P2P] Impossible de démarrer: aucune méthode compatible dans Core.")
-                Return
-            End If
-
-            ' 4) Invocation avec les bons arguments
-            Dim pars2 = mi.GetParameters()
-            If pars2.Length = 2 Then
-                mi.Invoke(Nothing, New Object() {peer, New String() {"stun:stun.l.google.com:19302"}})
-            ElseIf pars2.Length = 1 Then
-                mi.Invoke(Nothing, New Object() {peer})
-            Else
-                Log("[P2P] Méthode trouvée mais signature non gérée: " & mi.Name & " (" & pars2.Length & " params)")
-            End If
-
         Catch ex As Exception
-            Log("[P2P] StartP2P error: " & ex.Message)
+            Log($"[P2P] StartNegotiation error: {ex.Message}")
         End Try
     End Sub
 
-
+    ' Essaie plusieurs noms/signatures possibles dans le Core
+    Private Function TryStartNegotiation(peer As String, stuns As String()) As Boolean
+        Try
+            Dim tp = GetType(ChatP2P.Core.P2PManager)
+            Dim candidates = New String() {"StartNegotiation", "BeginNegotiation", "Negotiate", "Start", "StartP2P", "Initiate"}
+            For Each mName As String In candidates
+                Dim mi = tp.GetMethod(mName, BindingFlags.Public Or BindingFlags.Static)
+                If mi Is Nothing Then Continue For
+                Dim ps = mi.GetParameters()
+                Try
+                    Select Case ps.Length
+                        Case 2
+                            If ps(0).ParameterType Is GetType(String) AndAlso
+                               GetType(IEnumerable(Of String)).IsAssignableFrom(ps(1).ParameterType) Then
+                                mi.Invoke(Nothing, New Object() {peer, stuns})
+                                Return True
+                            End If
+                        Case 1
+                            If ps(0).ParameterType Is GetType(String) Then
+                                mi.Invoke(Nothing, New Object() {peer})
+                                Return True
+                            End If
+                        Case 0
+                            mi.Invoke(Nothing, Nothing)
+                            Return True
+                    End Select
+                Catch
+                    ' on tente le suivant
+                End Try
+            Next
+        Catch
+        End Try
+        Return False
+    End Function
 
     ' ---------- P2P init ----------
     Private Sub InitP2PManager()
@@ -983,87 +1003,10 @@ Public Class Form1
         If e.KeyCode = Keys.Enter Then e.SuppressKeyPress = True : e.Handled = True : SaveSettings()
     End Sub
 
-    ' ---------- ID utils ----------
-    Private Function LoadOrCreateEd25519Identity() As (Pub As Byte(), Priv As Byte())
-        Dim dir = Path.GetDirectoryName(_idFilePath)
-        If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
-        If File.Exists(_idFilePath) Then
-            Dim all = File.ReadAllBytes(_idFilePath)
-            If all IsNot Nothing AndAlso all.Length = (32 + 64) Then
-                Dim pubKey(31) As Byte, privKey(63) As Byte
-                Buffer.BlockCopy(all, 0, pubKey, 0, 32)
-                Buffer.BlockCopy(all, 32, privKey, 0, 64)
-                Return (pubKey, privKey)
-            End If
-        End If
-        Dim edType As Type = Nothing
-        For Each asm In AppDomain.CurrentDomain.GetAssemblies()
-            edType = asm.GetType("ChatP2P.Crypto.Ed25519", False)
-            If edType IsNot Nothing Then Exit For
-        Next
-        If edType Is Nothing Then Throw New MissingMethodException("ChatP2P.Crypto.Ed25519 type not found.")
-        Dim m = edType.GetMethod("GenerateKeyPair", BindingFlags.Public Or BindingFlags.Static)
-        If m Is Nothing Then Throw New MissingMethodException("Ed25519.GenerateKeyPair not found.")
-        Dim kv = m.Invoke(Nothing, Nothing)
-        Dim pubKey2 As Byte() = TryGetFieldOrProp(Of Byte())(kv, {"pub", "Pub", "PublicKey"})
-        Dim privKey2 As Byte() = TryGetFieldOrProp(Of Byte())(kv, {"priv", "Priv", "PrivateKey", "SecretKey"})
-        If pubKey2 Is Nothing OrElse privKey2 Is Nothing Then Throw New Exception("Invalid Ed25519 pair.")
-        Dim all2(32 + 64 - 1) As Byte
-        Buffer.BlockCopy(pubKey2, 0, all2, 0, 32)
-        Buffer.BlockCopy(privKey2, 0, all2, 32, 64)
-        File.WriteAllBytes(_idFilePath, all2)
-        Return (pubKey2, privKey2)
-    End Function
-
-    Private Function GenerateX25519KeyPairReflect() As (priv As Byte(), pub As Byte())
-        Dim kexType As Type = Nothing
-        kexType = Type.GetType("ChatP2P.Crypto.KexX25519, ChatP2P.Crypto", throwOnError:=False)
-        If kexType Is Nothing Then
-            Try
-                Dim asm = Assembly.Load("ChatP2P.Crypto")
-                kexType = asm.GetType("ChatP2P.Crypto.KexX25519", throwOnError:=False)
-            Catch
-            End Try
-        End If
-        If kexType Is Nothing Then
-            For Each asm In AppDomain.CurrentDomain.GetAssemblies()
-                Dim t = asm.GetType("ChatP2P.Crypto.KexX25519", False)
-                If t IsNot Nothing Then kexType = t : Exit For
-            Next
-        End If
-        If kexType Is Nothing Then Throw New MissingMethodException("ChatP2P.Crypto.KexX25519 type not found.")
-
-        Dim m = kexType.GetMethod("GenerateKeyPair", BindingFlags.Public Or BindingFlags.Static)
-        If m Is Nothing Then Throw New MissingMethodException("KexX25519.GenerateKeyPair not found.")
-        Dim kv = m.Invoke(Nothing, Nothing)
-        Dim pub As Byte() = TryGetFieldOrProp(Of Byte())(kv, New String() {"pub", "Pub", "PublicKey"})
-        Dim priv As Byte() = TryGetFieldOrProp(Of Byte())(kv, New String() {"priv", "Priv", "PrivateKey"})
-        If priv Is Nothing OrElse pub Is Nothing Then Throw New Exception("Invalid X25519 keypair object returned.")
-        Return (priv, pub)
-    End Function
-
-    Private Function TryGetFieldOrProp(Of TRes)(obj As Object, names As IEnumerable(Of String)) As TRes
-        If obj Is Nothing Then Return Nothing
-        Dim tp = obj.GetType()
-        For Each nm In names
-            Dim pi = tp.GetProperty(nm, BindingFlags.Public Or BindingFlags.Instance)
-            If pi IsNot Nothing Then
-                Dim v = pi.GetValue(obj, Nothing)
-                If TypeOf v Is TRes Then Return CType(v, TRes)
-            End If
-            Dim fi = tp.GetField(nm, BindingFlags.Public Or BindingFlags.Instance)
-            If fi IsNot Nothing Then
-                Dim v = fi.GetValue(obj)
-                If TypeOf v Is TRes Then Return CType(v, TRes)
-            End If
-        Next
-        Return Nothing
-    End Function
-
     ' ---------- Security Center ----------
     Private Sub btnSecurity_Click(sender As Object, e As EventArgs) Handles btnSecurity.Click
         Try
-            Dim f As New SecurityCenterForm(_idFilePath) With {
+            Dim f As New SecurityCenterForm("") With { ' plus de chemin identité fichier
                 .PeersProvider = Function() _peerFp.Keys.ToList(),
                 .PeerStatusProvider = Function(peer As String)
                                           Dim st = (Verified:=False, Fp:="", P2PConnected:=False, CryptoActive:=False)

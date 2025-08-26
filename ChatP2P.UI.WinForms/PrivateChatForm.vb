@@ -184,4 +184,8 @@ Public Class PrivateChatForm
         lblAuth.Text = If(verified, "Auth: ✅", "Auth: ❌")
         lblAuth.ForeColor = If(verified, Color.DarkGreen, Color.Firebrick)
     End Sub
+
+    Private Sub PrivateChatForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+
+    End Sub
 End Class

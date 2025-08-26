@@ -50,6 +50,7 @@ Partial Class Form1
         btnSend = New Button()
         txtMessage = New TextBox()
         txtLog = New RichTextBox()
+        chkStrictTrust = New CheckBox()
         GroupBox1.SuspendLayout()
         GroupBox2.SuspendLayout()
         GroupBox3.SuspendLayout()
@@ -188,6 +189,7 @@ Partial Class Form1
         ' GroupBox3
         ' 
         GroupBox3.BackColor = Color.Transparent
+        GroupBox3.Controls.Add(chkStrictTrust)
         GroupBox3.Controls.Add(btnSecurity)
         GroupBox3.Controls.Add(chkVerbose)
         GroupBox3.Controls.Add(btnChooseRecvFolder)
@@ -335,6 +337,16 @@ Partial Class Form1
         txtLog.TabIndex = 0
         txtLog.Text = ""
         ' 
+        ' chkStrictTrust
+        ' 
+        chkStrictTrust.AutoSize = True
+        chkStrictTrust.Location = New Point(224, 375)
+        chkStrictTrust.Name = "chkStrictTrust"
+        chkStrictTrust.Size = New Size(145, 32)
+        chkStrictTrust.TabIndex = 10
+        chkStrictTrust.Text = "Mode Strict "
+        chkStrictTrust.UseVisualStyleBackColor = True
+        ' 
         ' Form1
         ' 
         AutoScaleDimensions = New SizeF(10F, 25F)
@@ -384,5 +396,6 @@ Partial Class Form1
     Friend WithEvents btnChooseRecvFolder As Button
     Friend WithEvents chkVerbose As CheckBox
     Friend WithEvents btnSecurity As Button
+    Friend WithEvents chkStrictTrust As CheckBox
 
 End Class
