@@ -59,14 +59,17 @@ Public Class PrivateChatForm
         panelTop.Controls.Add(btnPurge)
         panelTop.Controls.Add(flStatus)
 
-        ' Bottom: input + envoyer (bouton docké à droite, textbox prend le reste)
+        ' Bottom: input + envoyer
         panelBottom.Controls.Add(btnSend)
         panelBottom.Controls.Add(txt)
 
-        ' Ordre d'ajout: top, bottom, puis rtb (rtb est Fill et ne chevauchera pas les panels)
+        ' Ordre d'ajout
         Me.Controls.Add(rtb)
         Me.Controls.Add(panelBottom)
         Me.Controls.Add(panelTop)
+
+        ' Enter = envoyer
+        Me.AcceptButton = btnSend
 
         ' Handlers
         AddHandler btnSend.Click, AddressOf OnSend
@@ -74,12 +77,11 @@ Public Class PrivateChatForm
         AddHandler btnPurge.Click, Sub() RaiseEvent PurgeRequested()
         AddHandler btnStartP2P.Click, Sub() RaiseEvent StartP2PRequested()
         AddHandler rtb.VScroll, AddressOf OnRtbScroll
-        AddHandler rtb.Resize, AddressOf OnRtbScroll   ' recheck quand on redimensionne (pour capter top visible)
+        AddHandler rtb.Resize, AddressOf OnRtbScroll
     End Sub
 
     ' ===== Scroll haut détecté =====
     Private Sub OnRtbScroll(sender As Object, e As EventArgs)
-        ' On considère "haut atteint" si la 1re ligne est visible
         Dim firstCharIdx As Integer = rtb.GetCharIndexFromPosition(New Point(2, 2))
         Dim firstLine As Integer = rtb.GetLineFromCharIndex(firstCharIdx)
         If firstLine <= 0 Then
@@ -91,7 +93,11 @@ Public Class PrivateChatForm
     Private Sub OnSend(sender As Object, e As EventArgs)
         Dim msg = txt.Text.Trim()
         If msg.Length = 0 Then Return
-        _send(msg)
+        Try
+            _send(msg) ' -> Form1 décidera P2P/RELAY et fera l’écho local
+        Catch
+            ' on ignore (le form parent loguera si besoin)
+        End Try
         txt.Clear()
         txt.Focus()
     End Sub
@@ -110,7 +116,6 @@ Public Class PrivateChatForm
             Return
         End If
 
-        ' Format: "Sender: Body"
         Dim line As String = $"{sender}: {body}{Environment.NewLine}"
         Dim startLine As Integer = rtb.TextLength
         rtb.SelectionStart = startLine
@@ -118,7 +123,6 @@ Public Class PrivateChatForm
         rtb.SelectionColor = Color.Lime
         rtb.AppendText(line)
 
-        ' Coloration du tag uniquement (dans body)
         Dim bodyStartInRtb As Integer = startLine + sender.Length + 2 ' "sender: "
         ColorizeTag(body, "[P2P]", Color.DarkOrange, bodyStartInRtb)
         ColorizeTag(body, "[RELAY]", Color.DeepSkyBlue, bodyStartInRtb)
@@ -129,9 +133,6 @@ Public Class PrivateChatForm
         rtb.ScrollToCaret()
     End Sub
 
-    ''' <summary>
-    ''' Colorise exactement le tag (dans body), sans affecter le reste.
-    ''' </summary>
     Private Sub ColorizeTag(body As String, tag As String, color As Color, baseInRtb As Integer)
         Dim idxInBody As Integer = body.IndexOf(tag, StringComparison.Ordinal)
         If idxInBody < 0 Then Return
@@ -148,8 +149,8 @@ Public Class PrivateChatForm
 
         ' restore
         rtb.Select(selStart + selLen, 0)
-        rtb.SelectionColor = Color.Lime
-        rtb.SelectionFont = New Font(rtb.Font, FontStyle.Regular)
+        rtb.SelectionColor = selColor
+        rtb.SelectionFont = selFont
     End Sub
 
     Public Sub ClearMessages()
@@ -186,6 +187,6 @@ Public Class PrivateChatForm
     End Sub
 
     Private Sub PrivateChatForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
-
+        ' rien
     End Sub
 End Class

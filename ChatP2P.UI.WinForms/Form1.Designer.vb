@@ -24,6 +24,7 @@ Partial Class Form1
     Private Sub InitializeComponent()
         Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Form1))
         GroupBox1 = New GroupBox()
+        btnStopHost = New Button()
         txtFilePort = New TextBox()
         Label5 = New Label()
         btnStartHost = New Button()
@@ -37,6 +38,7 @@ Partial Class Form1
         txtRemoteIp = New TextBox()
         Label2 = New Label()
         GroupBox3 = New GroupBox()
+        chkStrictTrust = New CheckBox()
         btnSecurity = New Button()
         btnChooseRecvFolder = New Button()
         lblRecvProgress = New Label()
@@ -50,7 +52,6 @@ Partial Class Form1
         btnSend = New Button()
         txtMessage = New TextBox()
         txtLog = New RichTextBox()
-        chkStrictTrust = New CheckBox()
         GroupBox1.SuspendLayout()
         GroupBox2.SuspendLayout()
         GroupBox3.SuspendLayout()
@@ -59,6 +60,7 @@ Partial Class Form1
         ' GroupBox1
         ' 
         GroupBox1.BackColor = Color.Transparent
+        GroupBox1.Controls.Add(btnStopHost)
         GroupBox1.Controls.Add(txtFilePort)
         GroupBox1.Controls.Add(Label5)
         GroupBox1.Controls.Add(btnStartHost)
@@ -72,6 +74,18 @@ Partial Class Form1
         GroupBox1.TabIndex = 0
         GroupBox1.TabStop = False
         GroupBox1.Text = "Local Host"
+        ' 
+        ' btnStopHost
+        ' 
+        btnStopHost.BackColor = Color.Black
+        btnStopHost.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
+        btnStopHost.Location = New Point(249, 82)
+        btnStopHost.Name = "btnStopHost"
+        btnStopHost.Size = New Size(101, 34)
+        btnStopHost.TabIndex = 5
+        btnStopHost.Text = "Stop Host"
+        btnStopHost.TextAlign = ContentAlignment.TopCenter
+        btnStopHost.UseVisualStyleBackColor = False
         ' 
         ' txtFilePort
         ' 
@@ -93,7 +107,7 @@ Partial Class Form1
         ' 
         btnStartHost.BackColor = Color.Black
         btnStartHost.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnStartHost.Location = New Point(248, 77)
+        btnStartHost.Location = New Point(249, 35)
         btnStartHost.Name = "btnStartHost"
         btnStartHost.Size = New Size(101, 34)
         btnStartHost.TabIndex = 2
@@ -212,6 +226,16 @@ Partial Class Form1
         GroupBox3.TabIndex = 2
         GroupBox3.TabStop = False
         GroupBox3.Text = "Messaging"
+        ' 
+        ' chkStrictTrust
+        ' 
+        chkStrictTrust.AutoSize = True
+        chkStrictTrust.Location = New Point(224, 375)
+        chkStrictTrust.Name = "chkStrictTrust"
+        chkStrictTrust.Size = New Size(145, 32)
+        chkStrictTrust.TabIndex = 10
+        chkStrictTrust.Text = "Mode Strict "
+        chkStrictTrust.UseVisualStyleBackColor = True
         ' 
         ' btnSecurity
         ' 
@@ -337,16 +361,6 @@ Partial Class Form1
         txtLog.TabIndex = 0
         txtLog.Text = ""
         ' 
-        ' chkStrictTrust
-        ' 
-        chkStrictTrust.AutoSize = True
-        chkStrictTrust.Location = New Point(224, 375)
-        chkStrictTrust.Name = "chkStrictTrust"
-        chkStrictTrust.Size = New Size(145, 32)
-        chkStrictTrust.TabIndex = 10
-        chkStrictTrust.Text = "Mode Strict "
-        chkStrictTrust.UseVisualStyleBackColor = True
-        ' 
         ' Form1
         ' 
         AutoScaleDimensions = New SizeF(10F, 25F)
@@ -397,5 +411,6 @@ Partial Class Form1
     Friend WithEvents chkVerbose As CheckBox
     Friend WithEvents btnSecurity As Button
     Friend WithEvents chkStrictTrust As CheckBox
+    Friend WithEvents btnStopHost As Button
 
 End Class
