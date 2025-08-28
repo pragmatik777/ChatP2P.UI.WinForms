@@ -22,13 +22,21 @@ Public Class PrivateChatForm
         .Font = New Font("Consolas", 10.0F)
     }
 
-    Private ReadOnly panelTop As New Panel() With {.Dock = DockStyle.Top, .Height = 28}
+    Private ReadOnly panelTop As New Panel() With {.Dock = DockStyle.Top, .Height = 32}
+
+    ' --- PATCH: le panneau de statuts occupe tout l’espace restant (Fill), pas d’AutoSize, pas de wrap ---
     Private ReadOnly flStatus As New FlowLayoutPanel() With {
-        .Dock = DockStyle.Left, .AutoSize = True, .AutoSizeMode = AutoSizeMode.GrowAndShrink
+        .Dock = DockStyle.Fill,
+        .AutoSize = False,
+        .WrapContents = False,
+        .FlowDirection = FlowDirection.LeftToRight,
+        .Padding = New Padding(6, 4, 6, 4)
     }
+
     Private ReadOnly lblP2P As New Label() With {.AutoSize = True, .Text = "P2P: —", .Margin = New Padding(6, 6, 12, 6)}
     Private ReadOnly lblCrypto As New Label() With {.AutoSize = True, .Text = "Crypto: OFF", .Margin = New Padding(0, 6, 12, 6)}
     Private ReadOnly lblAuth As New Label() With {.AutoSize = True, .Text = "Auth: ❌", .Margin = New Padding(0, 6, 12, 6)}
+
     Private ReadOnly btnStartP2P As New Button() With {.Text = "Démarrer P2P", .Dock = DockStyle.Right, .Width = 120}
     Private ReadOnly btnPurge As New Button() With {.Text = "🗑 Purger", .Dock = DockStyle.Right, .Width = 90}
 
@@ -51,10 +59,12 @@ Public Class PrivateChatForm
         Me.Height = 520
         Me.MinimumSize = New Size(520, 360)
 
-        ' Top: statuts à gauche, actions à droite
+        ' Top: statuts (Fill) + actions dockées à droite
         flStatus.Controls.Add(lblP2P)
         flStatus.Controls.Add(lblCrypto)
         flStatus.Controls.Add(lblAuth)
+
+        ' IMPORTANT : ajouter d'abord les boutons (Dock Right), puis flStatus (Dock Fill)
         panelTop.Controls.Add(btnStartP2P)
         panelTop.Controls.Add(btnPurge)
         panelTop.Controls.Add(flStatus)

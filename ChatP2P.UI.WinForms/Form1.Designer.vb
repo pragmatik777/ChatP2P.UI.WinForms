@@ -52,6 +52,7 @@ Partial Class Form1
         btnSend = New Button()
         txtMessage = New TextBox()
         txtLog = New RichTextBox()
+        chkEncryptRelay = New CheckBox()
         GroupBox1.SuspendLayout()
         GroupBox2.SuspendLayout()
         GroupBox3.SuspendLayout()
@@ -203,6 +204,7 @@ Partial Class Form1
         ' GroupBox3
         ' 
         GroupBox3.BackColor = Color.Transparent
+        GroupBox3.Controls.Add(chkEncryptRelay)
         GroupBox3.Controls.Add(chkStrictTrust)
         GroupBox3.Controls.Add(btnSecurity)
         GroupBox3.Controls.Add(chkVerbose)
@@ -240,7 +242,7 @@ Partial Class Form1
         ' btnSecurity
         ' 
         btnSecurity.BackColor = Color.Black
-        btnSecurity.Location = New Point(461, 348)
+        btnSecurity.Location = New Point(483, 329)
         btnSecurity.Name = "btnSecurity"
         btnSecurity.Size = New Size(112, 34)
         btnSecurity.TabIndex = 9
@@ -361,6 +363,16 @@ Partial Class Form1
         txtLog.TabIndex = 0
         txtLog.Text = ""
         ' 
+        ' chkEncryptRelay
+        ' 
+        chkEncryptRelay.AutoSize = True
+        chkEncryptRelay.Location = New Point(376, 374)
+        chkEncryptRelay.Name = "chkEncryptRelay"
+        chkEncryptRelay.Size = New Size(155, 32)
+        chkEncryptRelay.TabIndex = 11
+        chkEncryptRelay.Text = "Encrypt Relay"
+        chkEncryptRelay.UseVisualStyleBackColor = True
+        ' 
         ' Form1
         ' 
         AutoScaleDimensions = New SizeF(10F, 25F)
@@ -412,5 +424,6 @@ Partial Class Form1
     Friend WithEvents btnSecurity As Button
     Friend WithEvents chkStrictTrust As CheckBox
     Friend WithEvents btnStopHost As Button
+    Friend WithEvents chkEncryptRelay As CheckBox
 
 End Class
