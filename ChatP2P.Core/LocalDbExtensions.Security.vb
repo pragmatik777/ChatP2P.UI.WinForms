@@ -7,36 +7,39 @@ Imports System.Globalization
 Imports System.Text
 Imports System.Security.Cryptography
 
-
 Namespace ChatP2P.Core
 
     Public Module LocalDbExtensionsSecurity
 
-        ' --- Migrations très légères : ajoute des colonnes "VerifiedUtc" et "Note" si elles n'existent pas encore.
+        ' Migrations légères : colonnes / table supplémentaires
         Public Sub EnsurePeerExtraColumns()
             Try
-                ' Ajout "VerifiedUtc"
+                ' Colonne VerifiedUtc
+                Try : LocalDb.ExecNonQuery("ALTER TABLE Peers ADD COLUMN VerifiedUtc TEXT;") : Catch : End Try
+                ' Colonne Note
+                Try : LocalDb.ExecNonQuery("ALTER TABLE Peers ADD COLUMN Note TEXT;") : Catch : End Try
+                ' Colonne Pinned (empêche reset TOFU sans confirmation admin)
+                Try : LocalDb.ExecNonQuery("ALTER TABLE Peers ADD COLUMN Pinned INTEGER DEFAULT 0;") : Catch : End Try
+                ' Table SecurityEvents (historique mismatches et évènements)
                 Try
-                    LocalDb.ExecNonQuery("ALTER TABLE Peers ADD COLUMN VerifiedUtc TEXT;")
+                    LocalDb.ExecNonQuery("
+CREATE TABLE IF NOT EXISTS SecurityEvents(
+    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+    CreatedUtc TEXT NOT NULL,
+    PeerName TEXT NOT NULL,
+    Kind TEXT NOT NULL,             -- ex: 'PUBKEY_MISMATCH', 'TOFU_RESET', 'PIN', 'UNPIN'
+    Details TEXT
+);")
                 Catch
-                    ' ignore si existe déjà
-                End Try
-                ' Ajout "Note"
-                Try
-                    LocalDb.ExecNonQuery("ALTER TABLE Peers ADD COLUMN Note TEXT;")
-                Catch
-                    ' ignore si existe déjà
                 End Try
             Catch
-                ' silencieux
             End Try
         End Sub
 
         Public Sub PeerSetTrusted(name As String, trusted As Boolean)
             If String.IsNullOrWhiteSpace(name) Then Return
             LocalDb.ExecNonQuery("UPDATE Peers SET Trusted=@t WHERE Name=@n;",
-                                 LocalDb.P("@t", If(trusted, 1, 0)),
-                                 LocalDb.P("@n", name))
+                                 LocalDb.P("@t", If(trusted, 1, 0)), LocalDb.P("@n", name))
         End Sub
 
         Public Function PeerIsVerified(name As String) As Boolean
@@ -69,47 +72,64 @@ Namespace ChatP2P.Core
         Public Sub PeerSetNote(name As String, note As String)
             If String.IsNullOrWhiteSpace(name) Then Return
             LocalDb.ExecNonQuery("UPDATE Peers SET Note=@x WHERE Name=@n;",
-                                 LocalDb.P("@x", If(note, "")),
-                                 LocalDb.P("@n", name))
+                                 LocalDb.P("@x", If(note, "")), LocalDb.P("@n", name))
         End Sub
 
-        ' Oublie la pubkey Ed25519 stockée (Reset TOFU)
+        Public Function PeerGetPinned(name As String) As Boolean
+            If String.IsNullOrWhiteSpace(name) Then Return False
+            Dim dt = LocalDb.Query("SELECT Pinned FROM Peers WHERE Name=@n;", LocalDb.P("@n", name))
+            If dt.Rows.Count = 0 Then Return False
+            Dim v As Integer = 0
+            If Not IsDBNull(dt.Rows(0)!Pinned) Then v = Convert.ToInt32(dt.Rows(0)!Pinned, CultureInfo.InvariantCulture)
+            Return (v <> 0)
+        End Function
+
+        Public Sub PeerSetPinned(name As String, pinned As Boolean)
+            If String.IsNullOrWhiteSpace(name) Then Return
+            LocalDb.ExecNonQuery("UPDATE Peers SET Pinned=@p WHERE Name=@n;",
+                                 LocalDb.P("@p", If(pinned, 1, 0)), LocalDb.P("@n", name))
+            LogSecurityEvent(name, If(pinned, "PIN", "UNPIN"), "")
+        End Sub
+
+        ' Oublie la pubkey Ed25519 (Reset TOFU) — respect du flag Pinned à gérer côté UI avant appel
         Public Sub PeerForgetEd25519(name As String)
             If String.IsNullOrWhiteSpace(name) Then Return
-            ' Essaie la table attendue. Si ton schéma diffère, adapte cette requête.
             Try
                 LocalDb.ExecNonQuery("UPDATE Peers SET Ed25519Pub=NULL WHERE Name=@n;", LocalDb.P("@n", name))
+                LogSecurityEvent(name, "TOFU_RESET", "Ed25519Pub cleared")
             Catch
-                ' Si tu stockes ailleurs (ex: table Keyring), tombe à une méthode d'extension existante si dispo.
-                Try
-                    ' Option: une API dédiée si tu l’as créée
-                    ' LocalDbExtensions.PeerSetEd25519_Tofu(name, Nothing) ' si autorise NULL
-                Catch
-                End Try
+                ' Si clé stockée ailleurs, plug-in ici.
             End Try
         End Sub
 
-        ' Récupère une vue consolidée pour la grille
-        Public Function PeerList() As DataTable
-            Dim dt = LocalDb.Query("SELECT Name, Trusted, CreatedUtc, LastSeenUtc, VerifiedUtc, Note FROM Peers ORDER BY Name;")
+        Public Sub LogSecurityEvent(name As String, kind As String, details As String)
+            Dim ts = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+            LocalDb.ExecNonQuery("INSERT INTO SecurityEvents(CreatedUtc, PeerName, Kind, Details) VALUES(@ts,@n,@k,@d);",
+                                 LocalDb.P("@ts", ts), LocalDb.P("@n", name),
+                                 LocalDb.P("@k", kind), LocalDb.P("@d", If(details, "")))
+        End Sub
 
-            ' Ajoute colonnes calculées
+        Public Function GetSecurityEvents(Optional peer As String = "") As DataTable
+            If String.IsNullOrWhiteSpace(peer) Then
+                Return LocalDb.Query("SELECT CreatedUtc, PeerName, Kind, Details FROM SecurityEvents ORDER BY Id DESC;")
+            Else
+                Return LocalDb.Query("SELECT CreatedUtc, PeerName, Kind, Details FROM SecurityEvents WHERE PeerName=@n ORDER BY Id DESC;",
+                                     LocalDb.P("@n", peer))
+            End If
+        End Function
+
+        ' Vue consolidée pour la grille
+        Public Function PeerList() As DataTable
+            Dim dt = LocalDb.Query("SELECT Name, Trusted, CreatedUtc, LastSeenUtc, VerifiedUtc, Note, Pinned FROM Peers ORDER BY Name;")
+
             If Not dt.Columns.Contains("AuthOk") Then dt.Columns.Add("AuthOk", GetType(Boolean))
             If Not dt.Columns.Contains("Fingerprint") Then dt.Columns.Add("Fingerprint", GetType(String))
 
             For Each r As DataRow In dt.Rows
                 Dim name = Convert.ToString(r!Name)
                 Dim pk As Byte() = Nothing
-                Try
-                    pk = LocalDbExtensions.PeerGetEd25519(name)
-                Catch
-                    pk = Nothing
-                End Try
-
-                Dim fp As String = ""
-                If pk IsNot Nothing AndAlso pk.Length > 0 Then
-                    fp = FormatFp(ComputeFp(pk))
-                End If
+                Try : pk = LocalDbExtensions.PeerGetEd25519(name) : Catch : pk = Nothing : End Try
+                Dim fp As String = If(pk IsNot Nothing AndAlso pk.Length > 0, FormatFp(ComputeFp(pk)), "")
 
                 Dim verified As Boolean = False
                 If Not IsDBNull(r!VerifiedUtc) Then
@@ -120,7 +140,6 @@ Namespace ChatP2P.Core
                 r!AuthOk = verified
                 r!Fingerprint = fp
             Next
-
             Return dt
         End Function
 
@@ -132,9 +151,9 @@ Namespace ChatP2P.Core
             Return Convert.ToString(dt.Rows(0)(0), CultureInfo.InvariantCulture)
         End Function
 
-        ' === helpers de fingerprint ===
+        ' === helpers fingerprint ===
         Private Function ComputeFp(pub As Byte()) As Byte()
-            Using sha = SHA256.Create()
+            Using sha As SHA256 = SHA256.Create()
                 Return sha.ComputeHash(pub)
             End Using
         End Function

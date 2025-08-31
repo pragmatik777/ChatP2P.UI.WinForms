@@ -119,6 +119,54 @@ Public Class Form1
         Return False
     End Function
 
+
+    Private Function GetSessionSnapshot(peer As String) As SessionSnapshot
+        Dim snap As New SessionSnapshot()
+        snap.Peer = peer
+        snap.IsStrict = IsStrictEnabled()
+        snap.P2PConnected = (_p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer))
+        snap.RelayKeyEstablished = HasRelayKey(peer)
+        snap.IdentityVerified = (_idVerified.ContainsKey(peer) AndAlso _idVerified(peer))
+        snap.PeerTrusted = IsPeerTrusted(peer)
+        snap.PqRelayEnabled = IsPqRelayEnabled()
+        snap.RelayKdfLabel = If(snap.PqRelayEnabled, "relay-hybrid:", If(snap.RelayKeyEstablished, "relay-classic:", ""))
+        ' fingerprints
+        Try
+            Dim mypk As Byte() = Nothing, mysk As Byte() = Nothing
+            ChatP2P.Core.LocalDbExtensions.IdentityEnsureEd25519(mypk, mysk)
+            If mypk IsNot Nothing Then snap.MyFingerprint = SecurityCenterForm_FormatFpLocal(mypk)
+        Catch
+        End Try
+        Try
+            Dim ppk = ChatP2P.Core.LocalDbExtensions.PeerGetEd25519(peer)
+            If ppk IsNot Nothing AndAlso ppk.Length > 0 Then snap.PeerFingerprint = SecurityCenterForm_FormatFpLocal(ppk)
+        Catch
+        End Try
+        Try
+            snap.LastSeenUtc = ChatP2P.Core.LocalDbExtensionsSecurity.PeerGetField(peer, "LastSeenUtc")
+        Catch
+        End Try
+        Return snap
+    End Function
+
+    ' petit helper pour réutiliser le même formatage (copié depuis SecurityCenterForm)
+    Private Function SecurityCenterForm_FormatFpLocal(pub As Byte()) As String
+        Using sha As SHA256 = SHA256.Create()
+            Dim fp = sha.ComputeHash(pub)
+            Dim hex = BitConverter.ToString(fp).Replace("-", "")
+            Dim sb As New StringBuilder()
+            For i = 0 To hex.Length - 1 Step 4
+                If sb.Length > 0 Then sb.Append("-")
+                Dim take = Math.Min(4, hex.Length - i)
+                sb.Append(hex.Substring(i, take))
+            Next
+            Return sb.ToString()
+        End Using
+    End Function
+
+
+
+
     Private Sub Log(msg As String, Optional verbose As Boolean = False)
         Try
             If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
@@ -1289,12 +1337,13 @@ EchoAndPersist:
     ' ---------- Security Center ----------
     Private Sub btnSecurityCenter_Click(sender As Object, e As EventArgs) Handles btnSecurity.Click
         Try
-            Dim f As New SecurityCenterForm(String.Empty)
+            Dim f As New SecurityCenterForm(String.Empty, AddressOf GetSessionSnapshot)
             f.Show(Me)
         Catch ex As Exception
             Log("[UI] Security Center: " & ex.Message)
         End Try
     End Sub
+
 
     ' ====== Helpers chiffrement RELAY ======
     Private Function HasRelayKey(peer As String) As Boolean
