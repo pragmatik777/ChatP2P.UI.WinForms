@@ -9,6 +9,7 @@ Public Class PrivateChatForm
     Private ReadOnly _myName As String
     Private ReadOnly _peer As String
     Private ReadOnly _send As Action(Of String)
+    Private ReadOnly _sendFile As Action
 
     ' ==== UI ====
     Private ReadOnly rtb As New RichTextBox() With {
@@ -24,7 +25,7 @@ Public Class PrivateChatForm
 
     Private ReadOnly panelTop As New Panel() With {.Dock = DockStyle.Top, .Height = 32}
 
-    ' --- PATCH: le panneau de statuts occupe tout l’espace restant (Fill), pas d’AutoSize, pas de wrap ---
+    ' Le panneau de statuts occupe tout l’espace restant (Fill)
     Private ReadOnly flStatus As New FlowLayoutPanel() With {
         .Dock = DockStyle.Fill,
         .AutoSize = False,
@@ -43,16 +44,19 @@ Public Class PrivateChatForm
     Private ReadOnly panelBottom As New Panel() With {.Dock = DockStyle.Bottom, .Height = 44}
     Private ReadOnly txt As New TextBox() With {.Dock = DockStyle.Fill, .Font = New Font("Segoe UI", 10.0F)}
     Private ReadOnly btnSend As New Button() With {.Text = "Envoyer", .Dock = DockStyle.Right, .Width = 110}
+    Private ReadOnly btnSendFile As New Button() With {.Text = "Envoyer fichier", .Dock = DockStyle.Right, .Width = 140}
 
     ' ==== Events publics ====
     Public Event ScrollTopReached()
     Public Event PurgeRequested()
     Public Event StartP2PRequested()
 
-    Public Sub New(myName As String, peer As String, sendCb As Action(Of String))
+    ' --- Nouveau ctor à 4 paramètres (texte + fichier)
+    Public Sub New(myName As String, peer As String, sendCb As Action(Of String), sendFileCb As Action)
         _myName = myName
         _peer = peer
         _send = sendCb
+        _sendFile = sendFileCb
 
         Me.Text = $"Chat privé avec {peer}"
         Me.Width = 700
@@ -69,11 +73,12 @@ Public Class PrivateChatForm
         panelTop.Controls.Add(btnPurge)
         panelTop.Controls.Add(flStatus)
 
-        ' Bottom: input + envoyer
-        panelBottom.Controls.Add(btnSend)
-        panelBottom.Controls.Add(txt)
+        ' Bottom: ordre Dock Right (btnSendFile puis btnSend) puis Fill (txt)
+        panelBottom.Controls.Add(btnSend)      ' Right (le plus à droite)
+        panelBottom.Controls.Add(btnSendFile)  ' Right (à gauche de Envoyer)
+        panelBottom.Controls.Add(txt)          ' Fill
 
-        ' Ordre d'ajout
+        ' Ordre d'ajout global
         Me.Controls.Add(rtb)
         Me.Controls.Add(panelBottom)
         Me.Controls.Add(panelTop)
@@ -83,11 +88,21 @@ Public Class PrivateChatForm
 
         ' Handlers
         AddHandler btnSend.Click, AddressOf OnSend
+        AddHandler btnSendFile.Click, AddressOf OnSendFile
         AddHandler txt.KeyDown, AddressOf OnTxtKeyDown
         AddHandler btnPurge.Click, Sub() RaiseEvent PurgeRequested()
         AddHandler btnStartP2P.Click, Sub() RaiseEvent StartP2PRequested()
         AddHandler rtb.VScroll, AddressOf OnRtbScroll
         AddHandler rtb.Resize, AddressOf OnRtbScroll
+    End Sub
+
+    ' --- Overload rétro-compatible (3 paramètres) -> appelle une no-op
+    Public Sub New(myName As String, peer As String, sendCb As Action(Of String))
+        Me.New(myName, peer, sendCb, AddressOf NoopSendFile)
+    End Sub
+
+    Private Shared Sub NoopSendFile()
+        ' no-op
     End Sub
 
     ' ===== Scroll haut détecté =====
@@ -99,14 +114,14 @@ Public Class PrivateChatForm
         End If
     End Sub
 
-    ' ===== Envoi =====
+    ' ===== Envoi texte =====
     Private Sub OnSend(sender As Object, e As EventArgs)
         Dim msg = txt.Text.Trim()
         If msg.Length = 0 Then Return
         Try
             _send(msg) ' -> Form1 décidera P2P/RELAY et fera l’écho local
         Catch
-            ' on ignore (le form parent loguera si besoin)
+            ' on ignore (Form1 loguera si besoin)
         End Try
         txt.Clear()
         txt.Focus()
@@ -117,6 +132,15 @@ Public Class PrivateChatForm
             e.SuppressKeyPress = True
             OnSend(Nothing, EventArgs.Empty)
         End If
+    End Sub
+
+    ' ===== Envoi fichier =====
+    Private Sub OnSendFile(sender As Object, e As EventArgs)
+        Try
+            If _sendFile IsNot Nothing Then _sendFile()
+        Catch
+            ' ignore; Form1 loguera les erreurs
+        End Try
     End Sub
 
     ' ===== Ajout de messages =====

@@ -287,7 +287,7 @@ Partial Class Form1
         ' 
         btnChooseRecvFolder.BackColor = Color.Black
         btnChooseRecvFolder.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnChooseRecvFolder.Location = New Point(760, 375)
+        btnChooseRecvFolder.Location = New Point(760, 285)
         btnChooseRecvFolder.Name = "btnChooseRecvFolder"
         btnChooseRecvFolder.Size = New Size(119, 34)
         btnChooseRecvFolder.TabIndex = 8
@@ -307,12 +307,13 @@ Partial Class Form1
         ' 
         btnSendFile.BackColor = Color.Black
         btnSendFile.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnSendFile.Location = New Point(760, 329)
+        btnSendFile.Location = New Point(769, 372)
         btnSendFile.Name = "btnSendFile"
         btnSendFile.Size = New Size(119, 34)
         btnSendFile.TabIndex = 6
         btnSendFile.Text = "Send File"
         btnSendFile.UseVisualStyleBackColor = False
+        btnSendFile.Visible = False
         ' 
         ' pbSend
         ' 
@@ -371,11 +372,11 @@ Partial Class Form1
         ' 
         btnSend.BackColor = Color.Black
         btnSend.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnSend.Location = New Point(811, 284)
+        btnSend.Location = New Point(601, 283)
         btnSend.Name = "btnSend"
-        btnSend.Size = New Size(68, 35)
+        btnSend.Size = New Size(44, 35)
         btnSend.TabIndex = 2
-        btnSend.Text = "Send"
+        btnSend.Text = "@"
         btnSend.UseVisualStyleBackColor = False
         ' 
         ' txtMessage
