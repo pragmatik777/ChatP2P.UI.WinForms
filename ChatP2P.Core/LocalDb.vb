@@ -62,6 +62,7 @@ Namespace ChatP2P.Core
     Name TEXT NOT NULL UNIQUE,
     Fingerprint TEXT NULL,             -- legacy (non utilisé)
     Verified INTEGER NOT NULL DEFAULT 0,
+    CreatedUtc TEXT NULL,              -- NEW
     LastSeenUtc TEXT NULL,
     Trusted INTEGER NOT NULL DEFAULT 0,        -- NEW
     TrustNote TEXT NULL,                        -- NEW
@@ -132,6 +133,14 @@ CREATE TABLE IF NOT EXISTS Sessions(
                     ' Peers.DtlsFingerprint
                     If Not ColumnExists(cn, "Peers", "DtlsFingerprint") Then
                         ExecNonQuery("ALTER TABLE Peers ADD COLUMN DtlsFingerprint TEXT NULL;")
+                    End If
+                    ' Peers.CreatedUtc
+                    If Not ColumnExists(cn, "Peers", "CreatedUtc") Then
+                        ExecNonQuery("ALTER TABLE Peers ADD COLUMN CreatedUtc TEXT NULL;")
+                    End If
+                    ' Peers.LastSeenUtc (par prudence sur d’anciennes DB)
+                    If Not ColumnExists(cn, "Peers", "LastSeenUtc") Then
+                        ExecNonQuery("ALTER TABLE Peers ADD COLUMN LastSeenUtc TEXT NULL;")
                     End If
                 End Using
             End SyncLock
@@ -246,14 +255,21 @@ CREATE TABLE IF NOT EXISTS Sessions(
 
         ' ====================== Helpers métier ======================
 
-        ''' <summary>Crée le peer s’il n’existe pas (pour assurer les FK/logiques).</summary>
+        ''' <summary>Crée le peer s’il n’existe pas (avec CreatedUtc/LastSeenUtc) et met à jour LastSeenUtc.</summary>
         Public Sub EnsurePeer(name As String)
             If String.IsNullOrWhiteSpace(name) Then Return
             Dim nowIso = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-            ExecNonQuery("INSERT OR IGNORE INTO Peers(Name, LastSeenUtc) VALUES(@n,@ts);",
-                         P("@n", name), P("@ts", nowIso))
-            ExecNonQuery("UPDATE Peers SET LastSeenUtc=@ts WHERE Name=@n;",
-                         P("@ts", nowIso), P("@n", name))
+
+            ' Création si absent
+            ExecNonQuery("
+                INSERT OR IGNORE INTO Peers(Name, CreatedUtc, LastSeenUtc)
+                VALUES(@n, @ts, @ts);",
+                P("@n", name), P("@ts", nowIso))
+
+            ' Mise à jour du LastSeen à chaque passage
+            ExecNonQuery("
+                UPDATE Peers SET LastSeenUtc=@ts WHERE Name=@n;",
+                P("@ts", nowIso), P("@n", name))
         End Sub
 
         Public Function GetPeerTrusted(name As String) As Boolean

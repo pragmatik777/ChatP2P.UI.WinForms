@@ -1,7 +1,6 @@
 ﻿Option Strict On
 Option Explicit On
 
-
 Imports System
 Imports System.Globalization
 Imports System.IO
@@ -26,6 +25,18 @@ Public Class Form1
     Private Const ENC_ACK As String = "[ENCACK]"
     Private Const ENC_PREFIX As String = "ENC1:"
     Private Const ENC_FILE_MARK As String = "[ENC]"
+
+    ' ==== TAGs/Marqueurs identité TOFU ====
+    Private Const ID_HELLO As String = "[IDHELLO]"    ' [IDHELLO]<b64(pub)>:<b64(nonce)>
+    Private Const ID_PROOF As String = "[IDPROOF]"    ' [IDPROOF]<b64(nonce)>:<b64(sig)>
+
+    ' ====== État identité (Ed25519 / TOFU) ======
+    Private _myEdPk As Byte()
+    Private _myEdSk As Byte()
+    ' Nonces en attente (challenge) par pair
+    Private ReadOnly _idChallenge As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
+    ' Pubkeys TOFU vues/mémorisées (cache)
+    Private ReadOnly _peerEdPk As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
 
     Private Class FileRecvState
         Public Id As String = ""
@@ -205,6 +216,32 @@ Public Class Form1
         End Try
     End Sub
 
+    Private Sub SendIdHello(peer As String)
+        Try
+            If _myEdPk Is Nothing OrElse _myEdPk.Length = 0 Then Exit Sub
+            ' challenge: 32 octets aléatoires
+            Dim nonce(31) As Byte
+            _rng.GetBytes(nonce)
+
+            SyncLock _idChallenge
+                _idChallenge(peer) = nonce
+            End SyncLock
+
+            Dim body = ID_HELLO & Convert.ToBase64String(_myEdPk) & ":" & Convert.ToBase64String(nonce)
+            Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{peer}:{body}{MSG_TERM}"
+            Dim data = Encoding.UTF8.GetBytes(payload)
+
+            If _isHost Then
+                If _hub IsNot Nothing Then _hub.SendToAsync(peer, data)
+            Else
+                If _stream IsNot Nothing Then _stream.SendAsync(data, Threading.CancellationToken.None)
+            End If
+            Log("[ID] HELLO => " & peer, verbose:=True)
+        Catch ex As Exception
+            Log("[ID] SendIdHello error: " & ex.Message)
+        End Try
+    End Sub
+
     ' ---------- Form ----------
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         ' DB
@@ -212,6 +249,14 @@ Public Class Form1
             ChatP2P.Core.LocalDb.Init()
         Catch ex As Exception
             Log("[DB] init failed: " & ex.Message)
+        End Try
+
+        ' Identité locale Ed25519
+        Try
+            ChatP2P.Core.LocalDbExtensions.IdentityEnsureEd25519(_myEdPk, _myEdSk)
+            Log("[ID] Ed25519 locale OK (" & If(_myEdPk IsNot Nothing, _myEdPk.Length.ToString(), "0") & " octets)", verbose:=True)
+        Catch ex As Exception
+            Log("[ID] init Ed25519 FAILED: " & ex.Message)
         End Try
 
         ' (Optionnel) init crypto
@@ -757,6 +802,15 @@ Public Class Form1
                             Dim body = parts(2)
                             If String.Equals(toPeer, _displayName, StringComparison.OrdinalIgnoreCase) Then
 
+                                ' --- Auth Ed25519 / TOFU ---
+                                If body.StartsWith(ID_HELLO, StringComparison.Ordinal) Then
+                                    ProcessIdHello(fromPeer, body.Substring(ID_HELLO.Length))
+                                    Continue While
+                                ElseIf body.StartsWith(ID_PROOF, StringComparison.Ordinal) Then
+                                    ProcessIdProof(fromPeer, body.Substring(ID_PROOF.Length))
+                                    Continue While
+                                End If
+
                                 ' Handshake ENC ?
                                 If body.StartsWith(ENC_HELLO, StringComparison.Ordinal) Then
                                     ProcessEncHello(fromPeer, body.Substring(ENC_HELLO.Length))
@@ -826,6 +880,129 @@ Public Class Form1
             If Not ct.IsCancellationRequested Then
                 Log("Listen error: " & ex.Message)
             End If
+        End Try
+    End Sub
+
+    Private Sub ProcessIdHello(fromPeer As String, payload As String)
+        Try
+            ' payload: <b64(pub)>:<b64(nonce)>
+            Dim p = payload.Split(":"c, 2)
+            If p.Length <> 2 Then Exit Sub
+            Dim peerPk = Convert.FromBase64String(p(0).Trim())
+            Dim theirNonce = Convert.FromBase64String(p(1).Trim())
+
+            ' TOFU: si on n'a pas encore le pubkey du pair en DB, on l’enregistre
+            Dim known As Byte() = Nothing
+            If Not _peerEdPk.TryGetValue(fromPeer, known) OrElse known Is Nothing Then
+                known = ChatP2P.Core.LocalDbExtensions.PeerGetEd25519(fromPeer)
+                If known IsNot Nothing Then
+                    SyncLock _peerEdPk
+                        _peerEdPk(fromPeer) = known
+                    End SyncLock
+                End If
+            End If
+
+            If known Is Nothing Then
+                ' Première vue => TOFU
+                ChatP2P.Core.LocalDbExtensions.PeerSetEd25519_Tofu(fromPeer, peerPk)
+                SyncLock _peerEdPk
+                    _peerEdPk(fromPeer) = peerPk
+                End SyncLock
+                Log("[ID] TOFU: pubkey enregistré pour " & fromPeer, verbose:=True)
+            Else
+                ' Si déjà connu et différent => alerte (+ strict mode : on refuse)
+                If Not known.SequenceEqual(peerPk) Then
+                    Log("[SECURITY] Pubkey Ed25519 MISMATCH pour " & fromPeer & " (possible MITM) !")
+                    If IsStrictEnabled() Then
+                        Exit Sub ' on coupe court en mode strict
+                    End If
+                    ' en mode non strict on garde l’ancien pour la vérification
+                    peerPk = known
+                End If
+            End If
+
+            ' Répondre par une preuve: signer leur nonce
+            If _myEdSk Is Nothing OrElse _myEdSk.Length = 0 Then Exit Sub
+
+            ' On signe le "contexte|nonce" pour lier l'identité aux noms
+            Dim context = "chatp2p-id-proof:" & SortedPairTag(_displayName, fromPeer)
+            Dim toSign = Concat(Encoding.UTF8.GetBytes(context), theirNonce)
+            Dim sig = ChatP2P.Crypto.Ed25519Util.Sign(toSign, _myEdSk)
+
+            Dim proofBody = ID_PROOF & Convert.ToBase64String(theirNonce) & ":" & Convert.ToBase64String(sig)
+            Dim payloadOut = $"{Proto.TAG_PRIV}{_displayName}:{fromPeer}:{proofBody}{MSG_TERM}"
+            Dim data = Encoding.UTF8.GetBytes(payloadOut)
+
+            If _isHost Then
+                If _hub IsNot Nothing Then _hub.SendToAsync(fromPeer, data)
+            Else
+                If _stream IsNot Nothing Then _stream.SendAsync(data, Threading.CancellationToken.None)
+            End If
+            Log("[ID] PROOF => " & fromPeer, verbose:=True)
+
+        Catch ex As Exception
+            Log("[ID] ProcessIdHello error: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub ProcessIdProof(fromPeer As String, payload As String)
+        Try
+            ' payload: <b64(nonce)>:<b64(sig)>
+            Dim p = payload.Split(":"c, 2)
+            If p.Length <> 2 Then Exit Sub
+            Dim nonce = Convert.FromBase64String(p(0).Trim())
+            Dim sig = Convert.FromBase64String(p(1).Trim())
+
+            ' Retrouver le challenge qu'on avait envoyé à ce peer
+            Dim expected As Byte() = Nothing
+            SyncLock _idChallenge
+                _idChallenge.TryGetValue(fromPeer, expected)
+            End SyncLock
+            If expected Is Nothing Then
+                Log("[ID] PROOF reçu sans challenge en attente de " & fromPeer, verbose:=True)
+                Exit Sub
+            End If
+
+            ' Vérifier que le nonce correspond
+            If Not expected.SequenceEqual(nonce) Then
+                Log("[ID] PROOF nonce mismatch de " & fromPeer)
+                Exit Sub
+            End If
+
+            ' Récupérer (ou recharger) le pubkey stocké pour ce peer
+            Dim peerPk As Byte() = Nothing
+            If Not _peerEdPk.TryGetValue(fromPeer, peerPk) OrElse peerPk Is Nothing Then
+                peerPk = ChatP2P.Core.LocalDbExtensions.PeerGetEd25519(fromPeer)
+                If peerPk IsNot Nothing Then
+                    SyncLock _peerEdPk
+                        _peerEdPk(fromPeer) = peerPk
+                    End SyncLock
+                End If
+            End If
+            If peerPk Is Nothing Then
+                Log("[ID] PROOF mais pubkey inconnu pour " & fromPeer)
+                Exit Sub
+            End If
+
+            ' Vérif signature
+            Dim context = "chatp2p-id-proof:" & SortedPairTag(_displayName, fromPeer)
+            Dim toVerify = Concat(Encoding.UTF8.GetBytes(context), nonce)
+            Dim ok = ChatP2P.Crypto.Ed25519Util.Verify(toVerify, sig, peerPk)
+
+            If ok Then
+                _idVerified(fromPeer) = True
+                ChatP2P.Core.LocalDbExtensions.PeerMarkVerified(fromPeer)
+                ' nettoyage du challenge (anti-replay / fuite)
+                SyncLock _idChallenge
+                    _idChallenge.Remove(fromPeer)
+                End SyncLock
+                RefreshPrivateChatStatus(fromPeer)
+                Log("[ID] Auth OK pour " & fromPeer)
+            Else
+                Log("[ID] Auth FAILED pour " & fromPeer)
+            End If
+        Catch ex As Exception
+            Log("[ID] ProcessIdProof error: " & ex.Message)
         End Try
     End Sub
 
@@ -1017,11 +1194,17 @@ EchoAndPersist:
                 End Try
             End Sub
 
+            ' ✅ Démarre l’auth Ed25519 dès la 1ère ouverture
+            SendIdHello(peer)
+
             frm.Show(Me)
             frm.Activate()
             frm.BringToFront()
 
         Else
+            ' fenêtre déjà existante → relance un HELLO si besoin
+            SendIdHello(peer)
+
             frm.Show(Me)
             frm.Activate()
             frm.BringToFront()
@@ -1178,6 +1361,7 @@ EchoAndPersist:
             Dim derivedKey As Byte() = ChatP2P.Crypto.KeyScheduleHKDF.DeriveKey(Nothing, root, info, 32)
 
             SyncLock _relayKeys : _relayKeys(fromPeer) = derivedKey : End SyncLock
+            ' ❌ ne pas toucher à _idVerified ici (ECDH ≠ identité)
             RefreshPrivateChatStatus(fromPeer)
 
             ' Envoi ACK (ECDH pub uniquement)
@@ -1187,8 +1371,13 @@ EchoAndPersist:
             If _isHost Then
                 If _hub IsNot Nothing Then _hub.SendToAsync(fromPeer, bytes)
             Else
-                If _stream IsNot Nothing Then _stream.SendAsync(bytes, CancellationToken.None)
+                If _stream IsNot Nothing Then _stream.SendAsync(bytes, Threading.CancellationToken.None)
             End If
+
+            ' ✅ libère le pending côté répondeur
+            SyncLock _relayEcdhPending
+                _relayEcdhPending.Remove(fromPeer)
+            End SyncLock
 
             Log("[ENC] HELLO<= & ACK=> " & fromPeer)
         Catch ex As Exception
@@ -1224,7 +1413,11 @@ EchoAndPersist:
             Dim derivedKey As Byte() = ChatP2P.Crypto.KeyScheduleHKDF.DeriveKey(Nothing, root, info, 32)
 
             SyncLock _relayKeys : _relayKeys(fromPeer) = derivedKey : End SyncLock
+            ' ❌ ne pas marquer _idVerified ici
             RefreshPrivateChatStatus(fromPeer)
+
+            ' Déclenche l’auth Ed25519
+            SendIdHello(fromPeer)
 
             ' vide la file de messages en attente
             FlushPendingEnc(fromPeer)
@@ -1343,8 +1536,6 @@ EchoAndPersist:
         Return plain
     End Function
 
-
-
     Private Sub btnTestPQ_Click(sender As Object, e As EventArgs) Handles btnTestPQ.Click
         Try
             ' --- KeyGen ---
@@ -1375,6 +1566,5 @@ EchoAndPersist:
             Log("[SELFTEST] EXC: " & ex.ToString())
         End Try
     End Sub
-
 
 End Class
