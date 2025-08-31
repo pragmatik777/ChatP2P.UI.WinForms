@@ -1,6 +1,7 @@
 ﻿Option Strict On
 Option Explicit On
 
+
 Imports System
 Imports System.Globalization
 Imports System.IO
@@ -73,7 +74,7 @@ Public Class Form1
     Private _p2pHandlersHooked As Boolean = False
 
     ' ==== État chiffrement RELAY ====
-    Private ReadOnly _relayKeys As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _relayKeys As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)       ' clé sym AES-GCM
     Private ReadOnly _relayEcdhPending As New Dictionary(Of String, ECDiffieHellmanCng)(StringComparer.OrdinalIgnoreCase)
     Private ReadOnly _pendingEncMsgs As New Dictionary(Of String, Queue(Of String))(StringComparer.OrdinalIgnoreCase)
     Private ReadOnly _rng As RandomNumberGenerator = RandomNumberGenerator.Create()
@@ -145,13 +146,30 @@ Public Class Form1
         End Try
     End Function
 
+    ' Détection via Controls.Find pour éviter une dépendance dure au Designer
     Private Function IsEncryptRelayEnabled() As Boolean
         Try
-            If chkEncryptRelay Is Nothing Then Return False
-            Return chkEncryptRelay.Checked
+            Dim arr = Me.Controls.Find("chkEncryptRelay", True)
+            If arr IsNot Nothing AndAlso arr.Length > 0 Then
+                Dim cb = TryCast(arr(0), CheckBox)
+                If cb IsNot Nothing Then Return cb.Checked
+            End If
         Catch
-            Return False
         End Try
+        Return False
+    End Function
+
+    ' Checkbox optionnelle "Utiliser PQ pour le relay ?"
+    Private Function IsPqRelayEnabled() As Boolean
+        Try
+            Dim arr = Me.Controls.Find("chkPqRelay", True)
+            If arr IsNot Nothing AndAlso arr.Length > 0 Then
+                Dim cb = TryCast(arr(0), CheckBox)
+                If cb IsNot Nothing Then Return cb.Checked
+            End If
+        Catch
+        End Try
+        Return False
     End Function
 
     Private Function IsPeerTrusted(peer As String) As Boolean
@@ -198,7 +216,7 @@ Public Class Form1
 
         ' (Optionnel) init crypto
         Try
-            Call ChatP2P.Crypto.KexX25519.GenerateKeyPair()
+            ChatP2P.Crypto.KexX25519.GenerateKeyPair()
         Catch
         End Try
 
@@ -945,13 +963,13 @@ Public Class Form1
                                 Log("Hub non initialisé.")
                                 Return
                             End If
-                            _hub.SendToAsync(peer, data) ' fire & forget
+                            Dim _ignore = _hub.SendToAsync(peer, data)
                         Else
                             If _stream Is Nothing Then
                                 Log("Not connected.")
                                 Return
                             End If
-                            _stream.SendAsync(data, CancellationToken.None) ' fire & forget
+                            Dim _ignore = _stream.SendAsync(data, CancellationToken.None)
                         End If
                     End If
 
@@ -1016,8 +1034,8 @@ EchoAndPersist:
         If Not _privateChats.TryGetValue(peer, frm) OrElse frm Is Nothing OrElse frm.IsDisposed Then Return
 
         Dim connected As Boolean = (_p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer))
-        ' Crypto ON si on a marqué du crypto actif OU si P2P est connecté (DTLS actif)
-        Dim crypto As Boolean = (connected OrElse (_cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer)))
+        ' Crypto ON si P2P est connecté (DTLS) ou si clé relay établie
+        Dim crypto As Boolean = connected OrElse HasRelayKey(peer)
         Dim idok As Boolean = (_idVerified.ContainsKey(peer) AndAlso _idVerified(peer))
 
         frm.SetP2PState(connected)
@@ -1074,17 +1092,11 @@ EchoAndPersist:
             AddHandler P2PManager.OnP2PState,
                 Sub(peer As String, connected As Boolean)
                     _p2pConn(peer) = connected
-                    ' >>> FIX: activer/désactiver explicitement Crypto en même temps que P2P
-                    If connected Then
-                        _cryptoActive(peer) = True
-                    Else
-                        _cryptoActive(peer) = False
-                    End If
+                    ' DTLS = crypto ON côté P2P
+                    _cryptoActive(peer) = connected
                     Dim frm As PrivateChatForm = Nothing
                     If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
-                        frm.SetP2PState(connected)
-                        frm.SetCryptoState(_cryptoActive.ContainsKey(peer) AndAlso _cryptoActive(peer))
-                        frm.SetAuthState(_idVerified.ContainsKey(peer) AndAlso _idVerified(peer))
+                        RefreshPrivateChatStatus(peer)
                     End If
                 End Sub
             _p2pHandlersHooked = True
@@ -1107,6 +1119,13 @@ EchoAndPersist:
     End Function
 
     Private Sub EnsureRelayHandshake(peer As String)
+        ' Pour l’instant, le mode "hybrid" n’active pas un vrai PQ (le stub ne fournit pas KeyGen/Decapsulate(sk,ct)).
+        ' On reste en ECDH classique mais on change le label d’info HKDF pour la future compat.
+        EnsureRelayHandshakeClassic(peer)
+    End Sub
+
+    ' --- Classique ECDH ---
+    Private Sub EnsureRelayHandshakeClassic(peer As String)
         SyncLock _relayEcdhPending
             If _relayEcdhPending.ContainsKey(peer) OrElse _relayKeys.ContainsKey(peer) Then Exit Sub
             Dim ecdh = New ECDiffieHellmanCng(ECCurve.NamedCurves.nistP256)
@@ -1124,13 +1143,21 @@ EchoAndPersist:
             Else
                 If _stream IsNot Nothing Then _stream.SendAsync(bytes, CancellationToken.None)
             End If
-            Log("[ENC] HELLO => " & peer)
+            Log("[ENC] HELLO(classic) => " & peer)
         End SyncLock
     End Sub
 
-    Private Sub ProcessEncHello(fromPeer As String, b64Pub As String)
+    Private Sub ProcessEncHello(fromPeer As String, payload As String)
         Try
-            Dim remotePub = Convert.FromBase64String(b64Pub.Trim())
+            Dim parts = payload.Trim()
+            If parts.StartsWith(":") Then parts = parts.Substring(1) ' tolérance si ":" traîne
+
+            ' Autoriser formellement un séparateur '|' pour compat future, mais on n'utilise que la 1ère partie (ECDH)
+            Dim pieces = parts.Split("|"c)
+            Dim ecdhPubRemoteB64 As String = pieces(0).Trim()
+
+            Dim remotePub = Convert.FromBase64String(ecdhPubRemoteB64)
+            ' ECDH répondant
             Dim ecdh As ECDiffieHellmanCng
             SyncLock _relayEcdhPending
                 If Not _relayEcdhPending.TryGetValue(fromPeer, ecdh) Then
@@ -1142,33 +1169,43 @@ EchoAndPersist:
             End SyncLock
 
             Dim remoteKey = CngKey.Import(remotePub, CngKeyBlobFormat.EccPublicBlob)
-            Dim sharedSecret = ecdh.DeriveKeyMaterial(remoteKey)
-            Dim key As Byte()
-            Using sh = SHA256.Create()
-                key = sh.ComputeHash(sharedSecret)
-            End Using
-            SyncLock _relayKeys
-                _relayKeys(fromPeer) = key
-            End SyncLock
-
+            Dim sharedMat = ecdh.DeriveKeyMaterial(remoteKey)
             Dim myPub = ecdh.PublicKey.ToByteArray()
+
+            Dim infoLabel As String = If(IsPqRelayEnabled(), "relay-hybrid:", "relay-classic:")
+            Dim root = sharedMat
+            Dim info As String = infoLabel & SortedPairTag(_displayName, fromPeer)
+            Dim derivedKey As Byte() = ChatP2P.Crypto.KeyScheduleHKDF.DeriveKey(Nothing, root, info, 32)
+
+            SyncLock _relayKeys : _relayKeys(fromPeer) = derivedKey : End SyncLock
+            RefreshPrivateChatStatus(fromPeer)
+
+            ' Envoi ACK (ECDH pub uniquement)
             Dim ackBody = ENC_ACK & Convert.ToBase64String(myPub)
-            Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{fromPeer}:{ackBody}{MSG_TERM}"
-            Dim bytes = Encoding.UTF8.GetBytes(payload)
+            Dim payloadAck = $"{Proto.TAG_PRIV}{_displayName}:{fromPeer}:{ackBody}{MSG_TERM}"
+            Dim bytes = Encoding.UTF8.GetBytes(payloadAck)
             If _isHost Then
                 If _hub IsNot Nothing Then _hub.SendToAsync(fromPeer, bytes)
             Else
                 If _stream IsNot Nothing Then _stream.SendAsync(bytes, CancellationToken.None)
             End If
-            Log("[ENC] HELLO<= & ACK => " & fromPeer)
+
+            Log("[ENC] HELLO<= & ACK=> " & fromPeer)
         Catch ex As Exception
             Log("[ENC] ProcessEncHello error: " & ex.Message)
         End Try
     End Sub
 
-    Private Sub ProcessEncAck(fromPeer As String, b64Pub As String)
+    Private Sub ProcessEncAck(fromPeer As String, payload As String)
         Try
-            Dim remotePub = Convert.FromBase64String(b64Pub.Trim())
+            Dim parts = payload.Trim()
+            If parts.StartsWith(":") Then parts = parts.Substring(1)
+
+            Dim pieces = parts.Split("|"c)
+            Dim ecdhPubResponderB64 As String = pieces(0).Trim()
+
+            Dim remotePub = Convert.FromBase64String(ecdhPubResponderB64)
+
             Dim ecdh As ECDiffieHellmanCng = Nothing
             SyncLock _relayEcdhPending
                 If Not _relayEcdhPending.TryGetValue(fromPeer, ecdh) OrElse ecdh Is Nothing Then
@@ -1179,18 +1216,43 @@ EchoAndPersist:
             End SyncLock
 
             Dim remoteKey = CngKey.Import(remotePub, CngKeyBlobFormat.EccPublicBlob)
-            Dim sharedSecret = ecdh.DeriveKeyMaterial(remoteKey)
-            Dim key = SHA256.HashData(sharedSecret)
-            SyncLock _relayKeys
-                _relayKeys(fromPeer) = key
-            End SyncLock
+            Dim sharedMat = ecdh.DeriveKeyMaterial(remoteKey)
+
+            Dim infoLabel As String = If(IsPqRelayEnabled(), "relay-hybrid:", "relay-classic:")
+            Dim root = sharedMat
+            Dim info As String = infoLabel & SortedPairTag(_displayName, fromPeer)
+            Dim derivedKey As Byte() = ChatP2P.Crypto.KeyScheduleHKDF.DeriveKey(Nothing, root, info, 32)
+
+            SyncLock _relayKeys : _relayKeys(fromPeer) = derivedKey : End SyncLock
+            RefreshPrivateChatStatus(fromPeer)
+
+            ' vide la file de messages en attente
+            FlushPendingEnc(fromPeer)
 
             Log("[ENC] Clé établie avec " & fromPeer)
-            FlushPendingEnc(fromPeer)
         Catch ex As Exception
             Log("[ENC] ProcessEncAck error: " & ex.Message)
         End Try
     End Sub
+
+    Private Function SortedPairTag(a As String, b As String) As String
+        Dim x = If(a, "")
+        Dim y = If(b, "")
+        If StringComparer.OrdinalIgnoreCase.Compare(x, y) <= 0 Then
+            Return x & "|" & y
+        Else
+            Return y & "|" & x
+        End If
+    End Function
+
+    Private Function Concat(a As Byte(), b As Byte()) As Byte()
+        If a Is Nothing OrElse a.Length = 0 Then Return If(b, Array.Empty(Of Byte)())
+        If b Is Nothing OrElse b.Length = 0 Then Return a.ToArray()
+        Dim r(a.Length + b.Length - 1) As Byte
+        Buffer.BlockCopy(a, 0, r, 0, a.Length)
+        Buffer.BlockCopy(b, 0, r, a.Length, b.Length)
+        Return r
+    End Function
 
     Private Sub QueuePendingEnc(peer As String, msg As String)
         SyncLock _pendingEncMsgs
@@ -1280,5 +1342,39 @@ EchoAndPersist:
         End Using
         Return plain
     End Function
+
+
+
+    Private Sub btnTestPQ_Click(sender As Object, e As EventArgs) Handles btnTestPQ.Click
+        Try
+            ' --- KeyGen ---
+            Dim kp = ChatP2P.Crypto.KemPqStub.KeyGen()
+            Dim pk As Byte() = kp.pk
+            Dim sk As Byte() = kp.sk
+            Log("[SELFTEST] KEM KeyGen ok.")
+
+            ' --- Encapsulate ---
+            Dim enc = ChatP2P.Crypto.KemPqStub.Encapsulate(pk)
+            Dim ct As Byte() = enc.cipherText
+            Dim ssEnc As Byte() = enc.sharedSecret
+            Log("[SELFTEST] KEM Encapsulate ok.")
+
+            ' --- Decapsulate ---
+            Dim ssDec As Byte() = ChatP2P.Crypto.KemPqStub.Decapsulate(sk, ct)
+            Log("[SELFTEST] KEM Decapsulate ok.")
+
+            ' --- Vérification ---
+            Dim ok As Boolean = ssEnc.SequenceEqual(ssDec)
+            Log($"[SELFTEST] KEM ss match = {ok}")
+
+            ' HKDF sanity check
+            Dim key As Byte() = ChatP2P.Crypto.KeyScheduleHKDF.DeriveKey(Nothing, ssEnc, "pq-test", 32)
+            Log($"[SELFTEST] HKDF key len = {key.Length}")
+
+        Catch ex As Exception
+            Log("[SELFTEST] EXC: " & ex.ToString())
+        End Try
+    End Sub
+
 
 End Class

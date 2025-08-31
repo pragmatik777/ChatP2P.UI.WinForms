@@ -6,6 +6,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+	 <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+	  <PackageReference Include="Portable.BouncyCastle" Version="1.9.0" ExcludeAssets="all" />
     <PackageReference Include="Open.Nat" Version="2.1.0" />
     <PackageReference Include="SIPSorcery" Version="8.0.23" />
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.119" />
