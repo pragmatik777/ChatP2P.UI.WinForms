@@ -100,6 +100,27 @@ Public Class Form1
         Return r.TrimEnd()
     End Function
 
+    ' === Helpers PrivateChatForm (uniques) ===
+    Private Function TryGetPrivateChatForm(peer As String, ByRef frm As PrivateChatForm) As Boolean
+        frm = Nothing
+        If String.IsNullOrWhiteSpace(peer) Then Return False
+        Dim f As PrivateChatForm = Nothing
+        If _privateChats.TryGetValue(peer, f) AndAlso f IsNot Nothing AndAlso Not f.IsDisposed Then
+            frm = f
+            Return True
+        End If
+        Return False
+    End Function
+
+    Private Function EnsureAndGetPrivateChatForm(peer As String) As PrivateChatForm
+        ' Ouvre la fenêtre si besoin
+        EnsurePrivateChat(peer)
+        Dim f As PrivateChatForm = Nothing
+        If TryGetPrivateChatForm(peer, f) Then Return f
+        Return Nothing
+    End Function
+
+    ' Anti-duplication P2P
     Private Function SeenRecently(peer As String, text As String) As Boolean
         Dim nowUtc = DateTime.UtcNow
         Dim list As List(Of RecentItem) = Nothing
@@ -119,7 +140,7 @@ Public Class Form1
         Return False
     End Function
 
-
+    ' === Snapshot pour SecurityCenter ===
     Private Function GetSessionSnapshot(peer As String) As SessionSnapshot
         Dim snap As New SessionSnapshot()
         snap.Peer = peer
@@ -149,7 +170,7 @@ Public Class Form1
         Return snap
     End Function
 
-    ' petit helper pour réutiliser le même formatage (copié depuis SecurityCenterForm)
+    ' formatage fingerprint style SecurityCenter
     Private Function SecurityCenterForm_FormatFpLocal(pub As Byte()) As String
         Using sha As SHA256 = SHA256.Create()
             Dim fp = sha.ComputeHash(pub)
@@ -163,9 +184,6 @@ Public Class Form1
             Return sb.ToString()
         End Using
     End Function
-
-
-
 
     Private Sub Log(msg As String, Optional verbose As Boolean = False)
         Try
@@ -569,7 +587,7 @@ Public Class Form1
     End Sub
 
     ' ---------- Fichiers TX ----------
-    Private Async Sub btnSendFile_Click(sender As Object, e As EventArgs) Handles btnSendFile.Click
+    Private Sub btnSendFile_Click(sender As Object, e As EventArgs) Handles btnSendFile.Click
         Dim dest As String = ""
         If lstPeers IsNot Nothing AndAlso lstPeers.SelectedItem IsNot Nothing Then
             dest = lstPeers.SelectedItem.ToString().Trim()
@@ -578,91 +596,8 @@ Public Class Form1
             Log("Sélectionne d'abord un pair dans la liste (lstPeers).")
             Return
         End If
-
-        If IsStrictEnabled() AndAlso Not IsPeerTrusted(dest) Then
-            Log($"[SECURITY] Envoi fichier bloqué (pair non de confiance): {dest}")
-            Return
-        End If
-
-        Dim useEnc As Boolean = IsEncryptRelayEnabled()
-        If useEnc AndAlso Not HasRelayKey(dest) Then
-            EnsureRelayHandshake(dest)
-            Log("[ENC] Clé non établie avec " & dest & ". Relance l’envoi une fois la clé OK.")
-            Return
-        End If
-
-        Using ofd As New OpenFileDialog()
-            If ofd.ShowDialog(Me) <> DialogResult.OK Then Return
-            Dim fi As New FileInfo(ofd.FileName)
-            If Not fi.Exists Then Return
-
-            Dim transferId = Guid.NewGuid().ToString("N")
-            Dim fnameToSend = If(useEnc, ENC_FILE_MARK & fi.Name, fi.Name)
-            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fnameToSend}:{fi.Length}{MSG_TERM}"
-            Dim metaBytes = Encoding.UTF8.GetBytes(meta)
-
-            If _isHost Then
-                If _hub Is Nothing Then Log("Hub non initialisé.") : Return
-                Await _hub.SendToAsync(dest, metaBytes)
-                Using fs = fi.OpenRead()
-                    Dim buffer(32768 - 1) As Byte
-                    Dim totalSent As Long = 0
-                    While True
-                        Dim read = fs.Read(buffer, 0, buffer.Length)
-                        If read <= 0 Then Exit While
-
-                        Dim chunkData As String
-                        If useEnc Then
-                            Dim enc = EncryptForPeer(dest, buffer, read)
-                            chunkData = ENC_PREFIX & Convert.ToBase64String(enc)
-                        Else
-                            chunkData = Convert.ToBase64String(buffer, 0, read)
-                        End If
-
-                        Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
-                        Await _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(chunkMsg))
-
-                        totalSent += read
-                        Dim percent = CInt((totalSent * 100L) \ Math.Max(1L, fi.Length))
-                        If pbSend IsNot Nothing Then pbSend.Value = Math.Max(0, Math.Min(100, percent))
-                        If lblSendProgress IsNot Nothing Then lblSendProgress.Text = pbSend.Value & "%"
-                    End While
-                End Using
-                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
-                Await _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(endMsg))
-            Else
-                If _stream Is Nothing Then Log("Not connected.") : Return
-                Await _stream.SendAsync(metaBytes, CancellationToken.None)
-                Using fs = fi.OpenRead()
-                    Dim buffer(32768 - 1) As Byte
-                    Dim totalSent As Long = 0
-                    While True
-                        Dim read = fs.Read(buffer, 0, buffer.Length)
-                        If read <= 0 Then Exit While
-
-                        Dim chunkData As String
-                        If useEnc Then
-                            Dim enc = EncryptForPeer(dest, buffer, read)
-                            chunkData = ENC_PREFIX & Convert.ToBase64String(enc)
-                        Else
-                            chunkData = Convert.ToBase64String(buffer, 0, read)
-                        End If
-
-                        Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
-                        Await _stream.SendAsync(Encoding.UTF8.GetBytes(chunkMsg), CancellationToken.None)
-
-                        totalSent += read
-                        Dim percent = CInt((totalSent * 100L) \ Math.Max(1L, fi.Length))
-                        If pbSend IsNot Nothing Then pbSend.Value = Math.Max(0, Math.Min(100, percent))
-                        If lblSendProgress IsNot Nothing Then lblSendProgress.Text = pbSend.Value & "%"
-                    End While
-                End Using
-                Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
-                Await _stream.SendAsync(Encoding.UTF8.GetBytes(endMsg), CancellationToken.None)
-            End If
-
-            Log($"[RELAY{If(useEnc, "+ENC", "")}] Fichier {fi.Name} envoyé à {dest}")
-        End Using
+        ' délègue au flux centralisé (ouvre la PrivateChatForm, gère la progress et le log)
+        SendFileToPeer(dest)
     End Sub
 
     ' ---------- Fichiers RX ----------
@@ -697,14 +632,26 @@ Public Class Form1
             fname = fname.Substring(ENC_FILE_MARK.Length)
         End If
 
-        Dim savePath = Path.Combine(GetRecvFolder(), $"{fromName}__{fname}")
+        ' 👉 Nom original, sans préfixe "fromName__"
+        Dim savePath = Path.Combine(GetRecvFolder(), fname)
         savePath = MakeUniquePath(savePath)
 
+        ' Ouvre / montre la fenêtre privée et démarre la progression RX
+        Try
+            EnsurePrivateChat(fromName)
+            Dim frmPeer As PrivateChatForm = EnsureAndGetPrivateChatForm(fromName)
+            If frmPeer IsNot Nothing Then
+                frmPeer.StartRecvProgress(fname, fsize)
+            End If
+        Catch
+            ' ignore
+        End Try
+
         Dim st As New FileRecvState() With {
-            .Id = tid, .FromName = fromName, .Path = savePath,
-            .Expected = fsize, .Received = 0, .LastTickUtc = DateTime.UtcNow,
-            .EncRelay = enc
-        }
+        .Id = tid, .FromName = fromName, .Path = savePath,
+        .Expected = fsize, .Received = 0, .LastTickUtc = DateTime.UtcNow,
+        .EncRelay = enc
+    }
         Try
             st.File = New FileStream(st.Path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 32768, useAsync:=True)
         Catch ex As Exception
@@ -768,15 +715,18 @@ Public Class Form1
             st.File.Write(plainBytes, 0, plainBytes.Length)
             st.Received += plainBytes.Length
             st.LastTickUtc = DateTime.UtcNow
+
+            ' MAJ progression réception (thread-safe côté form)
+            Dim frmPeer As PrivateChatForm = Nothing
+            If TryGetPrivateChatForm(st.FromName, frmPeer) Then
+                frmPeer.UpdateRecvProgress(st.Received, st.Expected)
+            End If
         Catch ex As Exception
             Log("[FICHIER] Erreur écriture: " & ex.Message)
             Return
         End Try
-
-        Dim percent = CInt((st.Received * 100L) \ Math.Max(1L, st.Expected))
-        If pbRecv IsNot Nothing Then pbRecv.Value = Math.Max(0, Math.Min(100, percent))
-        If lblRecvProgress IsNot Nothing Then lblRecvProgress.Text = pbRecv.Value & "%"
     End Sub
+
 
     Private Sub HandleFileEnd(msg As String)
         Dim parts = msg.Split(":"c, 2)
@@ -795,14 +745,23 @@ Public Class Form1
         Catch
         End Try
 
+        ' Progress OFF + petite notif dans la fenêtre privée
+        Try
+            Dim frmPeer As PrivateChatForm = Nothing
+            If TryGetPrivateChatForm(st.FromName, frmPeer) Then
+                frmPeer.EndRecvProgress()
+                frmPeer.AppendMessage(st.FromName, $"[FILE] ✅ Reçu : {IO.Path.GetFileName(st.Path)} ({st.Expected} octets)")
+            End If
+        Catch
+        End Try
+
         Log("Fichier reçu: " & st.Path)
+
         SyncLock _fileRecv
             _fileRecv.Remove(tid)
         End SyncLock
-
-        If pbRecv IsNot Nothing Then pbRecv.Value = 0
-        If lblRecvProgress IsNot Nothing Then lblRecvProgress.Text = ""
     End Sub
+
 
     Private Function MakeUniquePath(path As String) As String
         Dim dir = IO.Path.GetDirectoryName(path)
@@ -1151,91 +1110,252 @@ Public Class Form1
 
             ' --- Envoi texte ---
             Dim sendCb As Action(Of String) =
-        Sub(text As String)
-            Try
-                If String.IsNullOrWhiteSpace(text) Then Return
-                If IsStrictEnabled() AndAlso Not IsPeerTrusted(peer) Then
-                    Log($"[SECURITY] Envoi privé bloqué (pair non de confiance): {peer}")
-                    Return
-                End If
-
-                Dim norm = Canon(text)
-                Dim viaP2P As Boolean =
-                    _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer) AndAlso P2PManager.TrySendText(peer, norm)
-
-                If Not viaP2P Then
-                    Dim useEnc As Boolean = IsEncryptRelayEnabled()
-                    Dim bodyToSend As String
-
-                    If useEnc Then
-                        If Not HasRelayKey(peer) Then
-                            EnsureRelayHandshake(peer)
-                            QueuePendingEnc(peer, norm)
-                            Log("[ENC] Clé en négociation avec " & peer & ". Message mis en attente.")
-                            GoTo EchoAndPersist
-                        End If
-                        Dim encBytes = EncryptForPeer(peer, Encoding.UTF8.GetBytes(norm))
-                        bodyToSend = ENC_PREFIX & Convert.ToBase64String(encBytes)
-                    Else
-                        bodyToSend = norm
+            Sub(text As String)
+                Try
+                    If String.IsNullOrWhiteSpace(text) Then Return
+                    If IsStrictEnabled() AndAlso Not IsPeerTrusted(peer) Then
+                        Log($"[SECURITY] Envoi privé bloqué (pair non de confiance): {peer}")
+                        Return
                     End If
 
-                    Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{peer}:{bodyToSend}{MSG_TERM}"
-                    Dim data = Encoding.UTF8.GetBytes(payload)
+                    Dim norm = Canon(text)
+                    Dim viaP2P As Boolean =
+                        _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer) AndAlso P2PManager.TrySendText(peer, norm)
 
-                    If _isHost Then
-                        If _hub Is Nothing Then
-                            Log("Hub non initialisé.")
-                            Return
+                    If Not viaP2P Then
+                        Dim useEnc As Boolean = IsEncryptRelayEnabled()
+                        Dim bodyToSend As String
+
+                        If useEnc Then
+                            If Not HasRelayKey(peer) Then
+                                EnsureRelayHandshake(peer)
+                                QueuePendingEnc(peer, norm)
+                                Log("[ENC] Clé en négociation avec " & peer & ". Message mis en attente.")
+                                GoTo EchoAndPersist
+                            End If
+                            Dim encBytes = EncryptForPeer(peer, Encoding.UTF8.GetBytes(norm))
+                            bodyToSend = ENC_PREFIX & Convert.ToBase64String(encBytes)
+                        Else
+                            bodyToSend = norm
                         End If
-                        Dim _ignore = _hub.SendToAsync(peer, data)
-                    Else
-                        If _stream Is Nothing Then
-                            Log("Not connected.")
-                            Return
+
+                        Dim payload = $"{Proto.TAG_PRIV}{_displayName}:{peer}:{bodyToSend}{MSG_TERM}"
+                        Dim data = Encoding.UTF8.GetBytes(payload)
+
+                        If _isHost Then
+                            If _hub Is Nothing Then
+                                Log("Hub non initialisé.")
+                                Return
+                            End If
+                            Dim _ignore = _hub.SendToAsync(peer, data)
+                        Else
+                            If _stream Is Nothing Then
+                                Log("Not connected.")
+                                Return
+                            End If
+                            Dim _ignore = _stream.SendAsync(data, CancellationToken.None)
                         End If
-                        Dim _ignore = _stream.SendAsync(data, CancellationToken.None)
                     End If
-                End If
 
 EchoAndPersist:
-                Dim line As String = If(viaP2P, "[P2P] ", "[RELAY] ") & norm
-                If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
-                    Me.BeginInvoke(Sub() AppendToPrivate(peer, _displayName, line))
-                Else
-                    AppendToPrivate(peer, _displayName, line)
-                End If
+                    Dim line As String = If(viaP2P, "[P2P] ", "[RELAY] ") & norm
+                    If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+                        Me.BeginInvoke(Sub() AppendToPrivate(peer, _displayName, line))
+                    Else
+                        AppendToPrivate(peer, _displayName, line)
+                    End If
 
-                StoreMsg(peer, outgoing:=True, body:=norm, viaP2P:=viaP2P)
+                    StoreMsg(peer, outgoing:=True, body:=norm, viaP2P:=viaP2P)
 
-            Catch ex As Exception
-                Log("[PRIVATE] send error: " & ex.Message)
-            End Try
-        End Sub
+                Catch ex As Exception
+                    Log("[PRIVATE] send error: " & ex.Message)
+                End Try
+            End Sub
 
-            ' --- Envoi fichier (déclenché depuis PrivateChatForm) ---
+            ' --- Envoi fichier (déclenché depuis PrivateChatForm) ---  ✅ version Task.Run async
             Dim sendFileCb As Action =
-        Sub()
-            Try
-                Dim dest As String = peer
+            Sub()
+                Try
+                    Dim dest As String = peer
 
-                If IsStrictEnabled() AndAlso Not IsPeerTrusted(dest) Then
-                    Log($"[SECURITY] Envoi fichier bloqué (pair non de confiance): {dest}")
-                    Return
+                    If IsStrictEnabled() AndAlso Not IsPeerTrusted(dest) Then
+                        Log($"[SECURITY] Envoi fichier bloqué (pair non de confiance): {dest}")
+                        Return
+                    End If
+
+                    Dim useEnc As Boolean = IsEncryptRelayEnabled()
+                    If useEnc AndAlso Not HasRelayKey(dest) Then
+                        EnsureRelayHandshake(dest)
+                        Log("[ENC] Clé non établie avec " & dest & ". Relance l’envoi une fois la clé OK.")
+                        Return
+                    End If
+
+                    Using ofd As New OpenFileDialog()
+                        If ofd.ShowDialog(Me) <> DialogResult.OK Then Return
+                        Dim fi As New FileInfo(ofd.FileName)
+                        If Not fi.Exists Then Return
+
+                        ' Ouvre/active la fenêtre privée et démarre la progression TX
+                        Dim frmPeer = EnsureAndGetPrivateChatForm(dest)
+                        If frmPeer IsNot Nothing Then
+                            frmPeer.StartSendProgress(fi.Name, fi.Length)
+                        End If
+
+                        ' 🚀 en arrière-plan pour ne pas bloquer l’UI
+                        Dim _bg = Threading.Tasks.Task.Run(
+                            Async Function() As Threading.Tasks.Task
+                                Try
+                                    Dim transferId = Guid.NewGuid().ToString("N")
+                                    Dim fnameToSend = If(useEnc, ENC_FILE_MARK & fi.Name, fi.Name)
+                                    Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fnameToSend}:{fi.Length}{MSG_TERM}"
+                                    Dim metaBytes = Encoding.UTF8.GetBytes(meta)
+
+                                    If _isHost Then
+                                        If _hub Is Nothing Then
+                                            Log("Hub non initialisé.") : Return
+                                        End If
+                                        Await _hub.SendToAsync(dest, metaBytes)
+                                    Else
+                                        If _stream Is Nothing Then
+                                            Log("Not connected.") : Return
+                                        End If
+                                        Await _stream.SendAsync(metaBytes, Threading.CancellationToken.None)
+                                    End If
+
+                                    Using fs = fi.OpenRead()
+                                        Dim buffer(32768 - 1) As Byte
+                                        Dim totalSent As Long = 0
+                                        While True
+                                            Dim read = fs.Read(buffer, 0, buffer.Length) ' sync OK (Task.Run)
+                                            If read <= 0 Then Exit While
+
+                                            Dim chunkData As String
+                                            If useEnc Then
+                                                Dim enc = EncryptForPeer(dest, buffer, read)
+                                                chunkData = ENC_PREFIX & Convert.ToBase64String(enc)
+                                            Else
+                                                chunkData = Convert.ToBase64String(buffer, 0, read)
+                                            End If
+
+                                            Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
+                                            Dim chunkBytes = Encoding.UTF8.GetBytes(chunkMsg)
+
+                                            If _isHost Then
+                                                Await _hub.SendToAsync(dest, chunkBytes)
+                                            Else
+                                                Await _stream.SendAsync(chunkBytes, Threading.CancellationToken.None)
+                                            End If
+
+                                            totalSent += read
+                                            If frmPeer IsNot Nothing Then frmPeer.UpdateSendProgress(totalSent, fi.Length)
+                                        End While
+                                    End Using
+
+                                    Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
+                                    Dim endBytes = Encoding.UTF8.GetBytes(endMsg)
+                                    If _isHost Then
+                                        Await _hub.SendToAsync(dest, endBytes)
+                                    Else
+                                        Await _stream.SendAsync(endBytes, Threading.CancellationToken.None)
+                                    End If
+
+                                    Log($"[RELAY{If(useEnc, "+ENC", "")}] Fichier {fi.Name} envoyé à {dest}")
+                                    If frmPeer IsNot Nothing Then
+                                        frmPeer.AppendMessage(_displayName, $"[FILE] ✅ Envoi terminé : {fi.Name} ({fi.Length} octets)")
+                                    End If
+                                Catch ex As Exception
+                                    Log("[PRIVATE] send file error: " & ex.Message)
+                                Finally
+                                    If frmPeer IsNot Nothing Then frmPeer.EndSendProgress()
+                                End Try
+                            End Function)
+                    End Using
+                Catch ex As Exception
+                    Log("[PRIVATE] send file error: " & ex.Message)
+                End Try
+            End Sub
+
+            ' --- Création de la fenêtre privée avec les 2 callbacks ---
+            frm = New PrivateChatForm(_displayName, peer, sendCb, sendFileCb)
+            _privateChats(peer) = frm
+
+            ' États initiaux + refresh immédiat
+            RefreshPrivateChatStatus(peer)
+
+            Dim initialTake = GetAndEnsureHistCount(peer)
+            LoadHistoryIntoPrivate(peer, frm, initialTake)
+
+            AddHandler frm.StartP2PRequested,
+            Sub()
+                Try
+                    P2PManager.StartP2P(peer, New String() {"stun:stun.l.google.com:19302"})
+                Catch ex As Exception
+                    Log("[P2P] start error: " & ex.Message)
+                End Try
+            End Sub
+
+            AddHandler frm.PurgeRequested,
+            Sub()
+                Try
+                    LocalDb.ExecNonQuery("DELETE FROM Messages WHERE PeerName=@p;", LocalDb.P("@p", peer))
+                    frm.ClearMessages()
+                    _histCount(peer) = 0
+                Catch ex As Exception
+                    Log("[DB] purge error: " & ex.Message)
+                End Try
+            End Sub
+
+            ' ✅ Démarre l’auth Ed25519 dès la 1ère ouverture
+            SendIdHello(peer)
+
+            frm.Show(Me)
+            frm.Activate()
+            frm.BringToFront()
+
+        Else
+            ' fenêtre déjà existante → relance un HELLO si besoin
+            SendIdHello(peer)
+
+            frm.Show(Me)
+            frm.Activate()
+            frm.BringToFront()
+            RefreshPrivateChatStatus(peer)
+        End If
+    End Sub
+
+
+    ' ---------- Envoi fichier centralisé (ouvre la PrivateChatForm + progress + notif) ----------
+    Private Sub SendFileToPeer(dest As String)
+        Try
+            If String.IsNullOrWhiteSpace(dest) Then
+                Log("Destination invalide pour l'envoi de fichier.")
+                Return
+            End If
+
+            If IsStrictEnabled() AndAlso Not IsPeerTrusted(dest) Then
+                Log($"[SECURITY] Envoi fichier bloqué (pair non de confiance): {dest}")
+                Return
+            End If
+
+            Dim useEnc As Boolean = IsEncryptRelayEnabled()
+            If useEnc AndAlso Not HasRelayKey(dest) Then
+                EnsureRelayHandshake(dest)
+                Log("[ENC] Clé non établie avec " & dest & ". Relance l’envoi une fois la clé OK.")
+                Return
+            End If
+
+            Using ofd As New OpenFileDialog()
+                If ofd.ShowDialog(Me) <> DialogResult.OK Then Return
+                Dim fi As New FileInfo(ofd.FileName)
+                If Not fi.Exists Then Return
+
+                ' --- Toujours ouvrir/activer la PrivateChatForm et démarrer la progress ---
+                Dim frmPeer = EnsureAndGetPrivateChatForm(dest)
+                If frmPeer IsNot Nothing Then
+                    frmPeer.StartSendProgress(fi.Name, fi.Length)
                 End If
 
-                Dim useEnc As Boolean = IsEncryptRelayEnabled()
-                If useEnc AndAlso Not HasRelayKey(dest) Then
-                    EnsureRelayHandshake(dest)
-                    Log("[ENC] Clé non établie avec " & dest & ". Relance l’envoi une fois la clé OK.")
-                    Return
-                End If
-
-                Using ofd As New OpenFileDialog()
-                    If ofd.ShowDialog(Me) <> DialogResult.OK Then Return
-                    Dim fi As New FileInfo(ofd.FileName)
-                    If Not fi.Exists Then Return
-
+                Try
                     Dim transferId = Guid.NewGuid().ToString("N")
                     Dim fnameToSend = If(useEnc, ENC_FILE_MARK & fi.Name, fi.Name)
                     Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fnameToSend}:{fi.Length}{MSG_TERM}"
@@ -1263,18 +1383,14 @@ EchoAndPersist:
                                 Dim _ignore1 = _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(chunkMsg))
 
                                 totalSent += read
-                                If pbSend IsNot Nothing Then
-                                    Dim percent = CInt((totalSent * 100L) \ Math.Max(1L, fi.Length))
-                                    pbSend.Value = Math.Max(0, Math.Min(100, percent))
-                                    If lblSendProgress IsNot Nothing Then lblSendProgress.Text = pbSend.Value & "%"
-                                End If
+                                If frmPeer IsNot Nothing Then frmPeer.UpdateSendProgress(totalSent, fi.Length)
                             End While
                         End Using
                         Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
                         Dim _ignore2 = _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(endMsg))
                     Else
                         If _stream Is Nothing Then Log("Not connected.") : Return
-                        Dim _ignore0 = _stream.SendAsync(metaBytes, CancellationToken.None)
+                        Dim _ignore0 = _stream.SendAsync(metaBytes, Threading.CancellationToken.None)
                         Using fs = fi.OpenRead()
                             Dim buffer(32768 - 1) As Byte
                             Dim totalSent As Long = 0
@@ -1291,76 +1407,34 @@ EchoAndPersist:
                                 End If
 
                                 Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
-                                Dim _ignore1 = _stream.SendAsync(Encoding.UTF8.GetBytes(chunkMsg), CancellationToken.None)
+                                Dim _ignore1 = _stream.SendAsync(Encoding.UTF8.GetBytes(chunkMsg), Threading.CancellationToken.None)
 
                                 totalSent += read
-                                If pbSend IsNot Nothing Then
-                                    Dim percent = CInt((totalSent * 100L) \ Math.Max(1L, fi.Length))
-                                    pbSend.Value = Math.Max(0, Math.Min(100, percent))
-                                    If lblSendProgress IsNot Nothing Then lblSendProgress.Text = pbSend.Value & "%"
-                                End If
+                                If frmPeer IsNot Nothing Then frmPeer.UpdateSendProgress(totalSent, fi.Length)
                             End While
                         End Using
                         Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
-                        Dim _ignore2 = _stream.SendAsync(Encoding.UTF8.GetBytes(endMsg), CancellationToken.None)
+                        Dim _ignore2 = _stream.SendAsync(Encoding.UTF8.GetBytes(endMsg), Threading.CancellationToken.None)
                     End If
 
                     Log($"[RELAY{If(useEnc, "+ENC", "")}] Fichier {fi.Name} envoyé à {dest}")
-                End Using
-            Catch ex As Exception
-                Log("[PRIVATE] send file error: " & ex.Message)
-            End Try
-        End Sub
 
-            ' --- Création de la fenêtre privée avec les 2 callbacks ---
-            frm = New PrivateChatForm(_displayName, peer, sendCb, sendFileCb)
-            _privateChats(peer) = frm
+                Finally
+                    If frmPeer IsNot Nothing Then
+                        frmPeer.EndSendProgress()
+                        ' petite notif dans le log de la fenêtre privée
+                        Try
+                            frmPeer.AppendMessage(_displayName, $"[FILE] ✅ Envoi terminé : {fi.Name} ({fi.Length} octets)")
+                        Catch
+                        End Try
+                    End If
+                End Try
+            End Using
 
-            ' États initiaux + refresh immédiat
-            RefreshPrivateChatStatus(peer)
-
-            Dim initialTake = GetAndEnsureHistCount(peer)
-            LoadHistoryIntoPrivate(peer, frm, initialTake)
-
-            AddHandler frm.StartP2PRequested,
-        Sub()
-            Try
-                P2PManager.StartP2P(peer, New String() {"stun:stun.l.google.com:19302"})
-            Catch ex As Exception
-                Log("[P2P] start error: " & ex.Message)
-            End Try
-        End Sub
-
-            AddHandler frm.PurgeRequested,
-        Sub()
-            Try
-                LocalDb.ExecNonQuery("DELETE FROM Messages WHERE PeerName=@p;", LocalDb.P("@p", peer))
-                frm.ClearMessages()
-                _histCount(peer) = 0
-            Catch ex As Exception
-                Log("[DB] purge error: " & ex.Message)
-            End Try
-        End Sub
-
-            ' ✅ Démarre l’auth Ed25519 dès la 1ère ouverture
-            SendIdHello(peer)
-
-            frm.Show(Me)
-            frm.Activate()
-            frm.BringToFront()
-
-        Else
-            ' fenêtre déjà existante → relance un HELLO si besoin
-            SendIdHello(peer)
-
-            frm.Show(Me)
-            frm.Activate()
-            frm.BringToFront()
-            RefreshPrivateChatStatus(peer)
-        End If
+        Catch ex As Exception
+            Log("[PRIVATE] send file error: " & ex.Message)
+        End Try
     End Sub
-
-
 
     Private Sub RefreshPrivateChatStatus(peer As String)
         Dim frm As PrivateChatForm = Nothing
@@ -1446,7 +1520,6 @@ EchoAndPersist:
         End Try
     End Sub
 
-
     ' ====== Helpers chiffrement RELAY ======
     Private Function HasRelayKey(peer As String) As Boolean
         Return _relayKeys.ContainsKey(peer)
@@ -1524,6 +1597,7 @@ EchoAndPersist:
             Else
                 If _stream IsNot Nothing Then _stream.SendAsync(bytes, Threading.CancellationToken.None)
             End If
+
 
             ' ✅ libère le pending côté répondeur
             SyncLock _relayEcdhPending

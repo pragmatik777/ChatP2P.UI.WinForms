@@ -405,12 +405,14 @@ Partial Class Form1
         AutoSize = True
         BackColor = SystemColors.ActiveBorder
         BackgroundImage = CType(resources.GetObject("$this.BackgroundImage"), Image)
+        BackgroundImageLayout = ImageLayout.Stretch
         ClientSize = New Size(967, 816)
         Controls.Add(GroupBox3)
         Controls.Add(GroupBox2)
         Controls.Add(GroupBox1)
+        DoubleBuffered = True
         Name = "Form1"
-        Text = "Form1"
+        Text = "ChatP2P"
         GroupBox1.ResumeLayout(False)
         GroupBox1.PerformLayout()
         GroupBox2.ResumeLayout(False)

@@ -11,6 +11,10 @@ Public Class PrivateChatForm
     Private ReadOnly _send As Action(Of String)
     Private ReadOnly _sendFile As Action
 
+    ' mémorise les noms pour maj % propre
+    Private _sendName As String = ""
+    Private _recvName As String = ""
+
     ' ==== UI ====
     Private ReadOnly rtb As New RichTextBox() With {
         .Dock = DockStyle.Fill,
@@ -25,7 +29,7 @@ Public Class PrivateChatForm
 
     Private ReadOnly panelTop As New Panel() With {.Dock = DockStyle.Top, .Height = 32}
 
-    ' Le panneau de statuts occupe tout l’espace restant (Fill)
+    ' Statuts (Fill)
     Private ReadOnly flStatus As New FlowLayoutPanel() With {
         .Dock = DockStyle.Fill,
         .AutoSize = False,
@@ -41,17 +45,28 @@ Public Class PrivateChatForm
     Private ReadOnly btnStartP2P As New Button() With {.Text = "Démarrer P2P", .Dock = DockStyle.Right, .Width = 120}
     Private ReadOnly btnPurge As New Button() With {.Text = "🗑 Purger", .Dock = DockStyle.Right, .Width = 90}
 
-    Private ReadOnly panelBottom As New Panel() With {.Dock = DockStyle.Bottom, .Height = 44}
+    ' ==== Progress (dans panelBottom) ====
+    Private Const BaseBottomHeight As Integer = 44
+    Private Const ProgHeight As Integer = 64
+
+    Private ReadOnly panelBottom As New Panel() With {.Dock = DockStyle.Bottom, .Height = BaseBottomHeight}
     Private ReadOnly txt As New TextBox() With {.Dock = DockStyle.Fill, .Font = New Font("Segoe UI", 10.0F)}
     Private ReadOnly btnSend As New Button() With {.Text = "Envoyer", .Dock = DockStyle.Right, .Width = 110}
     Private ReadOnly btnSendFile As New Button() With {.Text = "Envoyer fichier", .Dock = DockStyle.Right, .Width = 140}
+
+    ' 👉 Dock en bas pour être SOUS la zone de saisie
+    Private ReadOnly pnlProg As New Panel() With {.Dock = DockStyle.Bottom, .Height = ProgHeight, .Visible = False, .Padding = New Padding(6, 4, 6, 4)}
+    Private ReadOnly lblSendProg As New Label() With {.AutoSize = False, .Height = 16, .Dock = DockStyle.Top, .Text = "", .ForeColor = Color.Gold}
+    Private ReadOnly pbSend As New ProgressBar() With {.Dock = DockStyle.Top, .Height = 12, .Minimum = 0, .Maximum = 100, .Visible = False}
+    Private ReadOnly lblRecvProg As New Label() With {.AutoSize = False, .Height = 16, .Dock = DockStyle.Top, .Text = "", .ForeColor = Color.DeepSkyBlue}
+    Private ReadOnly pbRecv As New ProgressBar() With {.Dock = DockStyle.Top, .Height = 12, .Minimum = 0, .Maximum = 100, .Visible = False}
 
     ' ==== Events publics ====
     Public Event ScrollTopReached()
     Public Event PurgeRequested()
     Public Event StartP2PRequested()
 
-    ' --- Nouveau ctor à 4 paramètres (texte + fichier)
+    ' --- Nouveau ctor (texte + fichier)
     Public Sub New(myName As String, peer As String, sendCb As Action(Of String), sendFileCb As Action)
         _myName = myName
         _peer = peer
@@ -60,25 +75,30 @@ Public Class PrivateChatForm
 
         Me.Text = $"Chat privé avec {peer}"
         Me.Width = 700
-        Me.Height = 520
+        Me.Height = 560
         Me.MinimumSize = New Size(520, 360)
 
-        ' Top: statuts (Fill) + actions dockées à droite
+        ' Top: statuts + actions
         flStatus.Controls.Add(lblP2P)
         flStatus.Controls.Add(lblCrypto)
         flStatus.Controls.Add(lblAuth)
-
-        ' IMPORTANT : ajouter d'abord les boutons (Dock Right), puis flStatus (Dock Fill)
         panelTop.Controls.Add(btnStartP2P)
         panelTop.Controls.Add(btnPurge)
         panelTop.Controls.Add(flStatus)
 
-        ' Bottom: ordre Dock Right (btnSendFile puis btnSend) puis Fill (txt)
-        panelBottom.Controls.Add(btnSend)      ' Right (le plus à droite)
-        panelBottom.Controls.Add(btnSendFile)  ' Right (à gauche de Envoyer)
-        panelBottom.Controls.Add(txt)          ' Fill
+        ' Progress panel (ordre: send-label, send-bar, recv-label, recv-bar)
+        pnlProg.Controls.Add(pbRecv)
+        pnlProg.Controls.Add(lblRecvProg)
+        pnlProg.Controls.Add(pbSend)
+        pnlProg.Controls.Add(lblSendProg)
 
-        ' Ordre d'ajout global
+        ' Bottom: input (Fill) + boutons (Right) + progress (Bottom)
+        panelBottom.Controls.Add(btnSend)
+        panelBottom.Controls.Add(btnSendFile)
+        panelBottom.Controls.Add(txt)
+        panelBottom.Controls.Add(pnlProg)
+
+        ' Ajout global
         Me.Controls.Add(rtb)
         Me.Controls.Add(panelBottom)
         Me.Controls.Add(panelTop)
@@ -96,11 +116,10 @@ Public Class PrivateChatForm
         AddHandler rtb.Resize, AddressOf OnRtbScroll
     End Sub
 
-    ' --- Overload rétro-compatible (3 paramètres) -> appelle une no-op
+    ' --- Overload rétro-compatible (3 paramètres)
     Public Sub New(myName As String, peer As String, sendCb As Action(Of String))
         Me.New(myName, peer, sendCb, AddressOf NoopSendFile)
     End Sub
-
     Private Shared Sub NoopSendFile()
         ' no-op
     End Sub
@@ -119,9 +138,9 @@ Public Class PrivateChatForm
         Dim msg = txt.Text.Trim()
         If msg.Length = 0 Then Return
         Try
-            _send(msg) ' -> Form1 décidera P2P/RELAY et fera l’écho local
+            _send(msg)
         Catch
-            ' on ignore (Form1 loguera si besoin)
+            ' ignore; le parent loguera
         End Try
         txt.Clear()
         txt.Focus()
@@ -139,7 +158,7 @@ Public Class PrivateChatForm
         Try
             If _sendFile IsNot Nothing Then _sendFile()
         Catch
-            ' ignore; Form1 loguera les erreurs
+            ' ignore; Form1 loguera
         End Try
     End Sub
 
@@ -218,6 +237,80 @@ Public Class PrivateChatForm
         End If
         lblAuth.Text = If(verified, "Auth: ✅", "Auth: ❌")
         lblAuth.ForeColor = If(verified, Color.DarkGreen, Color.Firebrick)
+    End Sub
+
+    ' ===== Progress API (thread-safe) =====
+    Public Sub StartSendProgress(fileName As String, expectedBytes As Long)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() StartSendProgress(fileName, expectedBytes)) : Return
+        End If
+        _sendName = fileName
+        lblSendProg.Text = "Envoi : " & fileName
+        pbSend.Value = 0
+        pbSend.Visible = True
+        RefreshProgressPanel()
+    End Sub
+
+    Public Sub UpdateSendProgress(sent As Long, expected As Long)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() UpdateSendProgress(sent, expected)) : Return
+        End If
+        Dim p As Integer = 0
+        If expected > 0 Then p = CInt((sent * 100L) \ expected)
+        p = Math.Max(0, Math.Min(100, p))
+        pbSend.Value = p
+        lblSendProg.Text = $"Envoi : {_sendName} — {p}%"
+        RefreshProgressPanel()
+    End Sub
+
+    Public Sub EndSendProgress()
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() EndSendProgress()) : Return
+        End If
+        pbSend.Visible = False
+        lblSendProg.Text = ""
+        _sendName = ""
+        RefreshProgressPanel()
+    End Sub
+
+    Public Sub StartRecvProgress(fileName As String, expectedBytes As Long)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() StartRecvProgress(fileName, expectedBytes)) : Return
+        End If
+        _recvName = fileName
+        lblRecvProg.Text = "Réception : " & fileName
+        pbRecv.Value = 0
+        pbRecv.Visible = True
+        RefreshProgressPanel()
+    End Sub
+
+    Public Sub UpdateRecvProgress(received As Long, expected As Long)
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() UpdateRecvProgress(received, expected)) : Return
+        End If
+        Dim p As Integer = 0
+        If expected > 0 Then p = CInt((received * 100L) \ expected)
+        p = Math.Max(0, Math.Min(100, p))
+        pbRecv.Value = p
+        lblRecvProg.Text = $"Réception : {_recvName} — {p}%"
+        RefreshProgressPanel()
+    End Sub
+
+    Public Sub EndRecvProgress()
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() EndRecvProgress()) : Return
+        End If
+        pbRecv.Visible = False
+        lblRecvProg.Text = ""
+        _recvName = ""
+        RefreshProgressPanel()
+    End Sub
+
+    Private Sub RefreshProgressPanel()
+        ' Affiche le panneau s’il y a au moins une barre visible
+        Dim anyVisible = (pbSend.Visible OrElse pbRecv.Visible)
+        pnlProg.Visible = anyVisible
+        panelBottom.Height = BaseBottomHeight + If(anyVisible, ProgHeight, 0)
     End Sub
 
     Private Sub PrivateChatForm_Load(sender As Object, e As EventArgs) Handles MyBase.Load
