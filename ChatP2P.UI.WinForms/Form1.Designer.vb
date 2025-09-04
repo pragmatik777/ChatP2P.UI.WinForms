@@ -44,11 +44,7 @@ Partial Class Form1
         chkStrictTrust = New CheckBox()
         btnSecurity = New Button()
         btnChooseRecvFolder = New Button()
-        lblRecvProgress = New Label()
         btnSendFile = New Button()
-        pbSend = New ProgressBar()
-        lblSendProgress = New Label()
-        pbRecv = New ProgressBar()
         lstPeers = New ListBox()
         Label4 = New Label()
         txtName = New TextBox()
@@ -213,11 +209,7 @@ Partial Class Form1
         GroupBox3.Controls.Add(btnSecurity)
         GroupBox3.Controls.Add(chkVerbose)
         GroupBox3.Controls.Add(btnChooseRecvFolder)
-        GroupBox3.Controls.Add(lblRecvProgress)
         GroupBox3.Controls.Add(btnSendFile)
-        GroupBox3.Controls.Add(pbSend)
-        GroupBox3.Controls.Add(lblSendProgress)
-        GroupBox3.Controls.Add(pbRecv)
         GroupBox3.Controls.Add(lstPeers)
         GroupBox3.Controls.Add(Label4)
         GroupBox3.Controls.Add(txtName)
@@ -228,7 +220,7 @@ Partial Class Form1
         GroupBox3.ForeColor = Color.Lime
         GroupBox3.Location = New Point(12, 202)
         GroupBox3.Name = "GroupBox3"
-        GroupBox3.Size = New Size(927, 572)
+        GroupBox3.Size = New Size(927, 413)
         GroupBox3.TabIndex = 2
         GroupBox3.TabStop = False
         GroupBox3.Text = "Messaging"
@@ -238,7 +230,7 @@ Partial Class Form1
         btnTestPQ.BackColor = Color.Black
         btnTestPQ.Location = New Point(354, 327)
         btnTestPQ.Name = "btnTestPQ"
-        btnTestPQ.Size = New Size(112, 34)
+        btnTestPQ.Size = New Size(112, 39)
         btnTestPQ.TabIndex = 13
         btnTestPQ.Text = "Test PQ"
         btnTestPQ.UseVisualStyleBackColor = False
@@ -294,50 +286,17 @@ Partial Class Form1
         btnChooseRecvFolder.Text = "Dossier"
         btnChooseRecvFolder.UseVisualStyleBackColor = False
         ' 
-        ' lblRecvProgress
-        ' 
-        lblRecvProgress.AutoSize = True
-        lblRecvProgress.Location = New Point(739, 502)
-        lblRecvProgress.Name = "lblRecvProgress"
-        lblRecvProgress.Size = New Size(140, 28)
-        lblRecvProgress.TabIndex = 6
-        lblRecvProgress.Text = "Réception : 0%"
-        ' 
         ' btnSendFile
         ' 
         btnSendFile.BackColor = Color.Black
         btnSendFile.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnSendFile.Location = New Point(769, 372)
+        btnSendFile.Location = New Point(760, 333)
         btnSendFile.Name = "btnSendFile"
         btnSendFile.Size = New Size(119, 34)
         btnSendFile.TabIndex = 6
         btnSendFile.Text = "Send File"
         btnSendFile.UseVisualStyleBackColor = False
         btnSendFile.Visible = False
-        ' 
-        ' pbSend
-        ' 
-        pbSend.Location = New Point(2, 536)
-        pbSend.Name = "pbSend"
-        pbSend.Size = New Size(712, 30)
-        pbSend.TabIndex = 3
-        ' 
-        ' lblSendProgress
-        ' 
-        lblSendProgress.AutoSize = True
-        lblSendProgress.Location = New Point(778, 536)
-        lblSendProgress.Name = "lblSendProgress"
-        lblSendProgress.Size = New Size(101, 28)
-        lblSendProgress.TabIndex = 4
-        lblSendProgress.Text = "Envoi : 0%"
-        ' 
-        ' pbRecv
-        ' 
-        pbRecv.BackColor = Color.Black
-        pbRecv.Location = New Point(6, 499)
-        pbRecv.Name = "pbRecv"
-        pbRecv.Size = New Size(708, 31)
-        pbRecv.TabIndex = 5
         ' 
         ' lstPeers
         ' 
@@ -372,7 +331,7 @@ Partial Class Form1
         ' 
         btnSend.BackColor = Color.Black
         btnSend.Font = New Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, CByte(0))
-        btnSend.Location = New Point(601, 283)
+        btnSend.Location = New Point(608, 284)
         btnSend.Name = "btnSend"
         btnSend.Size = New Size(44, 35)
         btnSend.TabIndex = 2
@@ -406,7 +365,7 @@ Partial Class Form1
         BackColor = SystemColors.ActiveBorder
         BackgroundImage = CType(resources.GetObject("$this.BackgroundImage"), Image)
         BackgroundImageLayout = ImageLayout.Stretch
-        ClientSize = New Size(967, 816)
+        ClientSize = New Size(967, 636)
         Controls.Add(GroupBox3)
         Controls.Add(GroupBox2)
         Controls.Add(GroupBox1)
@@ -442,10 +401,6 @@ Partial Class Form1
     Friend WithEvents btnSendFile As Button
     Friend WithEvents Label5 As Label
     Friend WithEvents txtFilePort As TextBox
-    Friend WithEvents pbSend As ProgressBar
-    Friend WithEvents lblSendProgress As Label
-    Friend WithEvents pbRecv As ProgressBar
-    Friend WithEvents lblRecvProgress As Label
     Friend WithEvents btnChooseRecvFolder As Button
     Friend WithEvents chkVerbose As CheckBox
     Friend WithEvents btnSecurity As Button
