@@ -43,6 +43,7 @@ Partial Class Form1
         chkEncryptRelay = New CheckBox()
         chkStrictTrust = New CheckBox()
         btnSecurity = New Button()
+        btnP2PAdvanced = New Button()
         btnChooseRecvFolder = New Button()
         btnSendFile = New Button()
         lstPeers = New ListBox()
@@ -207,6 +208,7 @@ Partial Class Form1
         GroupBox3.Controls.Add(chkEncryptRelay)
         GroupBox3.Controls.Add(chkStrictTrust)
         GroupBox3.Controls.Add(btnSecurity)
+        GroupBox3.Controls.Add(btnP2PAdvanced)
         GroupBox3.Controls.Add(chkVerbose)
         GroupBox3.Controls.Add(btnChooseRecvFolder)
         GroupBox3.Controls.Add(btnSendFile)
@@ -274,6 +276,16 @@ Partial Class Form1
         btnSecurity.TabIndex = 9
         btnSecurity.Text = "Security"
         btnSecurity.UseVisualStyleBackColor = False
+        ' 
+        ' btnP2PAdvanced
+        ' 
+        btnP2PAdvanced.BackColor = Color.Black
+        btnP2PAdvanced.Location = New Point(601, 329)
+        btnP2PAdvanced.Name = "btnP2PAdvanced"
+        btnP2PAdvanced.Size = New Size(112, 38)
+        btnP2PAdvanced.TabIndex = 14
+        btnP2PAdvanced.Text = "P2P Config"
+        btnP2PAdvanced.UseVisualStyleBackColor = False
         ' 
         ' btnChooseRecvFolder
         ' 
@@ -409,5 +421,6 @@ Partial Class Form1
     Friend WithEvents chkEncryptRelay As CheckBox
     Friend WithEvents chkPqRelay As CheckBox
     Friend WithEvents btnTestPQ As Button
+    Friend WithEvents btnP2PAdvanced As Button
 
 End Class

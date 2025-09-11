@@ -2,6 +2,7 @@
 Option Explicit On
 
 Imports System
+Imports System.Diagnostics
 Imports System.Globalization
 Imports System.IO
 Imports System.Net.Sockets
@@ -30,6 +31,10 @@ Public Class Form1
     Private Const ID_HELLO As String = "[IDHELLO]"    ' [IDHELLO]<b64(pub)>:<b64(nonce)>
     Private Const ID_PROOF As String = "[IDPROOF]"    ' [IDPROOF]<b64(nonce)>:<b64(sig)>
 
+    ' ==== TAGs/Marqueurs crypto PQC P2P ====
+    Private Const PQC_KEYEX As String = "[PQCKEY]"    ' [PQCKEY]<b64(pubkey_pqc)>
+    Private Const PQC_MSG As String = "[PQCMSG]"      ' [PQCMSG]<b64(encrypted_data)>
+
     ' ====== État identité (Ed25519 / TOFU) ======
     Private _myEdPk As Byte()
     Private _myEdSk As Byte()
@@ -37,6 +42,18 @@ Public Class Form1
     Private ReadOnly _idChallenge As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
     ' Pubkeys TOFU vues/mémorisées (cache)
     Private ReadOnly _peerEdPk As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
+
+    ' ====== État crypto PQC pour messages P2P ======
+    Private _myPqcKeyPair As ChatP2P.Crypto.P2PMessageCrypto.P2PKeyPair
+    ' Clés publiques PQC des peers pour messages P2P
+    Private ReadOnly _peerPqcPk As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
+
+    ' ====== Configuration P2P avancée ======
+    Private _p2pConfig As P2PAdvancedForm
+    
+    ' ====== BitTorrent-like File Transfer ======
+    Private _transferManager As ChatP2P.Core.P2PFileTransfer.P2PTransferManager = Nothing
+    Private _transferCleanupTimer As Threading.Timer = Nothing
 
     Private Class FileRecvState
         Public Id As String = ""
@@ -194,15 +211,161 @@ Public Class Form1
         Catch
         End Try
 
-        If txtLog Is Nothing Then Exit Sub
-
+        Dim shouldLog As Boolean = False
         If Not verbose Then
-            txtLog.AppendText(msg & Environment.NewLine)
-        Else
-            If chkVerbose IsNot Nothing AndAlso chkVerbose.Checked Then
+            shouldLog = True
+            If txtLog IsNot Nothing Then
                 txtLog.AppendText(msg & Environment.NewLine)
             End If
+        Else
+            If chkVerbose IsNot Nothing AndAlso chkVerbose.Checked Then
+                shouldLog = True
+                If txtLog IsNot Nothing Then
+                    txtLog.AppendText(msg & Environment.NewLine)
+                End If
+            End If
         End If
+
+        ' Écriture dans fichier log
+        If shouldLog Then
+            LogToFile(msg)
+        End If
+    End Sub
+
+    Private Sub LogToFile(msg As String)
+        Try
+            Dim logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "ChatP2P_Logs")
+            If Not Directory.Exists(logDir) Then
+                Directory.CreateDirectory(logDir)
+            End If
+            
+            Dim logFile = Path.Combine(logDir, "logfile.txt")
+            Dim timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+            Dim logEntry = $"[{timestamp}] {msg}{Environment.NewLine}"
+            
+            File.AppendAllText(logFile, logEntry)
+        Catch
+            ' Ignore file logging errors to avoid infinite recursion
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Envoi d'un message P2P avec chiffrement PQC si les clés sont disponibles.
+    ''' Sinon, fallback vers envoi en clair.
+    ''' </summary>
+    Private Function TrySendP2PMessageEncrypted(peer As String, message As String) As Boolean
+        If String.IsNullOrWhiteSpace(peer) OrElse String.IsNullOrEmpty(message) Then Return False
+        
+        ' Vérifier si P2P est connecté
+        If Not (_p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer)) Then Return False
+        
+        Try
+            ' Vérifier si on a la clé publique PQC du peer
+            If _peerPqcPk.ContainsKey(peer) AndAlso _myPqcKeyPair IsNot Nothing Then
+                ' Envoi chiffré PQC
+                Dim peerPubKey = _peerPqcPk(peer)
+                Dim encryptedData = ChatP2P.Crypto.P2PMessageCrypto.EncryptMessage(message, peerPubKey)
+                Dim encryptedB64 = Convert.ToBase64String(encryptedData)
+                Dim pqcMessage = PQC_MSG & encryptedB64
+                
+                If P2PManager.TrySendText(peer, pqcMessage) Then
+                    Log($"[PQC] Message chiffré envoyé à {peer}", verbose:=True)
+                    Return True
+                End If
+            Else
+                ' Pas de clé PQC disponible, envoyer l'échange de clé d'abord
+                If _myPqcKeyPair IsNot Nothing Then
+                    SendPqcKeyExchange(peer)
+                End If
+                
+                ' Fallback: envoi en clair (comportement actuel)
+                Log($"[PQC] Pas de clé PQC pour {peer}, envoi en clair", verbose:=True)
+                Return P2PManager.TrySendText(peer, message)
+            End If
+            
+        Catch ex As Exception
+            Log($"[PQC] Erreur envoi chiffré à {peer}: {ex.Message}")
+            ' Fallback: essayer en clair
+            Return P2PManager.TrySendText(peer, message)
+        End Try
+        
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Envoie notre clé publique PQC au peer pour établir le chiffrement.
+    ''' </summary>
+    Private Sub SendPqcKeyExchange(peer As String)
+        Try
+            If _myPqcKeyPair Is Nothing Then Return
+            
+            Dim pubKeyB64 = Convert.ToBase64String(_myPqcKeyPair.PublicKey)
+            Dim keyExMsg = PQC_KEYEX & pubKeyB64
+            
+            If P2PManager.TrySendText(peer, keyExMsg) Then
+                Log($"[PQC] Clé publique envoyée à {peer}", verbose:=True)
+            End If
+            
+        Catch ex As Exception
+            Log($"[PQC] Erreur envoi clé à {peer}: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Traite la réception d'une clé publique PQC d'un peer.
+    ''' </summary>
+    Private Sub HandlePqcKeyExchange(peer As String, message As String)
+        Try
+            If Not message.StartsWith(PQC_KEYEX, StringComparison.Ordinal) Then Return
+            
+            Dim pubKeyB64 = message.Substring(PQC_KEYEX.Length)
+            Dim peerPubKey = Convert.FromBase64String(pubKeyB64)
+            
+            ' Stocker la clé publique du peer
+            _peerPqcPk(peer) = peerPubKey
+            Log($"[PQC] Clé publique reçue de {peer} ({peerPubKey.Length}b)", verbose:=True)
+            
+            ' Répondre avec notre clé publique si on ne l'a pas déjà envoyée
+            If _myPqcKeyPair IsNot Nothing AndAlso Not _peerPqcPk.ContainsKey(peer) Then
+                SendPqcKeyExchange(peer)
+            End If
+            
+        Catch ex As Exception
+            Log($"[PQC] Erreur traitement clé de {peer}: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Traite la réception d'un message PQC chiffré d'un peer.
+    ''' </summary>
+    Private Sub HandlePqcMessage(peer As String, message As String)
+        Try
+            If Not message.StartsWith(PQC_MSG, StringComparison.Ordinal) Then Return
+            
+            Dim encryptedB64 = message.Substring(PQC_MSG.Length)
+            Dim encryptedData = Convert.FromBase64String(encryptedB64)
+            
+            If _myPqcKeyPair Is Nothing Then
+                Log($"[PQC] Impossible de déchiffrer message de {peer}: pas de clé privée")
+                Return
+            End If
+            
+            ' Déchiffrer le message
+            Dim decryptedText = ChatP2P.Crypto.P2PMessageCrypto.DecryptMessage(encryptedData, _myPqcKeyPair.PrivateKey)
+            Log($"[PQC] Message déchiffré reçu de {peer}", verbose:=True)
+            
+            ' Traiter le message déchiffré comme un message normal
+            Dim norm As String = Canon(decryptedText)
+            If SeenRecently(peer, norm) Then Return
+
+            StoreMsg(peer, outgoing:=False, body:=norm, viaP2P:=True)
+            EnsurePrivateChat(peer)
+            RefreshPrivateChatStatus(peer)
+            AppendToPrivate(peer, peer, "[P2P🔒] " & norm) ' 🔒 indique message chiffré PQC
+            
+        Catch ex As Exception
+            Log($"[PQC] Erreur déchiffrement message de {peer}: {ex.Message}")
+        End Try
     End Sub
 
     Private Function GetRecvFolder() As String
@@ -273,12 +436,40 @@ Public Class Form1
     Private Sub PersistStrictToSettingsIfPossible()
         Try
             If chkStrictTrust Is Nothing Then Return
-            Dim pi = GetType(My.MySettings).GetProperty("StrictTrust", BindingFlags.Instance Or BindingFlags.Public)
-            If pi IsNot Nothing Then
-                pi.SetValue(My.Settings, chkStrictTrust.Checked, Nothing)
-                My.Settings.Save()
-            End If
-        Catch
+            My.Settings.StrictTrust = chkStrictTrust.Checked.ToString()
+            My.Settings.Save()
+        Catch ex As Exception
+            Log($"[SETTINGS] StrictTrust save error: {ex.Message}", verbose:=True)
+        End Try
+    End Sub
+
+    Private Sub PersistVerboseToSettingsIfPossible()
+        Try
+            If chkVerbose Is Nothing Then Return
+            My.Settings.Verbose = chkVerbose.Checked.ToString()
+            My.Settings.Save()
+        Catch ex As Exception
+            Log($"[SETTINGS] Verbose save error: {ex.Message}", verbose:=True)
+        End Try
+    End Sub
+
+    Private Sub PersistEncryptRelayToSettingsIfPossible()
+        Try
+            If chkEncryptRelay Is Nothing Then Return
+            My.Settings.EncryptRelay = chkEncryptRelay.Checked.ToString()
+            My.Settings.Save()
+        Catch ex As Exception
+            Log($"[SETTINGS] EncryptRelay save error: {ex.Message}", verbose:=True)
+        End Try
+    End Sub
+
+    Private Sub PersistPqRelayToSettingsIfPossible()
+        Try
+            If chkPqRelay Is Nothing Then Return
+            My.Settings.PqRelay = chkPqRelay.Checked.ToString()
+            My.Settings.Save()
+        Catch ex As Exception
+            Log($"[SETTINGS] PqRelay save error: {ex.Message}", verbose:=True)
         End Try
     End Sub
 
@@ -325,6 +516,43 @@ Public Class Form1
             Log("[ID] init Ed25519 FAILED: " & ex.Message)
         End Try
 
+        ' Clés PQC pour messages P2P
+        Try
+            _myPqcKeyPair = ChatP2P.Crypto.P2PMessageCrypto.GenerateKeyPair()
+            Log("[PQC] Clés P2P générées (" & _myPqcKeyPair.Algorithm & ", " & 
+                If(_myPqcKeyPair.IsSimulated, "simulé", "natif") & ", pub:" & _myPqcKeyPair.PublicKey.Length & "b)", verbose:=True)
+        Catch ex As Exception
+            Log("[PQC] Génération clés P2P FAILED: " & ex.Message)
+        End Try
+
+        ' Configuration P2P avancée
+        Try
+            _p2pConfig = New P2PAdvancedForm()
+            Log("[P2P] Configuration avancée initialisée", verbose:=True)
+        Catch ex As Exception
+            Log("[P2P] Init config FAILED: " & ex.Message)
+        End Try
+
+        ' BitTorrent-like Transfer Manager
+        Try
+            _transferManager = New ChatP2P.Core.P2PFileTransfer.P2PTransferManager()
+            AddHandler _transferManager.OnTransferProgress, AddressOf OnBitTorrentProgress
+            AddHandler _transferManager.OnTransferCompleted, AddressOf OnBitTorrentCompleted
+            AddHandler _transferManager.OnLog, AddressOf OnBitTorrentLog
+            
+            ' Timer de nettoyage toutes les 2 minutes
+            _transferCleanupTimer = New Threading.Timer(
+                Sub() _transferManager?.CleanupTransfers(),
+                Nothing,
+                TimeSpan.FromMinutes(2),
+                TimeSpan.FromMinutes(2)
+            )
+            
+            Log("[BT] Transfer Manager initialisé avec nettoyage automatique", verbose:=True)
+        Catch ex As Exception
+            Log("[BT] Init Transfer Manager FAILED: " & ex.Message)
+        End Try
+
         ' (Optionnel) init crypto
         Try
             ChatP2P.Crypto.KexX25519.GenerateKeyPair()
@@ -343,26 +571,7 @@ Public Class Form1
         Catch
         End Try
 
-        If chkStrictTrust IsNot Nothing Then
-            Try
-                Dim pi = GetType(My.MySettings).GetProperty("StrictTrust", BindingFlags.Instance Or BindingFlags.Public)
-                If pi IsNot Nothing Then
-                    Dim raw = pi.GetValue(My.Settings, Nothing)
-                    Dim v As Boolean = False
-                    If raw IsNot Nothing Then
-                        If TypeOf raw Is Boolean Then
-                            v = CBool(raw)
-                        Else
-                            Dim s = TryCast(raw, String)
-                            If s IsNot Nothing Then Boolean.TryParse(s, v)
-                        End If
-                    End If
-                    chkStrictTrust.Checked = v
-                End If
-            Catch
-            End Try
-            AddHandler chkStrictTrust.CheckedChanged, Sub() PersistStrictToSettingsIfPossible()
-        End If
+        ' Checkbox loading moved to Form1_Shown
 
         ' init P2P au Load
         InitP2PManager()
@@ -372,6 +581,59 @@ Public Class Form1
         _fileWatchdog.Start()
 
         AddHandler lstPeers.DoubleClick, AddressOf lstPeers_DoubleClick
+    End Sub
+
+    Private Sub Form1_Shown(sender As Object, e As EventArgs) Handles MyBase.Shown
+        ' Load checkbox settings after form is fully shown
+        LoadCheckboxSettings()
+    End Sub
+
+    Private Sub LoadCheckboxSettings()
+        ' Add handlers first
+        If chkStrictTrust IsNot Nothing Then
+            AddHandler chkStrictTrust.CheckedChanged, Sub() PersistStrictToSettingsIfPossible()
+        End If
+        If chkVerbose IsNot Nothing Then
+            AddHandler chkVerbose.CheckedChanged, Sub() PersistVerboseToSettingsIfPossible()
+        End If
+        If chkEncryptRelay IsNot Nothing Then
+            AddHandler chkEncryptRelay.CheckedChanged, Sub() PersistEncryptRelayToSettingsIfPossible()
+        End If
+        If chkPqRelay IsNot Nothing Then
+            AddHandler chkPqRelay.CheckedChanged, Sub() PersistPqRelayToSettingsIfPossible()
+        End If
+
+        ' Force update UI with timer
+        Dim timer As New System.Windows.Forms.Timer() With {.Interval = 100}
+        AddHandler timer.Tick, Sub()
+            timer.Stop()
+            timer.Dispose()
+            
+            If chkStrictTrust IsNot Nothing Then
+                chkStrictTrust.Checked = (My.Settings.StrictTrust = "True")
+                chkStrictTrust.Invalidate()
+                chkStrictTrust.Refresh()
+            End If
+
+            If chkVerbose IsNot Nothing Then
+                chkVerbose.Checked = (My.Settings.Verbose = "True")
+                chkVerbose.Invalidate()
+                chkVerbose.Refresh()
+            End If
+
+            If chkEncryptRelay IsNot Nothing Then
+                chkEncryptRelay.Checked = (My.Settings.EncryptRelay = "True")
+                chkEncryptRelay.Invalidate()
+                chkEncryptRelay.Refresh()
+            End If
+
+            If chkPqRelay IsNot Nothing Then
+                chkPqRelay.Checked = (My.Settings.PqRelay = "True")
+                chkPqRelay.Invalidate()
+                chkPqRelay.Refresh()
+            End If
+        End Sub
+        timer.Start()
     End Sub
 
     Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
@@ -1093,6 +1355,25 @@ Public Class Form1
             Return
         End If
 
+        ' Filtrer les messages BitTorrent AVANT PQC pour éviter le spam dans PrivateChatForm
+        If text.StartsWith(ChatP2P.App.MessageProtocol.TAG_BT_META, StringComparison.Ordinal) _
+           OrElse text.StartsWith(ChatP2P.App.MessageProtocol.TAG_BT_CHUNK, StringComparison.Ordinal) _
+           OrElse text.StartsWith(ChatP2P.App.MessageProtocol.TAG_BT_REQUEST, StringComparison.Ordinal) Then
+            Log($"[BT] Message BitTorrent reçu via P2P texte (ignoré pour UI): {text.Substring(0, Math.Min(20, text.Length))}...", verbose:=True)
+            Return
+        End If
+
+        ' Gestion des messages PQC
+        If text.StartsWith(PQC_KEYEX, StringComparison.Ordinal) Then
+            HandlePqcKeyExchange(peer, text)
+            Return
+        End If
+        
+        If text.StartsWith(PQC_MSG, StringComparison.Ordinal) Then
+            HandlePqcMessage(peer, text)
+            Return
+        End If
+
         Dim norm As String = Canon(text)
         If SeenRecently(peer, norm) Then Return
 
@@ -1101,6 +1382,214 @@ Public Class Form1
         RefreshPrivateChatStatus(peer)
         AppendToPrivate(peer, peer, "[P2P] " & norm)
     End Sub
+
+    ' ---------- P2P binaire (pour fichiers) ----------
+    Private Sub OnP2PBinary_FromP2P(peer As String, data As Byte())
+        If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+            Me.BeginInvoke(Sub() OnP2PBinary_FromP2P(peer, data))
+            Return
+        End If
+        If IsStrictEnabled() AndAlso Not IsPeerTrusted(peer) Then
+            Log($"[SECURITY] Message P2P binaire IN bloqué (pair non de confiance): {peer}")
+            Return
+        End If
+        
+        Try
+            ' Convertir les données binaires en texte pour les traiter comme des messages relay/hub
+            Dim text = Encoding.UTF8.GetString(data)
+            
+            ' Messages BitTorrent-like (priorité haute)
+            If text.StartsWith(ChatP2P.App.MessageProtocol.TAG_BT_META, StringComparison.Ordinal) Then
+                HandleBitTorrentMeta(peer, text)
+                Return
+            ElseIf text.StartsWith(ChatP2P.App.MessageProtocol.TAG_BT_CHUNK, StringComparison.Ordinal) Then
+                HandleBitTorrentChunk(peer, text)
+                Return
+            ElseIf text.StartsWith(ChatP2P.App.MessageProtocol.TAG_BT_REQUEST, StringComparison.Ordinal) Then
+                HandleBitTorrentRequest(peer, text)
+                Return
+            End If
+            
+            ' Les messages de fichier P2P legacy utilisent le même format que le relay
+            If text.StartsWith(Proto.TAG_FILEMETA, StringComparison.Ordinal) _
+               OrElse text.StartsWith(Proto.TAG_FILECHUNK, StringComparison.Ordinal) _
+               OrElse text.StartsWith(Proto.TAG_FILEEND, StringComparison.Ordinal) Then
+                Log($"[P2P] Message fichier legacy reçu de {peer}: {text.Substring(0, Math.Min(50, text.Length))}...")
+                OnHubFileSignal(text)
+                Return
+            End If
+            
+            ' Pour l'instant, on ignore les autres messages binaires
+            Log($"[P2P] Message binaire non reconnu de {peer} ({data.Length} octets)")
+        Catch ex As Exception
+            Log($"[P2P] Erreur traitement message binaire de {peer}: {ex.Message}")
+        End Try
+    End Sub
+
+    ' ---------- BitTorrent-like Handlers ----------
+    Private Sub HandleBitTorrentMeta(peer As String, message As String)
+        Try
+            ' Format: BTMETA:transferId:fileName:fileSize:chunkSize:fileHash
+            Dim parts = message.Substring(ChatP2P.App.MessageProtocol.TAG_BT_META.Length).Split(":"c, 5)
+            If parts.Length <> 5 Then
+                Log($"[BT] BTMETA format invalide de {peer}")
+                Return
+            End If
+            
+            Dim transferId = parts(0)
+            Dim fileName = parts(1)
+            Dim fileSize = Long.Parse(parts(2))
+            Dim chunkSize = Integer.Parse(parts(3))
+            Dim fileHash = parts(4)
+            
+            Log($"[BT] Métadonnées reçues de {peer}: {fileName} ({fileSize} octets, chunks {chunkSize})")
+            
+            ' Créer la métadonnée et démarrer la réception
+            Dim metadata As New ChatP2P.Core.P2PFileTransfer.FileMetadata(transferId, fileName, fileSize, chunkSize)
+            metadata.FileHash = fileHash
+            
+            ' Définir le chemin de sortie vers ChatP2P_Recv
+            Dim downloadDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ChatP2P_Recv")
+            If Not System.IO.Directory.Exists(downloadDir) Then
+                System.IO.Directory.CreateDirectory(downloadDir)
+            End If
+            Dim outputPath = System.IO.Path.Combine(downloadDir, fileName)
+            
+            ' Éviter les écrasements
+            Dim counter = 1
+            Dim originalPath = outputPath
+            While System.IO.File.Exists(outputPath)
+                Dim nameOnly = System.IO.Path.GetFileNameWithoutExtension(originalPath)
+                Dim extension = System.IO.Path.GetExtension(originalPath)
+                outputPath = System.IO.Path.Combine(downloadDir, $"{nameOnly}_{counter}{extension}")
+                counter += 1
+            End While
+            
+            ' Démarrer la réception avec le TransferManager
+            If _transferManager.StartReceiveTransfer(metadata, outputPath) Then
+                Log($"[BT] Transfert {transferId} démarré -> {outputPath}")
+                
+                ' Notifier la fenêtre de chat
+                Dim frm = EnsureAndGetPrivateChatForm(peer)
+                If frm IsNot Nothing Then
+                    ' Démarrer la progress bar générique
+                    frm.StartRecvProgress(fileName, fileSize)
+                    frm.AppendMessage(peer, $"[FILE] 📥 Début réception BitTorrent: {fileName} ({fileSize} octets)")
+                End If
+                
+                ' Demander les premiers chunks
+                RequestMissingChunks(peer, transferId)
+            Else
+                Log($"[BT] Échec démarrage transfert {transferId}")
+            End If
+            
+        Catch ex As Exception
+            Log($"[BT] Erreur BTMETA de {peer}: {ex.Message}")
+        End Try
+    End Sub
+    
+    Private Sub HandleBitTorrentChunk(peer As String, message As String)
+        Try
+            ' Format: BTCHUNK:transferId:chunkIndex:hash:dataBase64
+            Dim parts = message.Substring(ChatP2P.App.MessageProtocol.TAG_BT_CHUNK.Length).Split(":"c, 4)
+            If parts.Length <> 4 Then
+                Log($"[BT] BTCHUNK format invalide de {peer}")
+                Return
+            End If
+            
+            Dim transferId = parts(0)
+            Dim chunkIndex = Integer.Parse(parts(1))
+            Dim chunkHash = parts(2)
+            Dim chunkData = Convert.FromBase64String(parts(3))
+            
+            Log($"[BT] Chunk {chunkIndex} reçu de {peer} pour {transferId} ({chunkData.Length} octets)", verbose:=True)
+            
+            ' Traiter le chunk avec le TransferManager
+            If _transferManager.ProcessReceivedChunk(transferId, chunkIndex, chunkHash, chunkData) Then
+                ' Log seulement tous les 100 chunks pour éviter le spam
+                If chunkIndex Mod 100 = 0 Then
+                    Log($"[BT] Chunk {chunkIndex} traité avec succès", verbose:=True)
+                End If
+                
+                ' Demander d'autres chunks manquants de façon régulée
+                If chunkIndex Mod 10 = 0 Then ' Demander tous les 10 chunks pour éviter la saturation
+                    RequestMissingChunks(peer, transferId)
+                End If
+            Else
+                Log($"[BT] Échec traitement chunk {chunkIndex} pour {transferId}")
+            End If
+            
+        Catch ex As Exception
+            Log($"[BT] Erreur BTCHUNK de {peer}: {ex.Message}")
+        End Try
+    End Sub
+    
+    Private Sub HandleBitTorrentRequest(peer As String, message As String)
+        Try
+            ' Format: BTREQ:transferId:chunkIndex1,chunkIndex2,chunkIndex3...
+            Dim parts = message.Substring(ChatP2P.App.MessageProtocol.TAG_BT_REQUEST.Length).Split(":"c, 2)
+            If parts.Length <> 2 Then
+                Log($"[BT] BTREQ format invalide de {peer}")
+                Return
+            End If
+            
+            Dim transferId = parts(0)
+            Dim chunkIndices = parts(1).Split(","c).Select(Function(s) Integer.Parse(s.Trim())).ToList()
+            
+            Log($"[BT] Demande de {chunkIndices.Count} chunks pour {transferId} de {peer}", verbose:=True)
+            
+            ' TODO: Implémenter l'envoi des chunks depuis le fichier source 
+            ' Pour l'instant, on log juste la demande (nécessite de tracker les transferts d'envoi)
+            Log($"[BT] Envoi chunks demandé mais non implémenté pour {transferId} (besoin de tracker fichiers source)")
+            
+        Catch ex As Exception
+            Log($"[BT] Erreur BTREQ de {peer}: {ex.Message}")
+        End Try
+    End Sub
+    
+    Private Function ReadFileChunk(filePath As String, chunkIndex As Integer, chunkSize As Integer) As Byte()
+        Try
+            Using fs As New FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read)
+                Dim offset As Long = CLng(chunkIndex) * CLng(chunkSize)
+                If offset >= fs.Length Then Return Nothing
+                
+                fs.Seek(offset, SeekOrigin.Begin)
+                Dim bytesToRead = Math.Min(chunkSize, CInt(fs.Length - offset))
+                Dim buffer(bytesToRead - 1) As Byte
+                fs.Read(buffer, 0, bytesToRead)
+                Return buffer
+            End Using
+        Catch ex As Exception
+            Log($"[BT] Erreur lecture chunk {chunkIndex} de {filePath}: {ex.Message}")
+            Return Nothing
+        End Try
+    End Function
+    
+    Private Sub RequestMissingChunks(peer As String, transferId As String)
+        Try
+            If _transferManager Is Nothing Then Return
+            
+            ' Demander jusqu'à 20 chunks manquants à la fois pour éviter la saturation
+            Dim missingChunks = _transferManager.GetMissingChunks(transferId, 20)
+            If missingChunks.Count = 0 Then Return
+            
+            ' Créer la demande
+            Dim chunkList = String.Join(",", missingChunks)
+            Dim requestMsg = $"{ChatP2P.App.MessageProtocol.TAG_BT_REQUEST}{transferId}:{chunkList}{MSG_TERM}"
+            Dim requestBytes = Encoding.UTF8.GetBytes(requestMsg)
+            
+            ' Envoyer via P2P
+            If P2PManager.TrySendBinary(peer, requestBytes) Then
+                Log($"[BT] Demande {missingChunks.Count} chunks envoyée à {peer}", verbose:=True)
+            Else
+                Log($"[BT] Échec envoi demande chunks à {peer}")
+            End If
+            
+        Catch ex As Exception
+            Log($"[BT] Erreur demande chunks: {ex.Message}")
+        End Try
+    End Sub
+
     ' ---------- Fenêtres privées ----------
     Private Sub OpenPrivateChat(peer As String)
         If String.IsNullOrWhiteSpace(peer) Then Return
@@ -1119,8 +1608,7 @@ Public Class Form1
                     End If
 
                     Dim norm = Canon(text)
-                    Dim viaP2P As Boolean =
-                        _p2pConn.ContainsKey(peer) AndAlso _p2pConn(peer) AndAlso P2PManager.TrySendText(peer, norm)
+                    Dim viaP2P As Boolean = TrySendP2PMessageEncrypted(peer, norm)
 
                     If Not viaP2P Then
                         Dim useEnc As Boolean = IsEncryptRelayEnabled()
@@ -1174,6 +1662,13 @@ EchoAndPersist:
 
             ' --- Envoi fichier (déclenché depuis PrivateChatForm) ---  ✅ version Task.Run async
             Dim sendFileCb As Action =
+            Sub()
+                ' Déléguer à la méthode centralisée qui gère P2P + Relay (async)
+                Threading.Tasks.Task.Run(Async Sub() Await SendFileToPeer(peer))
+            End Sub
+
+            ' ANCIEN CODE (maintenant remplacé par SendFileToPeer):
+            Dim oldSendFileCb As Action =
             Sub()
                 Try
                     Dim dest As String = peer
@@ -1324,8 +1819,317 @@ EchoAndPersist:
     End Sub
 
 
+    ' ---------- Transfert P2P BitTorrent-like pour contourner crash 400 chunks ----------
+    Private Async Function SendFileP2POptimized(dest As String, transferId As String, fi As FileInfo, frmPeer As PrivateChatForm) As Threading.Tasks.Task(Of Boolean)
+        ' Déterminer quelle méthode utiliser selon la taille
+        If fi.Length >= 2 * 1024 * 1024 Then  ' 2MB et plus
+            Log($"[P2P] Fichier volumineux détecté ({fi.Length} bytes), utilisation BitTorrent-like")
+            Return Await SendFileP2PBitTorrentLike(dest, transferId, fi, frmPeer)
+        Else
+            Log($"[P2P] Fichier petit ({fi.Length} bytes), utilisation méthode optimisée legacy")
+            Return Await SendFileP2POptimizedLegacy(dest, transferId, fi, frmPeer)
+        End If
+    End Function
+
+    ' ---------- Ancien système pour petits fichiers ----------
+    Private Async Function SendFileP2POptimizedLegacy(dest As String, transferId As String, fi As FileInfo, frmPeer As PrivateChatForm) As Threading.Tasks.Task(Of Boolean)
+        Dim totalSent As Long = 0
+        Dim chunkCount As Long = 0
+        
+        Try
+            ' === Configuration WebRTC depuis le panel avancé ===
+            Dim WEBRTC_CHUNK_SIZE As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.ChunkSize, 8192)
+            Dim MAX_CONCURRENT_CHUNKS As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.MaxConcurrentChunks, 1)
+            Dim CHUNK_DELAY_MS As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.ChunkDelayMs, 20)  ' Réduit de 100ms à 20ms
+            Dim ENABLE_DEBUG_LOGS As Boolean = If(_p2pConfig IsNot Nothing, _p2pConfig.EnableDebugLogs, True)
+            Const PROGRESS_UPDATE_INTERVAL As Integer = 1048576  ' Update UI tous les 1MB
+            
+            ' Log de la configuration utilisée
+            If ENABLE_DEBUG_LOGS Then
+                Log($"[P2P CONFIG] Chunk: {WEBRTC_CHUNK_SIZE}B, Concurrent: {MAX_CONCURRENT_CHUNKS}, Délai: {CHUNK_DELAY_MS}ms")
+            End If
+            
+            ' Envoi metadata
+            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fi.Name}:{fi.Length}{MSG_TERM}"
+            Dim metaBytes = Encoding.UTF8.GetBytes(meta)
+            
+            If Not P2PManager.TrySendBinary(dest, metaBytes) Then
+                Log($"[P2P] Échec envoi metadata vers {dest}")
+                Return False
+            End If
+            
+            ' === Transfert par chunks avec flow control ===
+            Using fs = fi.OpenRead()
+                Dim buffer(WEBRTC_CHUNK_SIZE - 1) As Byte
+                Dim lastProgressUpdate As Long = 0
+                Dim concurrentTasks As New List(Of Threading.Tasks.Task(Of Boolean))
+                
+                While totalSent < fi.Length
+                    Dim read = fs.Read(buffer, 0, buffer.Length)
+                    If read <= 0 Then Exit While
+                    
+                    ' Créer une copie du buffer pour ce chunk (important pour async)
+                    Dim chunkData(read - 1) As Byte
+                    Array.Copy(buffer, chunkData, read)
+                    
+                    ' Envoyer de manière asynchrone avec limitation de concurrence
+                    Dim chunkTask = SendChunkAsync(dest, transferId, chunkData, chunkCount)
+                    concurrentTasks.Add(chunkTask)
+                    
+                    ' Gestion flow control : attendre si trop de chunks en cours
+                    If concurrentTasks.Count >= MAX_CONCURRENT_CHUNKS Then
+                        Dim completedTask = Await Threading.Tasks.Task.WhenAny(concurrentTasks)
+                        Dim success = Await completedTask
+                        concurrentTasks.Remove(completedTask)
+                        
+                        If Not success Then
+                            Log($"[P2P] Échec envoi chunk {chunkCount} vers {dest}")
+                            Return False
+                        End If
+                    End If
+                    
+                    totalSent += read
+                    chunkCount += 1
+                    
+                    ' Update progress moins fréquemment pour éviter UI spam
+                    If totalSent - lastProgressUpdate >= PROGRESS_UPDATE_INTERVAL OrElse totalSent = fi.Length Then
+                        If frmPeer IsNot Nothing Then
+                            Await Threading.Tasks.Task.Run(Sub() frmPeer.UpdateSendProgress(totalSent, fi.Length))
+                        End If
+                        lastProgressUpdate = totalSent
+                        
+                        ' Log progress périodique au lieu de chaque chunk
+                        Dim progress = (totalSent * 100) \ fi.Length
+                        Log($"[P2P] Progression: {progress}% ({totalSent}/{fi.Length} octets)")
+                    End If
+                    
+                    ' Délai SYSTÉMATIQUE pour éviter saturation WebRTC DataChannel
+                    Await Threading.Tasks.Task.Delay(CHUNK_DELAY_MS)
+                    
+                    ' Debug verbeux tous les 50 chunks pour voir où ça plante
+                    If ENABLE_DEBUG_LOGS AndAlso chunkCount Mod 50 = 0 Then
+                        Log($"[P2P DEBUG] Chunk #{chunkCount}/{Math.Ceiling(fi.Length / WEBRTC_CHUNK_SIZE)}, concurrent tasks: {concurrentTasks.Count}")
+                    End If
+                End While
+                
+                ' Attendre que tous les chunks restants soient envoyés
+                Dim remainingResults = Await Threading.Tasks.Task.WhenAll(concurrentTasks)
+                If remainingResults.Any(Function(r) Not r) Then
+                    Log($"[P2P] Certains chunks n'ont pas pu être envoyés")
+                    Return False
+                End If
+            End Using
+            
+            ' *** DÉLAI CRITIQUE pour synchronisation WebRTC ***
+            ' Attendre que le receiver traite les chunks en attente avant FILEEND
+            Log($"[P2P] Attente synchronisation receiver avant FILEEND...")
+            Await Threading.Tasks.Task.Delay(2000)  ' 2 secondes pour que receiver rattrape
+            
+            ' Message de fin
+            Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
+            Dim endBytes = Encoding.UTF8.GetBytes(endMsg)
+            
+            ' Retry FILEEND jusqu'à 3 fois pour s'assurer qu'il arrive
+            Dim fileEndSent = False
+            For attempt = 1 To 3
+                If P2PManager.TrySendBinary(dest, endBytes) Then
+                    fileEndSent = True
+                    Exit For
+                End If
+                Log($"[P2P] FILEEND échec tentative {attempt}, retry dans 500ms...")
+                Await Threading.Tasks.Task.Delay(500)
+            Next
+            
+            If Not fileEndSent Then
+                Log($"[P2P] ÉCHEC CRITIQUE: FILEEND n'a pas pu être envoyé après 3 tentatives")
+                Return False
+            End If
+            
+            Log($"[P2P] Transfert terminé: {chunkCount} chunks envoyés ({totalSent} octets)")
+            Return True
+            
+        Catch ex As Exception
+            Log($"[P2P] Erreur transfert optimisé: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ' ---------- Nouveau système BitTorrent-like pour gros fichiers ----------
+    Private Async Function SendFileP2PBitTorrentLike(dest As String, transferId As String, fi As FileInfo, frmPeer As PrivateChatForm) As Threading.Tasks.Task(Of Boolean)
+        Try
+            ' === Configuration BitTorrent depuis panneau avancé ===
+            Dim CHUNK_SIZE As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.ChunkSize, 8192)
+            Dim BATCH_SIZE As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.BatchSize, 200)  
+            Dim BATCH_DELAY_MS As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.BatchDelayMs, 10)
+            Dim ENABLE_DEBUG_LOGS As Boolean = If(_p2pConfig IsNot Nothing, _p2pConfig.EnableDebugLogs, True)
+            
+            ' === Configuration limitation bande passante ===
+            Dim ENABLE_BANDWIDTH_LIMIT As Boolean = If(_p2pConfig IsNot Nothing, _p2pConfig.EnableBandwidthLimit, False)
+            Dim MAX_SPEED_KBPS As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.MaxSpeedKBps, 1000)
+            Dim bandwidthTimer As Stopwatch = Stopwatch.StartNew()
+            Dim bytesSentInInterval As Long = 0
+            
+            If ENABLE_DEBUG_LOGS Then
+                Log($"[P2P TORRENT] Transfert gros fichier: {fi.Name} ({fi.Length} bytes)")
+                Log($"[P2P TORRENT] Config: Chunk={CHUNK_SIZE}B, Batch={BATCH_SIZE}, Délai={BATCH_DELAY_MS}ms")
+            End If
+            
+            ' Créer les métadonnées du fichier avec hash complet
+            Dim totalChunks = CInt(Math.Ceiling(fi.Length / CDbl(CHUNK_SIZE)))
+            Dim metadata As New ChatP2P.Core.P2PFileTransfer.FileMetadata(transferId, fi.Name, fi.Length, CHUNK_SIZE)
+            
+            ' Calculer le hash SHA256 du fichier complet sur un thread séparé pour éviter l'UI freeze
+            Dim fileHash As String = Await Task.Run(Function()
+                Using fs = fi.OpenRead()
+                    Using sha = System.Security.Cryptography.SHA256.Create()
+                        Dim hashBytes = sha.ComputeHash(fs)
+                        Return Convert.ToBase64String(hashBytes)
+                    End Using
+                End Using
+            End Function)
+            
+            metadata.FileHash = fileHash
+            
+            If ENABLE_DEBUG_LOGS Then
+                Log($"[P2P TORRENT] Hash fichier calculé: {fileHash.Substring(0, Math.Min(16, fileHash.Length))}...")
+            End If
+            
+            ' Envoyer les métadonnées BitTorrent-like
+            Dim metaMsg = $"{ChatP2P.App.MessageProtocol.TAG_BT_META}{transferId}:{fi.Name}:{fi.Length}:{CHUNK_SIZE}:{fileHash}{MSG_TERM}"
+            Dim metaBytes = Encoding.UTF8.GetBytes(metaMsg)
+            
+            If Not P2PManager.TrySendBinary(dest, metaBytes) Then
+                Log($"[P2P TORRENT] Échec envoi metadata vers {dest}")
+                Return False
+            End If
+            
+            ' Attente setup configurable depuis panneau avancé
+            Dim SETUP_DELAY_MS As Integer = If(_p2pConfig IsNot Nothing, _p2pConfig.SetupDelayMs, 100)
+            If SETUP_DELAY_MS > 0 Then
+                Await Threading.Tasks.Task.Delay(SETUP_DELAY_MS)
+            End If
+            
+            ' === Envoi par batches pour éviter le crash 400 chunks ===
+            Dim sentChunks = 0
+            Dim totalSent As Long = 0
+            Using fs = fi.OpenRead()
+                Dim buffer = New Byte(CHUNK_SIZE - 1) {}
+                
+                For batchStart = 0 To totalChunks - 1 Step BATCH_SIZE
+                    Dim batchEnd = Math.Min(batchStart + BATCH_SIZE - 1, totalChunks - 1)
+                    
+                    If ENABLE_DEBUG_LOGS Then
+                        Log($"[P2P TORRENT] Envoi batch {batchStart}-{batchEnd} ({batchEnd - batchStart + 1} chunks)")
+                    End If
+                    
+                    ' Envoyer les chunks de ce batch
+                    For chunkIndex = batchStart To batchEnd
+                        Dim position = chunkIndex * CHUNK_SIZE
+                        fs.Seek(position, SeekOrigin.Begin)
+                        
+                        Dim bytesRead = fs.Read(buffer, 0, buffer.Length)
+                        If bytesRead = 0 Then Exit For
+                        
+                        ' Créer le chunk avec hash
+                        Dim chunkData = New Byte(bytesRead - 1) {}
+                        Array.Copy(buffer, chunkData, bytesRead)
+                        
+                        Dim chunk As New ChatP2P.Core.P2PFileTransfer.FileChunk(chunkIndex, chunkData)
+                        
+                        ' Envoyer le chunk avec hash BitTorrent-like
+                        Dim chunkMsg = $"{ChatP2P.App.MessageProtocol.TAG_BT_CHUNK}{transferId}:{chunkIndex}:{chunk.Hash}:{Convert.ToBase64String(chunkData)}{MSG_TERM}"
+                        Dim chunkBytes = Encoding.UTF8.GetBytes(chunkMsg)
+                        
+                        If P2PManager.TrySendBinary(dest, chunkBytes) Then
+                            sentChunks += 1
+                            totalSent += bytesRead
+                            bytesSentInInterval += bytesRead
+                            
+                            ' === Limitation de bande passante ===
+                            If ENABLE_BANDWIDTH_LIMIT Then
+                                Dim elapsedMs = bandwidthTimer.ElapsedMilliseconds
+                                If elapsedMs >= 1000 Then ' Contrôle toutes les secondes
+                                    Dim currentSpeedKBps = (bytesSentInInterval / 1024) / (elapsedMs / 1000.0)
+                                    If currentSpeedKBps > MAX_SPEED_KBPS Then
+                                        Dim delayMs = CInt((bytesSentInInterval / 1024 / MAX_SPEED_KBPS * 1000) - elapsedMs)
+                                        If delayMs > 0 Then
+                                            If ENABLE_DEBUG_LOGS Then
+                                                Log($"[BANDWIDTH] Débit trop élevé ({currentSpeedKBps:F0} KB/s), pause {delayMs}ms")
+                                            End If
+                                            Await Threading.Tasks.Task.Delay(delayMs)
+                                        End If
+                                    End If
+                                    ' Reset compteurs
+                                    bandwidthTimer.Restart()
+                                    bytesSentInInterval = 0
+                                End If
+                            End If
+                            
+                            ' Petit délai entre chunks dans le batch
+                            Await Threading.Tasks.Task.Delay(10)
+                        Else
+                            Log($"[P2P TORRENT] Échec envoi chunk {chunkIndex}")
+                        End If
+                        
+                        ' Mise à jour progression
+                        If sentChunks Mod 10 = 0 Then
+                            frmPeer?.UpdateSendProgress(totalSent, fi.Length)
+                        End If
+                    Next
+                    
+                    ' DÉLAI CRITIQUE entre batches pour éviter saturation WebRTC
+                    If batchEnd < totalChunks - 1 Then
+                        If ENABLE_DEBUG_LOGS Then
+                            Log($"[P2P TORRENT] Attente {BATCH_DELAY_MS}ms avant batch suivant...")
+                        End If
+                        Await Threading.Tasks.Task.Delay(BATCH_DELAY_MS)
+                    End If
+                Next
+            End Using
+            
+            ' BitTorrent-like: pas de FILEEND - complétion automatique par le receiver
+            Log($"[P2P TORRENT] Tous les chunks envoyés: {sentChunks}/{totalChunks}")
+            frmPeer?.UpdateSendProgress(fi.Length, fi.Length)
+            
+            Return True
+            
+        Catch ex As Exception
+            Log($"[P2P TORRENT] Erreur transfert BitTorrent-like: {ex.Message}")
+            Return False
+        End Try
+    End Function
+    
+    ' Envoi asynchrone d'un chunk individuel avec retry
+    Private Async Function SendChunkAsync(dest As String, transferId As String, chunkData As Byte(), chunkIndex As Long) As Threading.Tasks.Task(Of Boolean)
+        Try
+            Const MAX_RETRIES As Integer = 3
+            
+            For attempt = 1 To MAX_RETRIES
+                ' Format: TAG + transferId + ":" + base64(données) + MSG_TERM
+                Dim chunkDataB64 = Convert.ToBase64String(chunkData)
+                Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkDataB64}{MSG_TERM}"
+                Dim chunkBytes = Encoding.UTF8.GetBytes(chunkMsg)
+                
+                If P2PManager.TrySendBinary(dest, chunkBytes) Then
+                    Return True
+                End If
+                
+                ' Retry avec backoff exponentiel
+                If attempt < MAX_RETRIES Then
+                    Await Threading.Tasks.Task.Delay(attempt * 50)
+                End If
+            Next
+            
+            Return False
+            
+        Catch ex As Exception
+            Log($"[P2P] Erreur envoi chunk {chunkIndex}: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
     ' ---------- Envoi fichier centralisé (ouvre la PrivateChatForm + progress + notif) ----------
-    Private Sub SendFileToPeer(dest As String)
+    Private Async Function SendFileToPeer(dest As String) As Threading.Tasks.Task
         Try
             If String.IsNullOrWhiteSpace(dest) Then
                 Log("Destination invalide pour l'envoi de fichier.")
@@ -1337,10 +2141,23 @@ EchoAndPersist:
                 Return
             End If
 
-            Dim useEnc As Boolean = IsEncryptRelayEnabled()
+            ' Vérifier la disponibilité P2P en premier - RETOUR AU P2P !
+            Dim useP2P As Boolean = _p2pConn.ContainsKey(dest) AndAlso _p2pConn(dest)
+            
+            ' Debug logs  
+            Dim managerSays As Boolean = P2PManager.IsP2PConnected(dest)
+            Log($"[DEBUG] P2P check pour {dest}: Manager={managerSays}, Local={useP2P}")
+            
+            If useP2P Then
+                Log($"[P2P] Envoi fichier via P2P direct vers {dest}")
+            Else
+                Log($"[RELAY] Envoi fichier via relay vers {dest} (P2P non disponible)")
+            End If
+
+            Dim useEnc As Boolean = IsEncryptRelayEnabled() AndAlso Not useP2P  ' Pas de crypto sur P2P pour l'instant
             If useEnc AndAlso Not HasRelayKey(dest) Then
                 EnsureRelayHandshake(dest)
-                Log("[ENC] Clé non établie avec " & dest & ". Relance l’envoi une fois la clé OK.")
+                Log("[ENC] Clé non établie avec " & dest & ". Relance l'envoi une fois la clé OK.")
                 Return
             End If
 
@@ -1358,66 +2175,26 @@ EchoAndPersist:
                 Try
                     Dim transferId = Guid.NewGuid().ToString("N")
                     Dim fnameToSend = If(useEnc, ENC_FILE_MARK & fi.Name, fi.Name)
-                    Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fnameToSend}:{fi.Length}{MSG_TERM}"
-                    Dim metaBytes = Encoding.UTF8.GetBytes(meta)
-
-                    If _isHost Then
-                        If _hub Is Nothing Then Log("Hub non initialisé.") : Return
-                        Dim _ignore0 = _hub.SendToAsync(dest, metaBytes)
-                        Using fs = fi.OpenRead()
-                            Dim buffer(32768 - 1) As Byte
-                            Dim totalSent As Long = 0
-                            While True
-                                Dim read = fs.Read(buffer, 0, buffer.Length)
-                                If read <= 0 Then Exit While
-
-                                Dim chunkData As String
-                                If useEnc Then
-                                    Dim enc = EncryptForPeer(dest, buffer, read)
-                                    chunkData = ENC_PREFIX & Convert.ToBase64String(enc)
-                                Else
-                                    chunkData = Convert.ToBase64String(buffer, 0, read)
-                                End If
-
-                                Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
-                                Dim _ignore1 = _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(chunkMsg))
-
-                                totalSent += read
-                                If frmPeer IsNot Nothing Then frmPeer.UpdateSendProgress(totalSent, fi.Length)
-                            End While
-                        End Using
-                        Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
-                        Dim _ignore2 = _hub.SendToAsync(dest, Encoding.UTF8.GetBytes(endMsg))
+                    
+                    If useP2P Then
+                        ' ===== ENVOI VIA P2P OPTIMISÉ =====
+                        Log($"[P2P] Début transfert optimisé : {fi.Name} ({fi.Length} octets)")
+                        
+                        ' Démarrer le transfert asynchrone optimisé pour WebRTC
+                        Dim success = Await SendFileP2POptimized(dest, transferId, fi, frmPeer)
+                        
+                        If success Then
+                            Log($"[P2P] Fichier {fi.Name} envoyé avec succès à {dest}")
+                        Else
+                            Log($"[P2P] Échec transfert {fi.Name} vers {dest}")
+                        End If
                     Else
-                        If _stream Is Nothing Then Log("Not connected.") : Return
-                        Dim _ignore0 = _stream.SendAsync(metaBytes, Threading.CancellationToken.None)
-                        Using fs = fi.OpenRead()
-                            Dim buffer(32768 - 1) As Byte
-                            Dim totalSent As Long = 0
-                            While True
-                                Dim read = fs.Read(buffer, 0, buffer.Length)
-                                If read <= 0 Then Exit While
-
-                                Dim chunkData As String
-                                If useEnc Then
-                                    Dim enc = EncryptForPeer(dest, buffer, read)
-                                    chunkData = ENC_PREFIX & Convert.ToBase64String(enc)
-                                Else
-                                    chunkData = Convert.ToBase64String(buffer, 0, read)
-                                End If
-
-                                Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
-                                Dim _ignore1 = _stream.SendAsync(Encoding.UTF8.GetBytes(chunkMsg), Threading.CancellationToken.None)
-
-                                totalSent += read
-                                If frmPeer IsNot Nothing Then frmPeer.UpdateSendProgress(totalSent, fi.Length)
-                            End While
-                        End Using
-                        Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
-                        Dim _ignore2 = _stream.SendAsync(Encoding.UTF8.GetBytes(endMsg), Threading.CancellationToken.None)
+                        ' ===== ENVOI VIA RELAY OPTIMISÉ =====
+                        Dim success = Await SendFileRelayOptimized(dest, transferId, fi, frmPeer)
+                        If Not success Then
+                            Log($"[RELAY] Échec transfert optimisé {fi.Name} vers {dest}")
+                        End If
                     End If
-
-                    Log($"[RELAY{If(useEnc, "+ENC", "")}] Fichier {fi.Name} envoyé à {dest}")
 
                 Finally
                     If frmPeer IsNot Nothing Then
@@ -1434,7 +2211,84 @@ EchoAndPersist:
         Catch ex As Exception
             Log("[PRIVATE] send file error: " & ex.Message)
         End Try
-    End Sub
+    End Function
+
+    ' ---------- Transfert RELAY ORIGINAL (FAST) - Restauré depuis ANCIEN CODE ----------
+    Private Async Function SendFileRelayOptimized(dest As String, transferId As String, fi As FileInfo, frmPeer As PrivateChatForm) As Threading.Tasks.Task(Of Boolean)
+        Try
+            ' Déterminer si le cryptage relay est activé
+            Dim useEnc As Boolean = IsEncryptRelayEnabled()
+            Dim fnameToSend = If(useEnc, ENC_FILE_MARK & fi.Name, fi.Name)
+            
+            ' Envoi metadata - Format original fast relay
+            Dim meta = $"{Proto.TAG_FILEMETA}{transferId}:{_displayName}:{dest}:{fnameToSend}:{fi.Length}{MSG_TERM}"
+            Dim metaBytes = Encoding.UTF8.GetBytes(meta)
+
+            If _isHost Then
+                If _hub Is Nothing Then
+                    Log("Hub non initialisé.")
+                    Return False
+                End If
+                Await _hub.SendToAsync(dest, metaBytes)
+            Else
+                If _stream Is Nothing Then
+                    Log("Not connected.")
+                    Return False
+                End If
+                Await _stream.SendAsync(metaBytes, Threading.CancellationToken.None)
+            End If
+
+            ' Transfert par chunks à VITESSE MAXIMALE (pas de délais!)
+            Using fs = fi.OpenRead()
+                Dim buffer(32768 - 1) As Byte  ' 32KB buffer comme l'original
+                Dim totalSent As Long = 0
+                
+                While True
+                    Dim read = fs.Read(buffer, 0, buffer.Length)
+                    If read <= 0 Then Exit While
+
+                    Dim chunkData As String
+                    If useEnc Then
+                        Dim enc = EncryptForPeer(dest, buffer, read)
+                        chunkData = ENC_PREFIX & Convert.ToBase64String(enc)
+                    Else
+                        chunkData = Convert.ToBase64String(buffer, 0, read)
+                    End If
+
+                    Dim chunkMsg = $"{Proto.TAG_FILECHUNK}{transferId}:{chunkData}{MSG_TERM}"
+                    Dim chunkBytes = Encoding.UTF8.GetBytes(chunkMsg)
+
+                    If _isHost Then
+                        Await _hub.SendToAsync(dest, chunkBytes)
+                    Else
+                        Await _stream.SendAsync(chunkBytes, Threading.CancellationToken.None)
+                    End If
+
+                    totalSent += read
+                    If frmPeer IsNot Nothing Then frmPeer.UpdateSendProgress(totalSent, fi.Length)
+                    
+                    ' AUCUN DÉLAI - C'EST ÇA LE SECRET DE LA VITESSE!
+                End While
+            End Using
+
+            ' Message de fin
+            Dim endMsg = $"{Proto.TAG_FILEEND}{transferId}{MSG_TERM}"
+            Dim endBytes = Encoding.UTF8.GetBytes(endMsg)
+            If _isHost Then
+                Await _hub.SendToAsync(dest, endBytes)
+            Else
+                Await _stream.SendAsync(endBytes, Threading.CancellationToken.None)
+            End If
+
+            Log($"[RELAY{If(useEnc, "+ENC", "")}] Fichier {fi.Name} envoyé à {dest} (FAST RELAY RESTORED)")
+            Return True
+            
+        Catch ex As Exception
+            Log($"[RELAY] Erreur transfert fast: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
 
     Private Sub RefreshPrivateChatStatus(peer As String)
         Dim frm As PrivateChatForm = Nothing
@@ -1496,11 +2350,14 @@ EchoAndPersist:
 
         If Not _p2pHandlersHooked Then
             AddHandler P2PManager.OnP2PText, AddressOf OnP2PText_FromP2P
+            AddHandler P2PManager.OnP2PBinary, AddressOf OnP2PBinary_FromP2P
             AddHandler P2PManager.OnP2PState,
                 Sub(peer As String, connected As Boolean)
+                    Log($"[DEBUG] OnP2PState event: {peer} connected={connected}")
                     _p2pConn(peer) = connected
                     ' DTLS = crypto ON côté P2P
                     _cryptoActive(peer) = connected
+                    Log($"[DEBUG] P2P state updated in _p2pConn for {peer}: {connected}")
                     Dim frm As PrivateChatForm = Nothing
                     If _privateChats.TryGetValue(peer, frm) AndAlso frm IsNot Nothing AndAlso Not frm.IsDisposed Then
                         RefreshPrivateChatStatus(peer)
@@ -1789,6 +2646,100 @@ EchoAndPersist:
 
         Catch ex As Exception
             Log("[SELFTEST] EXC: " & ex.ToString())
+        End Try
+    End Sub
+
+    ' ---------- BitTorrent-like Events ----------
+    Private Sub OnBitTorrentProgress(transferId As String, progress As Double, receivedBytes As Long, totalBytes As Long)
+        Try
+            If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+                Me.BeginInvoke(Sub() OnBitTorrentProgress(transferId, progress, receivedBytes, totalBytes))
+                Return
+            End If
+            
+            ' Log progress seulement tous les 5% pour éviter le spam
+            Static lastLoggedProgress As New Dictionary(Of String, Integer)
+            Dim currentProgressInt = CInt(progress / 5) * 5 ' Arrondir aux 5% près
+            If Not lastLoggedProgress.ContainsKey(transferId) OrElse lastLoggedProgress(transferId) <> currentProgressInt Then
+                lastLoggedProgress(transferId) = currentProgressInt
+                Log($"[BT] Transfert {transferId}: {progress:F1}% ({receivedBytes}/{totalBytes} octets)", verbose:=True)
+            End If
+            
+            ' Mettre à jour la progress bar de la fenêtre de chat concernée
+            For Each kvp In _privateChats
+                Dim frm = kvp.Value
+                If frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+                    ' Pour l'instant, on met à jour toutes les fenêtres actives de réception
+                    frm.UpdateRecvProgress(receivedBytes, totalBytes)
+                End If
+            Next
+        Catch ex As Exception
+            Log($"[BT] Erreur progress: {ex.Message}")
+        End Try
+    End Sub
+    
+    Private Sub OnBitTorrentCompleted(transferId As String, success As Boolean, outputPath As String)
+        Try
+            If Me.IsHandleCreated AndAlso Me.InvokeRequired Then
+                Me.BeginInvoke(Sub() OnBitTorrentCompleted(transferId, success, outputPath))
+                Return
+            End If
+            
+            Log($"[BT] Transfert {transferId} terminé: {If(success, "SUCCÈS", "ÉCHEC")} -> {outputPath}")
+            
+            ' Trouver et notifier la fenêtre de chat concernée
+            For Each kvp In _privateChats
+                Dim frm = kvp.Value
+                If frm IsNot Nothing AndAlso Not frm.IsDisposed Then
+                    ' Arrêter toutes les progress bars de réception
+                    frm.EndRecvProgress()
+                    If success Then
+                        Dim fileName = System.IO.Path.GetFileName(outputPath)
+                        frm.AppendMessage("System", $"[FILE] ✅ Fichier BitTorrent reçu: {fileName}")
+                    Else
+                        frm.AppendMessage("System", $"[FILE] ❌ Échec réception fichier BitTorrent")
+                    End If
+                End If
+            Next
+        Catch ex As Exception
+            Log($"[BT] Erreur completion: {ex.Message}")
+        End Try
+    End Sub
+    
+    Private Sub OnBitTorrentLog(message As String)
+        Log(message, verbose:=True)
+    End Sub
+
+    ' ---------- Panel P2P Avancé ----------
+    Private Sub btnP2PAdvanced_Click(sender As Object, e As EventArgs) Handles btnP2PAdvanced.Click
+        Try
+            If _p2pConfig Is Nothing Then
+                _p2pConfig = New P2PAdvancedForm()
+            End If
+            
+            ' Afficher la configuration actuelle dans le titre du bouton
+            btnP2PAdvanced.Text = "P2P Config*"
+            
+            ' Ouvrir le dialog
+            If _p2pConfig.ShowDialog(Me) = DialogResult.OK Then
+                ' Sauvegarder les nouvelles valeurs
+                _p2pConfig.SaveValues()
+                
+                ' Afficher un résumé dans les logs
+                Dim summary = _p2pConfig.GetConfigSummary()
+                Log($"[P2P] Configuration mise à jour: {summary}")
+                
+                ' Mettre à jour le titre du bouton pour indiquer la config personnalisée
+                btnP2PAdvanced.Text = If(_p2pConfig.ChunkSize = 8192 AndAlso 
+                                        _p2pConfig.MaxConcurrentChunks = 1 AndAlso 
+                                        _p2pConfig.ChunkDelayMs = 100,
+                                        "P2P Config", "P2P Config*")
+            End If
+            
+        Catch ex As Exception
+            Log($"[P2P] Erreur panel avancé: {ex.Message}")
+            MessageBox.Show($"Erreur lors de l'ouverture du panel P2P: {ex.Message}", 
+                           "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
     End Sub
 

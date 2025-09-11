@@ -125,7 +125,7 @@ Namespace ChatP2P.Core
                     End Try
                 End Sub
 
-            AddHandler dc.onopen, Sub() RaiseEvent OnNegotiationLog("DataChannel open")
+            AddHandler dc.onopen, Sub() RaiseEvent OnNegotiationLog("[DEBUG] DataChannel OPENED - ready for transfers")
             AddHandler dc.onclose, Sub() RaiseEvent OnNegotiationLog("DataChannel close")
         End Sub
 
@@ -172,8 +172,13 @@ Namespace ChatP2P.Core
 
         Public ReadOnly Property IsOpen As Boolean
             Get
-                If _dc Is Nothing Then Return False
-                Return _dc.readyState = RTCDataChannelState.open
+                If _dc Is Nothing Then
+                    RaiseEvent OnNegotiationLog("[DEBUG] IsOpen: datachannel is Nothing")
+                    Return False
+                End If
+                Dim state = _dc.readyState
+                RaiseEvent OnNegotiationLog($"[DEBUG] IsOpen: datachannel state = {state}")
+                Return state = RTCDataChannelState.open
             End Get
         End Property
 

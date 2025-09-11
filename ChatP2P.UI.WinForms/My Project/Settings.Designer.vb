@@ -161,6 +161,42 @@ Namespace My
                 Me("StrictTrust") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Verbose() As String
+            Get
+                Return CType(Me("Verbose"),String)
+            End Get
+            Set
+                Me("Verbose") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property EncryptRelay() As String
+            Get
+                Return CType(Me("EncryptRelay"),String)
+            End Get
+            Set
+                Me("EncryptRelay") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property PqRelay() As String
+            Get
+                Return CType(Me("PqRelay"),String)
+            End Get
+            Set
+                Me("PqRelay") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

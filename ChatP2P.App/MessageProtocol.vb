@@ -10,6 +10,11 @@ Namespace ChatP2P.App
         Public Const TAG_FILEMETA As String = "FILEMETA:"
         Public Const TAG_FILECHUNK As String = "FILECHUNK:"
         Public Const TAG_FILEEND As String = "FILEEND:"
+        
+        ' BitTorrent-like file transfer
+        Public Const TAG_BT_META As String = "BTMETA:"
+        Public Const TAG_BT_CHUNK As String = "BTCHUNK:"
+        Public Const TAG_BT_REQUEST As String = "BTREQ:"
 
         Public Const TAG_ICE_OFFER As String = "ICE_OFFER:"
         Public Const TAG_ICE_ANSWER As String = "ICE_ANSWER:"

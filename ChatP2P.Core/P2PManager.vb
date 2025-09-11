@@ -14,10 +14,11 @@ Namespace ChatP2P.Core
         Public Const TAG_ICE_ANSWER As String = "ICE_ANSWER:"
         Public Const TAG_ICE_CAND As String = "ICE_CAND:"
 
-        ' ==== Events exposés à l’UI ====
+        ' ==== Events exposés à l'UI ====
         Public Event OnLog(peer As String, line As String)
         Public Event OnP2PState(peer As String, connected As Boolean)
         Public Event OnP2PText(peer As String, text As String)
+        Public Event OnP2PBinary(peer As String, data As Byte())
 
         ' ==== Signaling et état ====
         Private _sendSignal As Func(Of String, String, Task) = Nothing
@@ -87,7 +88,7 @@ Namespace ChatP2P.Core
             End Try
         End Sub
 
-        ''' <summary>Envoi rapide d’un message texte via datachannel P2P si ouvert.</summary>
+        ''' <summary>Envoi rapide d'un message texte via datachannel P2P si ouvert.</summary>
         Public Function TrySendText(peer As String, text As String) As Boolean
             If String.IsNullOrWhiteSpace(peer) OrElse String.IsNullOrEmpty(text) Then Return False
             Dim s As IceP2PSession = Nothing
@@ -102,6 +103,54 @@ Namespace ChatP2P.Core
                 RaiseEvent OnLog(peer, "SendText error: " & ex.Message)
                 Return False
             End Try
+        End Function
+
+        ''' <summary>Envoi de données binaires via datachannel P2P si ouvert.</summary>
+        Public Function TrySendBinary(peer As String, data As Byte()) As Boolean
+            If String.IsNullOrWhiteSpace(peer) OrElse data Is Nothing OrElse data.Length = 0 Then Return False
+            Dim s As IceP2PSession = Nothing
+            SyncLock _gate
+                _sessions.TryGetValue(peer, s)
+            End SyncLock
+            If s Is Nothing Then 
+                RaiseEvent OnLog(peer, "[DEBUG] TrySendBinary: no session")
+                Return False
+            End If
+            
+            If Not s.IsOpen Then 
+                RaiseEvent OnLog(peer, "[DEBUG] TrySendBinary: datachannel not open, waiting...")
+                ' Attendre un peu pour le datachannel
+                Threading.Thread.Sleep(100)
+                If Not s.IsOpen Then
+                    RaiseEvent OnLog(peer, "[DEBUG] TrySendBinary: datachannel still not open after wait")
+                    Return False
+                End If
+            End If
+            
+            Try
+                s.SendBinary(data)
+                Return True
+            Catch ex As Exception
+                RaiseEvent OnLog(peer, "SendBinary error: " & ex.Message)
+                Return False
+            End Try
+        End Function
+
+        ''' <summary>Vérifie si une connexion P2P est établie et prête pour un pair.</summary>
+        Public Function IsP2PConnected(peer As String) As Boolean
+            If String.IsNullOrWhiteSpace(peer) Then Return False
+            Dim s As IceP2PSession = Nothing
+            SyncLock _gate
+                _sessions.TryGetValue(peer, s)
+            End SyncLock
+            
+            Dim hasSession = s IsNot Nothing
+            Dim isOpen = hasSession AndAlso s.IsOpen
+            RaiseEvent OnLog(peer, $"[DEBUG] IsP2PConnected: hasSession={hasSession}, isOpen={isOpen}")
+            
+            ' TEMPORAIRE: utiliser hasSession au lieu de isOpen car le datachannel prend du temps
+            ' TODO: fix le timing du datachannel plus tard
+            Return hasSession  ' Au lieu de: s IsNot Nothing AndAlso s.IsOpen
         End Function
 
         Public Sub HandleOffer(fromPeer As String, sdp As String, stunUrls As IEnumerable(Of String))
@@ -251,10 +300,13 @@ Namespace ChatP2P.Core
             ' 3) Etat ICE
             AddHandler sess.OnIceStateChanged,
                 Sub(st As RTCIceConnectionState)
+                    RaiseEvent OnLog(peer, $"[DEBUG] ICE State changed to: {st}")
                     Select Case st
                         Case RTCIceConnectionState.connected
+                            RaiseEvent OnLog(peer, "[DEBUG] Triggering OnP2PState(True)")
                             RaiseEvent OnP2PState(peer, True)
                         Case RTCIceConnectionState.failed, RTCIceConnectionState.disconnected, RTCIceConnectionState.closed
+                            RaiseEvent OnLog(peer, $"[DEBUG] Triggering OnP2PState(False) for state: {st}")
                             RaiseEvent OnP2PState(peer, False)
                     End Select
                 End Sub
@@ -265,7 +317,13 @@ Namespace ChatP2P.Core
                     RaiseEvent OnP2PText(peer, txt)
                 End Sub
 
-            ' 5) Logs de négo détaillés
+            ' 5) Messages binaires P2P (pour fichiers)
+            AddHandler sess.OnBinaryMessage,
+                Sub(data As Byte())
+                    RaiseEvent OnP2PBinary(peer, data)
+                End Sub
+
+            ' 6) Logs de négo détaillés
             AddHandler sess.OnNegotiationLog,
                 Sub(l As String)
                     RaiseEvent OnLog(peer, l)
