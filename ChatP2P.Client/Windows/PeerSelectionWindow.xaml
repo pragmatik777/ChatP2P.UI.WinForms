@@ -1,0 +1,56 @@
+<Window x:Class="ChatP2P.Client.PeerSelectionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Select Peer for Chat" Height="400" Width="500"
+        WindowStartupLocation="CenterOwner" Background="#FF2B2B2B">
+    
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <TextBlock Grid.Row="0" Text="Select a peer to start chat with:" 
+                   FontSize="16" FontWeight="Bold" Foreground="White" Margin="0,0,0,15"/>
+        
+        <ListView Grid.Row="1" Name="lstPeers" Background="#FF404040" 
+                  Foreground="White" BorderBrush="#FF666666" Margin="0,0,0,15"
+                  SelectionChanged="LstPeers_SelectionChanged">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="Peer Name" Width="200">
+                        <GridViewColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding PeerName}" Foreground="White"/>
+                            </DataTemplate>
+                        </GridViewColumn.CellTemplate>
+                    </GridViewColumn>
+                    <GridViewColumn Header="Status" Width="120">
+                        <GridViewColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Status}" Foreground="White"/>
+                            </DataTemplate>
+                        </GridViewColumn.CellTemplate>
+                    </GridViewColumn>
+                    <GridViewColumn Header="Verified" Width="80">
+                        <GridViewColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding IsVerified}" Foreground="White"/>
+                            </DataTemplate>
+                        </GridViewColumn.CellTemplate>
+                    </GridViewColumn>
+                </GridView>
+            </ListView.View>
+        </ListView>
+        
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="btnCancel" Content="Cancel" Width="80" Height="35" 
+                    Margin="0,0,10,0" Background="#FF666666" Foreground="White" 
+                    BorderBrush="Transparent" Click="BtnCancel_Click"/>
+            <Button Name="btnSelect" Content="Start Chat" Width="100" Height="35" 
+                    Background="#FF0D7377" Foreground="White" BorderBrush="Transparent" 
+                    Click="BtnSelect_Click" IsEnabled="False"/>
+        </StackPanel>
+    </Grid>
+</Window>

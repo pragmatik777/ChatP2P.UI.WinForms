@@ -1,0 +1,480 @@
+<Window x:Class="ChatP2P.Client.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:ChatP2P.Client"
+        mc:Ignorable="d"
+        Title="ChatP2P Client" Height="900" Width="1400" 
+        MinHeight="700" MinWidth="1000"
+        WindowStartupLocation="CenterScreen"
+        Background="#FF2B2B2B">
+
+    <Grid>
+        <TabControl Name="mainTabControl" Background="#FF1E1E1E" BorderBrush="#FF333333">
+            <!-- Connection Tab -->
+            <TabItem Header="Connection" Name="connectionTab" Foreground="White">
+                <Grid Margin="20" Background="#FF2B2B2B">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    
+                    <!-- Configuration Section -->
+                    <GroupBox Header="Network Configuration" Grid.Row="0" Margin="0,0,0,20" 
+                              Foreground="White" BorderBrush="#FF0D7377">
+                        <Grid Margin="15">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="200"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="150"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            
+                            <Label Grid.Row="0" Grid.Column="0" Content="Display Name:" Foreground="White"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" Name="txtDisplayName" Margin="5,0" 
+                                     Background="#FF404040" Foreground="White" BorderBrush="#FF666666"/>
+                            
+                            <CheckBox Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="chkAutoConnect" 
+                                      Content="Auto-connect on startup" Margin="0,15,0,0" 
+                                      Foreground="White"/>
+                            
+                            <!-- Connection Buttons -->
+                            <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="5" Orientation="Horizontal" 
+                                        Margin="0,15,0,0">
+                                <Button Name="btnConnect" Content="🔗 Connect to Server" Width="150" Height="35" Margin="0,0,15,0" 
+                                        Background="#FF0D7377" Foreground="White" BorderBrush="Transparent" 
+                                        Click="BtnConnect_Click"/>
+                                <Button Name="btnDisconnect" Content="❌ Disconnect" Width="120" Height="35" 
+                                        Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent" 
+                                        Click="BtnDisconnect_Click" IsEnabled="False"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+                    
+                    <!-- Settings -->
+                    <GroupBox Header="Settings" Grid.Row="1" Margin="0,0,0,20" 
+                              Foreground="White" BorderBrush="#FF0D7377">
+                        <StackPanel Margin="15" Orientation="Horizontal">
+                            <CheckBox Name="chkStrictTrust" Content="Strict Trust" Margin="0,0,25,0" 
+                                      Foreground="White"/>
+                            <CheckBox Name="chkVerbose" Content="Verbose Logging" Margin="0,0,25,0" 
+                                      Foreground="White"/>
+                            <CheckBox Name="chkEncryptRelay" Content="Encrypt Relay" Margin="0,0,25,0" 
+                                      Foreground="White"/>
+                            <CheckBox Name="chkPqRelay" Content="Post-Quantum Relay" 
+                                      Foreground="White"/>
+                        </StackPanel>
+                    </GroupBox>
+                    
+                    <!-- Status -->
+                    <GroupBox Header="Network Status" Grid.Row="2" Margin="0,0,0,20" 
+                              Foreground="White" BorderBrush="#FF0D7377">
+                        <Grid Margin="15">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Label Grid.Column="0" Content="Server Status:" Foreground="White"/>
+                            <Label Grid.Column="1" Name="lblServerStatus" Content="Disconnected" 
+                                   Foreground="#FFFF6B6B" FontWeight="Bold"/>
+                            <Label Grid.Column="2" Content="Network Mode:" Foreground="White" Margin="20,0,0,0"/>
+                            <Label Grid.Column="3" Name="lblNetworkMode" Content="None" 
+                                   Foreground="#FFFF6B6B" FontWeight="Bold"/>
+                        </Grid>
+                    </GroupBox>
+                    
+                    <!-- Friends List -->
+                    <GroupBox Header="Friends Online" Grid.Row="3" Margin="0,0,0,20" 
+                              Foreground="White" BorderBrush="#FF0D7377">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <ListView Name="lstPeers" Grid.Row="0" Background="#FF404040" 
+                                      Foreground="White" BorderBrush="#FF666666"
+                                      MouseDoubleClick="LstPeers_MouseDoubleClick">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Peer Name" Width="180">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Name}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Status" Width="100">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Status}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="P2P" Width="80">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding P2PStatus}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Crypto" Width="80">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding CryptoStatus}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Auth" Width="80">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding AuthStatus}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+                                <Button Name="btnSendFile" Content="📎 Send File" Width="120" Height="35" 
+                                        Background="#FF0D7377" Foreground="White" BorderBrush="Transparent" 
+                                        Click="BtnSendFile_Click"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+                    
+                    <!-- Action Buttons -->
+                    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Name="btnSecurityCenter" Content="🛡 Security Center" Width="150" Height="35" 
+                                Margin="0,0,15,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent" 
+                                Click="BtnSecurityCenter_Click"/>
+                        <Button Name="btnP2PAdvanced" Content="⚙ P2P Config" Width="120" Height="35" 
+                                Background="#FF666666" Foreground="White" BorderBrush="Transparent" 
+                                Click="BtnP2PAdvanced_Click"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+            
+            <!-- Chat Windows Tab -->
+            <TabItem Header="Chat" Name="chatTab" Foreground="White">
+                <Grid Background="#FF2B2B2B">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="300"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <!-- Chat List -->
+                    <Border Grid.Column="0" Background="#FF1E1E1E" BorderBrush="#FF333333" BorderThickness="0,0,1,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="60"/>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            
+                            <Border Grid.Row="0" Background="#FF0D7377" Padding="15">
+                                <TextBlock Text="Active Chats" FontSize="16" FontWeight="Bold" 
+                                           Foreground="White" VerticalAlignment="Center"/>
+                            </Border>
+                            
+                            <ListView Name="lstActiveChats" Grid.Row="1" Background="Transparent" 
+                                      BorderBrush="Transparent" Foreground="White"
+                                      SelectionChanged="LstActiveChats_SelectionChanged">
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Setter Property="BorderBrush" Value="Transparent"/>
+                                        <Setter Property="Padding" Value="15,10"/>
+                                        <Style.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Background" Value="#FF333333"/>
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter Property="Background" Value="#FF0D7377"/>
+                                            </Trigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ListView.ItemContainerStyle>
+                            </ListView>
+                            
+                            <Button Name="btnNewChat" Grid.Row="2" Content="+ New Chat" Height="40" 
+                                    Margin="15" Background="#FF0D7377" Foreground="White" 
+                                    BorderBrush="Transparent" Click="BtnNewChat_Click"/>
+                        </Grid>
+                    </Border>
+                    
+                    <!-- Chat Area -->
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="60"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="70"/>
+                        </Grid.RowDefinitions>
+                        
+                        <!-- Chat Header -->
+                        <Border Grid.Row="0" Background="#FF333333" BorderBrush="#FF444444" BorderThickness="0,0,0,1">
+                            <Grid Margin="20,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                    <TextBlock Name="lblChatPeer" Text="Select a chat..." 
+                                               FontSize="16" FontWeight="SemiBold" Foreground="White"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                        <TextBlock Name="lblP2PStatus" Text="P2P: ❌" Foreground="#FFFF6B6B" 
+                                                   FontSize="11" Margin="0,0,15,0"/>
+                                        <TextBlock Name="lblCryptoStatus" Text="🔒: ❌" Foreground="#FFFF6B6B" 
+                                                   FontSize="11" Margin="0,0,15,0"/>
+                                        <TextBlock Name="lblAuthStatus" Text="Auth: ❌" Foreground="#FFFF6B6B" 
+                                                   FontSize="11"/>
+                                    </StackPanel>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Button Name="btnStartP2PChat" Content="🔗 Start P2P" Width="90" Height="30" 
+                                            Margin="5,0" Background="#FF0D7377" Foreground="White" 
+                                            BorderBrush="Transparent" Click="BtnStartP2PChat_Click"/>
+                                    <Button Name="btnSendFileChat" Content="📎" Width="35" Height="30" 
+                                            Margin="5,0" FontSize="16" Background="Transparent" 
+                                            Foreground="#FF0D7377" BorderBrush="Transparent" 
+                                            Click="BtnSendFileChat_Click"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        
+                        <!-- Messages -->
+                        <ScrollViewer Grid.Row="1" Name="messagesScrollViewer" VerticalScrollBarVisibility="Auto" 
+                                      Background="#FF2B2B2B" Margin="20">
+                            <StackPanel Name="messagesPanel"/>
+                        </ScrollViewer>
+                        
+                        <!-- File Transfer Progress -->
+                        <Border Grid.Row="2" Name="fileTransferBorder" Visibility="Collapsed" 
+                                Background="#FF333333" Margin="20,0" Padding="15">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <StackPanel Grid.Row="0" Orientation="Horizontal">
+                                    <TextBlock Name="lblFileTransferStatus" Text="Transferring file..." 
+                                               Foreground="White" VerticalAlignment="Center"/>
+                                    <Button Name="btnCancelTransfer" Content="❌" Width="25" Height="25" 
+                                            Margin="10,0,0,0" Background="Transparent" Foreground="#FFFF6B6B" 
+                                            BorderBrush="Transparent" Click="BtnCancelTransfer_Click"/>
+                                </StackPanel>
+                                <ProgressBar Grid.Row="1" Name="progressFileTransfer" Height="8" 
+                                             Margin="0,10,0,0" Background="#FF666666" 
+                                             Foreground="#FF0D7377"/>
+                            </Grid>
+                        </Border>
+                        
+                        <!-- Message Input -->
+                        <Border Grid.Row="3" Background="#FF333333" BorderBrush="#FF444444" BorderThickness="0,1,0,0">
+                            <Grid Margin="20,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox Name="txtMessage" Grid.Column="0" 
+                                         Background="#FF404040" Foreground="White" 
+                                         BorderBrush="#FF666666" BorderThickness="1" 
+                                         Padding="15,12" FontSize="14" Height="45"
+                                         KeyDown="TxtMessage_KeyDown" IsEnabled="False"
+                                         VerticalContentAlignment="Center"/>
+                                <Button Name="btnClearChat" Grid.Column="1" Content="🗑" 
+                                        Width="45" Height="45" Margin="10,0,5,0" 
+                                        FontSize="16" Background="Transparent" 
+                                        Foreground="#FF666666" BorderBrush="Transparent" 
+                                        Click="BtnClearChat_Click"/>
+                                <Button Name="btnSendMessage" Grid.Column="2" Content="➤" 
+                                        Width="50" Height="45" 
+                                        FontSize="18" FontWeight="Bold"
+                                        Background="#FF0D7377" Foreground="White" 
+                                        BorderBrush="Transparent" BorderThickness="0"
+                                        Click="BtnSendMessage_Click" IsEnabled="False"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Grid>
+            </TabItem>
+            
+            <!-- Contacts Tab -->
+            <TabItem Header="Contacts" Name="contactsTab" Foreground="White">
+                <Grid Margin="20" Background="#FF2B2B2B">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    
+                    <!-- Friend Requests Section -->
+                    <GroupBox Grid.Row="0" Header="Friend Requests" Margin="0,0,0,15" 
+                              Foreground="White" BorderBrush="#FFFF8C42">
+                        <ListView Name="lstFriendRequests" Background="#FF404040" 
+                                  Foreground="White" BorderBrush="#FF666666" Height="100">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="From" Width="150">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding FromPeer}" Foreground="White"/>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
+                                    <GridViewColumn Header="Message" Width="200">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Message}" Foreground="White"/>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
+                                    <GridViewColumn Header="Date" Width="120">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding RequestDate}" Foreground="White"/>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
+                                    <GridViewColumn Header="Action" Width="160">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Button Content="✓ Accept" Width="70" Height="25" 
+                                                            Background="#FF0D7377" Foreground="White" 
+                                                            BorderBrush="Transparent" Margin="0,0,5,0"
+                                                            Click="BtnAcceptFriend_Click" Tag="{Binding}"/>
+                                                    <Button Content="✗ Reject" Width="70" Height="25" 
+                                                            Background="#FFFF6B6B" Foreground="White" 
+                                                            BorderBrush="Transparent"
+                                                            Click="BtnRejectFriend_Click" Tag="{Binding}"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </GroupBox>
+                    
+                    <ListView Name="lstContacts" Grid.Row="1" Background="#FF404040" 
+                              Foreground="White" BorderBrush="#FF666666">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Contact Name" Width="250">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding PeerName}" Foreground="White"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Status" Width="120">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Status}" Foreground="White"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Verified" Width="100">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding IsVerified}" Foreground="White"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Added Date" Width="200">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding AddedDate}" Foreground="White"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                    
+                    <!-- Search and Add Friend Section -->
+                    <GroupBox Grid.Row="1" Header="Add New Friend" Margin="0,20,0,15" 
+                              Foreground="White" BorderBrush="#FF0D7377">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            
+                            <TextBox Grid.Row="0" Grid.Column="0" Name="txtSearchPeer" 
+                                     Margin="0,0,10,0" Background="#FF404040" Foreground="White" 
+                                     BorderBrush="#FF666666" Padding="10,8" FontSize="14"/>
+                            <Button Grid.Row="0" Grid.Column="1" Name="btnSearchPeer" Content="🔍 Search" 
+                                    Width="80" Height="35" Margin="0,0,10,0" 
+                                    Background="#FF4ECDC4" Foreground="White" BorderBrush="Transparent" 
+                                    Click="BtnSearchPeer_Click"/>
+                            <Button Grid.Row="0" Grid.Column="2" Name="btnImportKey" Content="📋 Import Key" 
+                                    Width="100" Height="35" 
+                                    Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent" 
+                                    Click="BtnImportKey_Click"/>
+                            
+                            <ListView Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Name="lstSearchResults" 
+                                      Background="#FF404040" Foreground="White" BorderBrush="#FF666666" 
+                                      Height="100" Margin="0,15,0,0" Visibility="Collapsed">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Peer Name" Width="200">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Name}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Status" Width="120">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Status}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Action" Width="120">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <Button Content="+ Add Friend" Width="100" Height="25" 
+                                                            Background="#FF0D7377" Foreground="White" 
+                                                            BorderBrush="Transparent" 
+                                                            Click="BtnAddFriend_Click" Tag="{Binding}"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                        </Grid>
+                    </GroupBox>
+                    
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,0">
+                        <Button Name="btnRemoveContact" Content="- Remove Contact" Width="140" Height="35" 
+                                Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent" 
+                                Click="BtnRemoveContact_Click"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+        </TabControl>
+    </Grid>
+</Window>

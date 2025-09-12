@@ -1,184 +1,233 @@
 # 📋 Claude Code Session Guide - ChatP2P
 
-## 🚀 Commandes de Build Rapides
+## 🏗️ **NOUVELLE ARCHITECTURE CLIENT/SERVEUR**
+
+### Architecture Séparée
+- **ChatP2P.Server** : Console application C# gérant la logique P2P/réseau
+- **ChatP2P.Client** : Interface utilisateur WPF moderne
+- **Communication** : TCP localhost sur port 8889 avec protocole JSON
+- **Migration** : De VB.NET WinForms vers C# WPF moderne
+
+## 🚀 Commandes de Build
 
 ```bash
-# Build Debug
-dotnet build --configuration Debug
+# Build complet solution
+dotnet build ChatP2P.UI.WinForms.sln --configuration Debug
 
-# Build Release 
-dotnet build --configuration Release
+# Build serveur uniquement
+dotnet build ChatP2P.Server\ChatP2P.Server.csproj --configuration Debug
 
-# Clean + Build
-dotnet clean && dotnet build --configuration Debug
+# Build client uniquement  
+dotnet build ChatP2P.Client\ChatP2P.Client.csproj --configuration Debug
+
+# Clean complet
+dotnet clean ChatP2P.UI.WinForms.sln
 ```
 
 ## 📁 Architecture du Projet
 
-### Fichiers Principaux
-- **`Form1.vb`** : Interface principale avec tous les transferts P2P/Relay
-- **`PrivateChatForm.vb`** : Fenêtre de chat privé avec barre de progression et débit
-- **`P2PAdvancedForm.vb`** : Panneau de configuration BitTorrent avancée
-- **`P2PFileTransfer.vb`** : Système BitTorrent-like (ChatP2P.Core)
+### 🖥️ **ChatP2P.Server (Console C#)**
+- **`Program.cs`** : Point d'entrée, serveur TCP et dispatcher API
+- **`P2PService.cs`** : Service P2P WebRTC avec signaling
+- **`ContactManager.cs`** : Gestion contacts et demandes d'amis
+- **`DatabaseService.cs`** : Persistance données locales
+- **`KeyExchangeManager.cs`** : Gestion négociation clés cryptographiques
+- **`P2PManager.cs`** : Interface avec modules VB.NET existants
+- **`LocalDb.cs`** : Base de données locale
+- **`IceP2PSession.cs`** : Sessions P2P individuelles
+
+### 🖥️ **ChatP2P.Client (WPF C#)**
+- **`MainWindow.xaml/.cs`** : Interface principale moderne avec 3 onglets
+- **`Models.cs`** : Modèles de données (PeerInfo, ContactInfo, ChatSession, etc.)
+- **`SecurityCenterWindow.xaml/.cs`** : Centre de sécurité
+- **Windows/** : Fenêtres additionnelles (AddContact, P2PConfig, etc.)
 
 ### Emplacements Exécutables
-- **Debug**: `bin\Debug\net8.0-windows10.0.17763\ChatP2P.UI.WinForms.exe`
-- **Release**: `bin\Release\net8.0-windows10.0.17763\ChatP2P.UI.WinForms.exe`
+- **Serveur Debug**: `ChatP2P.Server\bin\Debug\net8.0\ChatP2P.Server.exe`
+- **Client Debug**: `ChatP2P.Client\bin\Debug\net8.0-windows\ChatP2P.Client.exe`
 
-## ⚡ Fonctionnalités Récentes Implémentées
+## ⚡ Fonctionnalités Implémentées
 
-### 🎯 **Affichage du Débit en Temps Réel**
-- **Localisation**: `PrivateChatForm.vb:472-490` (UpdateSendProgress)
-- **Format**: `"Envoi : fichier.txt — 85% | 1.2 MB/s"`
-- **Calcul**: Débit moyen depuis le début du transfert
-- **Rafraîchissement**: Toutes les 500ms
-- **Unités**: B/s, KB/s, MB/s (auto-adaptatif)
+### 🌐 **Communication Client/Serveur**
+- **Protocole IPC** : Voir `IPC_PROTOCOL.md` pour spécifications complètes
+- **Format JSON** : Requêtes/réponses structurées
+- **Commands disponibles** : p2p, contacts, crypto, keyexchange, search, security, status
+- **Port TCP** : 8889 sur localhost
 
-### 🎛️ **Limitation de Bande Passante**
-- **Localisation**: `P2PAdvancedForm.vb:125-147` (contrôles UI)
-- **Implémentation**: `Form1.vb:2115-2133` (logique BitTorrent)
-- **Propriétés**: 
-  - `EnableBandwidthLimit: Boolean`
-  - `MaxSpeedKBps: Integer` (10-10000 KB/s)
-- **Surveillance**: Contrôle toutes les secondes avec pauses intelligentes
+### 🎯 **Interface Client Moderne (WPF)**
+- **Onglet Connection** : Configuration réseau, statuts serveur/P2P, liste amis en ligne
+- **Onglet Chat** : Interface type Telegram avec messages en temps réel
+- **Onglet Contacts** : Gestion contacts, demandes d'amis, recherche pairs
+- **Thème sombre** : Interface moderne avec couleurs #FF2B2B2B, #FF0D7377
 
-### 🔧 **Panneau P2P Avancé Revu**
-- **Taille**: 400x490px
-- **5 Presets optimisés**:
-  - 🚀 **ULTRA RAPIDE**: 16KB chunks, 500 batches, 0ms délais, pas de limite
-  - ⚡ **RAPIDE**: 12KB chunks, 350 batches, 2ms délais, 2MB/s max
-  - ⚖️ **ÉQUILIBRÉ**: 8KB chunks, 200 batches, 10ms délais, 1MB/s max
-  - 🛡️ **SÉCURISÉ**: 4KB chunks, 100 batches, 50ms délais, 500KB/s max
-  - ↺ **DÉFAUT**: Reset aux valeurs par défaut
+### 🔧 **Gestion Contacts Avancée**
+- **Recherche pairs** : Via `SearchPeers()` dans serveur
+- **Demandes d'amis** : Workflow complet avec accept/reject
+- **Import clés** : Support clés publiques manuelles
+- **Status temps réel** : Online/Offline basé sur connexions actives
+
+### 🛡️ **Sécurité Intégrée**
+- **Génération clés PQC** : Post-Quantum Cryptography via `P2PMessageCrypto`
+- **TOFU (Trust On First Use)** : Gestion automatique confiance pairs
+- **Centre sécurité** : Interface dédiée gestion trust et empreintes
+- **Persistance sécurisée** : Base données locale pour contacts/clés
 
 ## 🔄 Systèmes de Transfert
 
-### 🏃 **Relay (TCP) - Ultra Rapide Restauré**
-- **Localisation**: `Form1.vb:2232-2305` (SendFileRelayOptimized)
+### 🏃 **P2P WebRTC Moderne**
+- **Localisation**: `P2PService.cs` dans serveur
 - **Caractéristiques**: 
-  - **ZERO délais** (secret de la vitesse originale)
-  - 32KB buffer
-  - Support cryptage Ed25519
-  - Vitesse "à fond" restaurée
+  - WebRTC DataChannels pour connexion directe
+  - Support signaling via serveur TCP
+  - Gestion sessions avec `IceP2PSession.cs`
+  - Messages texte et binaires
 
-### 🔗 **P2P BitTorrent (UDP WebRTC)**
-- **Localisation**: `Form1.vb:2025-2160` (SendFileP2PBitTorrentLike)
-- **Caractéristiques**:
-  - SHA256 hash par chunk
-  - Assemblage non-séquentiel
-  - Anti-crash 400 chunks (limite WebRTC)
-  - Limitation bande passante intégrée
-  - Retry automatique des chunks perdus
+### 📁 **Transferts Fichiers**
+- **Base64 encoding** : Pour transport via JSON
+- **Chunks** : Support découpage gros fichiers
+- **Progress tracking** : Barre progression dans client WPF
+- **Cancel support** : Annulation transferts en cours
 
-## 🐛 Problèmes Résolus
+### 🔗 **Communication Hybride**
+- **Messages courts** : Via WebRTC P2P direct
+- **Gros fichiers** : Via découpage chunks + TCP relay si nécessaire
+- **Fallback** : TCP relay si P2P échoue
 
-### ✅ **Checkboxes Persistence** (`Form1.vb:590-645`)
-- **Solution**: `Form1_Shown` + Timer 100ms + corrections save functions
-- **Problème principal**: Fonctions `PersistXXXToSettingsIfPossible()` utilisaient Reflection pour sauver des Boolean dans des propriétés String
-- **Fix critique**: Remplacement par `My.Settings.StrictTrust = chkStrictTrust.Checked.ToString()`
-- **Toutes checkboxes**: StrictTrust, Verbose, EncryptRelay, PqRelay
+## 🚧 État Actuel et Problèmes
 
-### ✅ **P2P Advanced Settings Persistence** (`P2PAdvancedForm.vb:414-501`)
-- **Solution**: Fichier texte simple `p2p_settings.txt` avec format key=value  
-- **LoadFromSettings()**: Chargement au Form_Load de P2PAdvancedForm
-- **SaveToSettings()**: Sauvegarde automatique lors de l'application des changements
-- **Limite bande passante**: Maximum étendu à 999MB/s (était 10MB/s)
+### ⚠️ **Problème Actuel - Liste d'Amis**
+- **Location**: `MainWindow.xaml.cs:272-306` (`RefreshPeersList()`)
+- **Problème**: Affichage de la liste d'amis après réception requête friend request
+- **Symptôme**: La liste ne se met pas à jour correctement après accept/reject
+- **Méthodes concernées**: 
+  - `RefreshPeersList()` : Récupération contacts depuis serveur
+  - `AcceptFriendRequest()` : Acceptance requête et refresh
+  - `_peers.Clear()` et ajout dans collection WPF
 
-### ✅ **Performance Relay vs P2P**
-- **Relay**: Méthode originale rapide complètement séparée
-- **P2P**: BitTorrent optimisé avec presets configurables
-- **Séparation**: Aucune interférence entre les deux systèmes
+### ✅ **Migration VB.NET → C# Terminée**
+- **UI moderne** : WPF avec binding MVVM remplace WinForms
+- **Logique réseau** : P2P service C# remplace modules VB.NET
+- **Persistance** : JSON remplace My.Settings Windows
+- **Architecture** : Client/Serveur séparé remplace monolithe
 
-## 📊 Configuration BitTorrent
+### ✅ **Settings Persistence Moderne**
+- **Client WPF**: `Properties.Settings.Default` pour config UI
+- **Serveur**: JSON files (`contacts.json`, `contact_requests.json`)
+- **P2P Config**: `P2PConfig` class avec sérialisation
 
-### Variables Principales (`P2PAdvancedForm.vb`)
-```vb
-Public Property ChunkSize As Integer = 8192        ' Taille des chunks
-Public Property BatchSize As Integer = 200         ' Chunks par batch  
-Public Property BatchDelayMs As Integer = 10       ' Délai entre batches
-Public Property SetupDelayMs As Integer = 100      ' Délai initial
-Public Property MaxRetries As Integer = 3          ' Retry par chunk
-Public Property EnableBandwidthLimit As Boolean = False
-Public Property MaxSpeedKBps As Integer = 1000     ' Limite en KB/s (10-999999)
+## 📊 Configuration P2P Moderne
+
+### Variables Principales (`Models.cs - P2PConfig`)
+```csharp
+public class P2PConfig
+{
+    public int ChunkSize { get; set; } = 8192;
+    public int MaxFileSize { get; set; } = 104857600; // 100MB
+    public bool UseCompression { get; set; } = true;
+    public string[] StunServers { get; set; } = { "stun:stun.l.google.com:19302" };
+    public int ConnectionTimeout { get; set; } = 30000; // 30 seconds
+}
 ```
 
 ### 📁 Fichiers de Configuration
-- **Checkbox settings**: `My.Settings` (fichier utilisateur Windows)
-- **P2P Advanced**: `p2p_settings.txt` (répertoire application)
-  ```
-  ChunkSize=8192
-  BatchSize=200
-  EnableBandwidthLimit=True
-  MaxSpeedKBps=1000
-  ...
-  ```
+- **Client Settings**: `Properties.Settings.Default` (WPF standard)
+- **Serveur Contacts**: `contacts.json` (dictionnaire contacts avec clés)
+- **Friend Requests**: `contact_requests.json` (liste demandes pendantes)
+- **Server IP**: `server.txt` (IP serveur pour client)
 
-### Utilisation dans le Code (`Form1.vb:2027-2037`)
-```vb
-Dim CHUNK_SIZE = If(_p2pConfig IsNot Nothing, _p2pConfig.ChunkSize, 8192)
-Dim BATCH_SIZE = If(_p2pConfig IsNot Nothing, _p2pConfig.BatchSize, 200)
-Dim ENABLE_BANDWIDTH_LIMIT = If(_p2pConfig IsNot Nothing, _p2pConfig.EnableBandwidthLimit, False)
+### API Communication (`MainWindow.xaml.cs`)
+```csharp
+private async Task<ApiResponse?> SendApiRequest(string command, string? action = null, object? data = null)
+{
+    var request = new ApiRequest { Command = command, Action = action, Data = data };
+    // TCP communication vers localhost:8889
+}
 ```
 
 ## 🔧 Points d'Optimisation Futurs
 
-### Potentielles Améliorations
-1. **Compression chunks**: Ajouter compression LZ4/Gzip optionnelle
-2. **Priorité chunks**: Système de priorité pour chunks critiques  
-3. **Multi-stream**: Parallélisation avec plusieurs WebRTC DataChannels
-4. **Cache intelligent**: Cache des chunks récents pour re-envoi rapide
-5. **QoS adaptatif**: Ajustement automatique selon latence réseau
+### Améliorations Interface
+1. **Real-time updates**: WebSocket pour notifications push serveur→client
+2. **Message history**: Persistance historique conversations
+3. **File preview**: Aperçu fichiers images/documents
+4. **Status indicators**: Indicateurs visuels état connexions P2P
+5. **Search optimization**: Recherche contacts plus rapide
 
-### WebRTC Limitations Connues
-- **400 chunks max**: Crash WebRTC au-delà (contourné par BitTorrent)
-- **DataChannel size**: Messages trop gros causent des pertes
-- **Ordre delivery**: Messages peuvent arriver désordonnés (géré par hash)
+### Améliorations Backend
+1. **Scalability**: Support plusieurs clients simultanés
+2. **Relay server**: Serveur relay pour NAT traversal
+3. **Encryption**: Chiffrement E2E messages et fichiers
+4. **Database**: Migration vers SQLite pour performance
+5. **Logging**: Système logs structurés avec niveaux
 
-## 📝 Logs de Debug Importants
+### WebRTC Optimisations
+- **TURN servers**: Support TURN pour NAT strict
+- **Bandwidth adaptation**: Ajustement débit selon qualité réseau
+- **Connection pooling**: Réutilisation connexions existantes
 
-### Patterns de Recherche Utiles
+## 📝 Debugging et Logs
+
+### Logs Serveur Console
 ```bash
-# Transferts P2P
-[P2P TORRENT]
-[BT]
-[BANDWIDTH]
+# API Requests
+"API: p2p - start"
+"API: contacts - list" 
+"API: search - find_peer"
 
-# Relay
-[RELAY]
-[RELAY+ENC]
+# P2P Events
+"P2P Signal to peer: ..."
+"Connected peers count: X"
+"Message sent to peer: ..."
 
-# Configuration
-[SETTINGS]
-[P2P CONFIG]
+# Contact Management
+"Contact ajouté: PeerName (Verified: true)"
+"Friend request from X to Y created"
+"Demande acceptée: X ↔ Y"
 ```
+
+### Logs Client WPF
+- **Location**: `Desktop\ChatP2P_Logs\client.log`
+- **Method**: `LogToFile()` dans `MainWindow.xaml.cs:1058-1076`
+- **Format**: `[timestamp] message`
 
 ## 🚨 Notes Importantes
 
 ### Sécurité
-- **Ed25519**: Clés publiques pour authentification TOFU
-- **SHA256**: Hash de vérification intégrité chunks
-- **XChaCha20-Poly1305**: Cryptage PQC optionnel
-- **Pas de secrets**: Aucune clé privée n'est loggée
+- **PQC Crypto**: Post-Quantum Cryptography via `ChatP2P.Crypto`
+- **TOFU Trust**: Trust On First Use pour nouveaux contacts
+- **Local only**: Communication uniquement localhost:8889
+- **No plaintext secrets**: Clés stockées en base64 uniquement
 
 ### Performance
-- **Relay TCP**: Pour vitesse maximale (crypté ou non)
-- **P2P UDP**: Pour connexion directe avec limitation bande passante
-- **BitTorrent**: Pour gros fichiers avec reprise/vérification
+- **Async/await**: Toute communication réseau asynchrone
+- **ObservableCollection**: Binding WPF réactif pour listes
+- **JSON parsing**: Sérialisation rapide avec System.Text.Json
+- **TCP persistent**: Connexion maintenue client↔serveur
 
-## 🧹 Nettoyage Debug
+## 🧹 Migration Status
 
-### Logs Supprimés
-- ❌ `*** [DEBUG] NOUVELLE VERSION P2P FILE TRANSFER CHARGÉE ***`
-- ❌ `[SETTINGS] StrictTrust UI forced: False`
-- ❌ `[SETTINGS] Verbose saved: True` 
-- ❌ `[SETTINGS] XXX UI forced: XXX`
+### ✅ Terminé
+- Architecture client/serveur séparée
+- Interface WPF moderne avec 3 onglets
+- Communication IPC via TCP/JSON
+- Gestion contacts avec friend requests
+- Recherche pairs fonctionnelle
+- Persistance JSON côté serveur
+- Settings WPF côté client
 
-### Logs Conservés
-- ✅ Logs d'erreur (`[SETTINGS] XXX save error:` en verbose)
-- ✅ Logs fonctionnels importants (connexions, transferts)
+### 🚧 En Cours
+- **Problème liste d'amis**: Affichage après accept/reject request
+- Optimisation refresh des collections WPF
+- Messages temps réel dans chat
+
+### 📋 À Faire
+- WebSocket pour push notifications
+- Historique conversations persistant
+- P2P file transfer avec progress
+- Security Center complet
 
 ---
 
-**🎯 Status: COMPLET** - Toutes les fonctionnalités demandées sont implémentées et fonctionnelles
+**🎯 Status: MIGRATION ARCHITECTURE** - Client/Serveur séparé, problème liste d'amis en cours
 
-*Dernière mise à jour: Session du 11/09/2025 - Finalisation persistence + nettoyage debug*
+*Dernière mise à jour: Session du 12/09/2025 - Migration VB.NET→C# terminée, debugging liste contacts*
