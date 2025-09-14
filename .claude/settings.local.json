@@ -5,7 +5,8 @@
       "Read(//c/VM1/Users/User/Desktop/ChatP2P_Logs/**)",
       "Read(//c/VM2/Users/User/Desktop/ChatP2P_Logs/**)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []

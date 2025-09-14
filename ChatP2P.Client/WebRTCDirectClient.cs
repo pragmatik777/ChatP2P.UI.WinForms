@@ -27,7 +27,7 @@ namespace ChatP2P.Client
         public event Action<string>? LogEvent;
         public event Action<string, string, string>? ICECandidateGenerated; // fromPeer, toPeer, candidate
         public event Action<string, byte[]>? FileDataReceived; // peer, binaryData
-        public event Action<string, double>? FileTransferProgress; // peer, progressPercent
+        public event Action<string, double, string>? FileTransferProgress; // peer, progressPercent, fileName
 
         // Flow control constants (SIPSorcery best practices)
         private const ulong BUFFER_THRESHOLD = 65536UL; // 64KB buffer limit
@@ -463,8 +463,8 @@ namespace ChatP2P.Client
                         var progress = (double)sentChunks / totalChunks * 100;
                         LogEvent?.Invoke($"[WebRTC-FILE] Progress: {progress:F1}% ({sentChunks}/{totalChunks}), Buffer: {dataChannel.bufferedAmount} bytes");
 
-                        // ✅ NOUVEAU: Déclencher événement progress pour UI
-                        FileTransferProgress?.Invoke(targetPeer, progress);
+                        // ✅ FIXED: Déclencher événement progress pour UI avec filename
+                        FileTransferProgress?.Invoke(targetPeer, progress, fileName);
 
                         // ✅ FIX: Adaptive delay selon buffer state
                         var bufferRatio = (double)dataChannel.bufferedAmount / BUFFER_THRESHOLD;
@@ -885,8 +885,8 @@ namespace ChatP2P.Client
 
                 LogEvent?.Invoke($"[FILE-CHUNK] Stored chunk {chunkIndex}, progress: {reconstruction.Progress:F1}% ({reconstruction.ReceivedChunks.Count}/{reconstruction.TotalChunks})");
 
-                // ✅ NOUVEAU: Déclencher événement progress pour receiver UI
-                FileTransferProgress?.Invoke(peer, reconstruction.Progress);
+                // ✅ FIXED: Déclencher événement progress pour receiver UI avec filename
+                FileTransferProgress?.Invoke(peer, reconstruction.Progress, reconstruction.FileName);
 
                 // Vérifier si le fichier est complet
                 if (reconstruction.IsComplete)

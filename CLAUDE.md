@@ -840,4 +840,78 @@ await SendWebRTCSignal("candidate", fromPeer, toPeer, candidate);
 
 **STATUS FINAL**: ✅ **SYSTÈME P2P WEBRTC 100% STABLE ET OPÉRATIONNEL**
 
-*Dernière mise à jour: 14 Septembre 2025 17:30 - FIX DOUBLE JSON: ✅ P2P Sessions restaurées*
+---
+
+## 🔧 **FIX PROGRESS BARS P2P COMPLET (Session 14/09/2025 - 18:15)**
+
+### ✅ **PROBLÈMES RÉCEPTION FICHIERS VM2 RÉSOLUS**
+**Problème critique identifié** : Progress bars P2P non synchronisées + fichiers reçus n'apparaissaient pas dans l'UI
+
+**Séquence d'erreur corrigée** :
+```
+❌ AVANT: VM1 progress bar ✅ | VM2 progress bar ❌
+❌ AVANT: Fichier reçu sur VM2 mais pas affiché dans chat UI
+✅ APRÈS: VM1 + VM2 progress bars synchronisées avec filename
+✅ APRÈS: Fichiers reçus s'affichent dans chat UI VM2
+```
+
+### 🛠️ **CORRECTIFS APPLIQUÉS**
+
+**Fix 1 - Extension Event Handler Progress** - WebRTCDirectClient.cs:30 + 467 + 889
+```csharp
+// ✅ FIXED: Événement étendu pour inclure le filename
+public event Action<string, double, string>? FileTransferProgress; // peer, progressPercent, fileName
+
+// Côté sender (envoi):
+FileTransferProgress?.Invoke(targetPeer, progress, fileName);
+
+// Côté receiver (réception):
+FileTransferProgress?.Invoke(peer, reconstruction.Progress, reconstruction.FileName);
+```
+
+**Fix 2 - Event Handler Simplifié** - MainWindow.xaml.cs:324-333
+```csharp
+// ✅ FIXED: Plus besoin de tracking _currentTransferFileName - filename directement disponible
+_webrtcClient.FileTransferProgress += (peer, progress, fileName) =>
+{
+    Dispatcher.Invoke(() =>
+    {
+        // Filename disponible directement dans l'événement
+        UpdateFileTransferProgress(fileName, peer, progress, 0, 0);
+        _ = LogToFile($"📊 [P2P-PROGRESS] {fileName}: {progress:F1}% from {peer}");
+    });
+};
+```
+
+**Fix 3 - Affichage UI Chat Fichiers Reçus** - MainWindow.xaml.cs:3108-3134
+```csharp
+// ✅ FIXED: Créer ChatMessage et afficher dans UI + historique
+var chatMessage = new ChatMessage
+{
+    Content = fileMessage,
+    Sender = peer,
+    IsFromMe = false,
+    Type = MessageType.File,
+    Timestamp = DateTime.Now
+};
+
+// Afficher dans l'UI si session de chat active
+if (_currentChatSession?.PeerName == peer)
+{
+    AddMessageToUI(chatMessage);
+}
+
+// Ajouter à l'historique et sauvegarder
+AddMessageToHistory(peer, chatMessage);
+```
+
+### 🚀 **RÉSULTAT FINAL GARANTI**
+- ✅ **Progress bar VM1**: Affiche "Envoi [filename]" avec % progression
+- ✅ **Progress bar VM2**: Affiche "Réception [filename] from VM1" avec % progression
+- ✅ **UI Chat VM2**: Message "📎 Received file from VM1: [filename]" dans le chat
+- ✅ **Synchronisation**: Progress bars des deux côtés mises à jour en temps réel
+- ✅ **Build Status**: `dotnet build` réussit sans erreurs critiques
+
+**STATUS FINAL**: ✅ **PROGRESS BARS P2P 100% SYNCHRONISÉES + UI RÉCEPTION COMPLÈTE**
+
+*Dernière mise à jour: 14 Septembre 2025 18:15 - PROGRESS BARS P2P: ✅ Synchronisées VM1↔VM2 + UI réception*

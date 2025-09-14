@@ -36,6 +36,7 @@ namespace ChatP2P.Client
         private HashSet<string> _onlinePeers = new();
         private bool _hasNewMessages = false;
         private string? _lastMessageSender = null;
+        private string? _currentTransferFileName = null; // Track current P2P file transfer filename
 
         // Collections for data binding
         private readonly ObservableCollection<PeerInfo> _peers = new();
@@ -320,12 +321,14 @@ namespace ChatP2P.Client
                     });
                 };
 
-                // ✅ NOUVEAU: Handle file transfer progress updates
-                _webrtcClient.FileTransferProgress += (peer, progress) =>
+                // ✅ FIXED: Handle file transfer progress updates with peer context and filename
+                _webrtcClient.FileTransferProgress += (peer, progress, fileName) =>
                 {
                     Dispatcher.Invoke(() =>
                     {
-                        UpdateFileTransferProgress(progress);
+                        // Now we have the filename directly from the event - no need for _currentTransferFileName tracking
+                        UpdateFileTransferProgress(fileName, peer, progress, 0, 0);
+                        _ = LogToFile($"📊 [P2P-PROGRESS] {fileName}: {progress:F1}% from {peer}");
                     });
                 };
 
@@ -2433,8 +2436,8 @@ namespace ChatP2P.Client
                     var fileInfo = new FileInfo(dialog.FileName);
                     await LogToFile($"📁 [FILE-TRANSFER] Starting file transfer: {fileInfo.Name} ({fileInfo.Length} bytes) → {peerName}");
 
-                    // Show transfer progress
-                    ShowFileTransferProgress(fileInfo.Name, fileInfo.Length, false);
+                    // ✅ FIXED: Progress bar will be shown by the actual transfer method
+                    // ShowFileTransferProgress will be called within SendFileViaWebRTCDirectNew
 
                     // Ask user to choose transfer method
                     // ✅ FIX: Force P2P WebRTC Direct par défaut (plus de choix manuel)
@@ -2518,10 +2521,10 @@ namespace ChatP2P.Client
                     await LogToFile($"❌ [FILE-TRANSFER] Error sending file: {ex.Message}");
                     MessageBox.Show($"Error sending file: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                     await LogToFile($"File send error: {ex.Message}");
-                }
-                finally
-                {
-                    HideFileTransferProgress();
+
+                    // ✅ FIXED: Cleanup only on exception - success cases handle their own cleanup
+                    fileTransferBorder.Visibility = Visibility.Collapsed;
+                    _currentTransferFileName = null;
                 }
             }
         }
@@ -2926,7 +2929,8 @@ namespace ChatP2P.Client
                     return new ApiResponse { Success = false, Error = $"Failed to read file: {ex.Message}" };
                 }
 
-                // 3. Progress bar
+                // 3. ✅ FIXED: Set current transfer filename for progress tracking
+                _currentTransferFileName = fileInfo.Name;
                 UpdateFileTransferProgress(5);
 
                 // 4. ✅ NOUVEAU: Envoyer via WebRTCDirectClient avec flow control
@@ -2946,12 +2950,19 @@ namespace ChatP2P.Client
                     await Task.Delay(1000);
                     fileTransferBorder.Visibility = Visibility.Collapsed;
 
+                    // ✅ FIXED: Clear current transfer filename
+                    _currentTransferFileName = null;
+
                     return new ApiResponse { Success = true, Data = "File sent successfully via WebRTC Direct (New)" };
                 }
                 else
                 {
                     await LogToFile($"❌ [WEBRTC-NEW] File transfer failed");
                     fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                    // ✅ FIXED: Clear current transfer filename on failure
+                    _currentTransferFileName = null;
+
                     return new ApiResponse { Success = false, Error = "File transfer failed via WebRTC Direct" };
                 }
             }
@@ -2959,6 +2970,10 @@ namespace ChatP2P.Client
             {
                 await LogToFile($"❌ [WEBRTC-NEW] Error: {ex.Message}");
                 fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                // ✅ FIXED: Clear current transfer filename on error
+                _currentTransferFileName = null;
+
                 return new ApiResponse { Success = false, Error = ex.Message };
             }
         }
@@ -2972,14 +2987,25 @@ namespace ChatP2P.Client
             {
                 await LogToFile($"[FILE-HANDLER] Processing {fileData.Length} bytes from {peer}");
 
-                // ✅ NOUVEAU: Détecter si c'est le début d'un transfert pour afficher la progressbar
+                // ✅ FIXED: Détecter si c'est le début d'un transfert pour afficher la progressbar
                 var initialHeader = System.Text.Encoding.UTF8.GetString(fileData, 0, Math.Min(200, fileData.Length));
                 if (initialHeader.StartsWith("FILENAME:") || initialHeader.Contains("FILESTART:"))
                 {
-                    // Afficher la progressbar pour la réception
+                    // Extract filename for progress display
+                    var tempHeader = initialHeader.Split('|')[0];
+                    if (tempHeader.Contains(":"))
+                    {
+                        _currentTransferFileName = tempHeader.Split(':')[1];
+                    }
+                    else
+                    {
+                        _currentTransferFileName = "Incoming file";
+                    }
+
+                    // Afficher la progressbar pour la réception avec détails
                     fileTransferBorder.Visibility = Visibility.Visible;
-                    UpdateFileTransferProgress(0); // Démarrer à 0%
-                    await LogToFile($"[FILE-HANDLER] 📊 Reception progress bar started for {peer}");
+                    UpdateFileTransferProgress(_currentTransferFileName, peer, 0, 0, fileData.Length);
+                    await LogToFile($"[FILE-HANDLER] 📊 Reception progress bar started for {peer}: {_currentTransferFileName}");
                 }
 
                 // Créer le dossier de réception s'il n'existe pas
@@ -3053,23 +3079,50 @@ namespace ChatP2P.Client
 
                 await LogToFile($"✅ [FILE-HANDLER] File saved: {fullPath} ({FormatFileSize(actualFileData.Length)})");
 
-                // ✅ NOUVEAU: Finir la progressbar à 100% et la cacher
-                UpdateFileTransferProgress(100);
+                // ✅ FIXED: Finir la progressbar à 100% et la cacher avec détails
+                if (_currentTransferFileName != null)
+                {
+                    UpdateFileTransferProgress(_currentTransferFileName, peer, 100, actualFileData.Length, actualFileData.Length);
+                }
+                else
+                {
+                    UpdateFileTransferProgress(100);
+                }
+
                 await Task.Delay(1000); // Laisser voir 100% pendant 1 seconde
                 fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                // ✅ FIXED: Clear current transfer filename
+                _currentTransferFileName = null;
+
                 await LogToFile($"[FILE-HANDLER] 📊 Reception progress bar completed and hidden");
 
-                // Afficher notification dans l'UI
+                // ✅ FIXED: Afficher notification dans l'UI ET le chat
                 var displayName = txtDisplayName.Text.Trim();
                 var fileMessage = $"📎 Received file from {peer}: {fileName} ({FormatFileSize(actualFileData.Length)})";
 
-                // Sauvegarder en base
+                // Créer le message pour l'UI
+                var chatMessage = new ChatMessage
+                {
+                    Content = fileMessage,
+                    Sender = peer,
+                    IsFromMe = false,
+                    Type = MessageType.File,
+                    Timestamp = DateTime.Now
+                };
+
+                // ✅ FIXED: Afficher dans l'UI si c'est la session de chat actuelle
+                if (_currentChatSession?.PeerName == peer)
+                {
+                    AddMessageToUI(chatMessage);
+                    await LogToFile($"📎 [CHAT-UI] File message added to UI for current chat with {peer}");
+                }
+
+                // Ajouter à l'historique et sauvegarder en base
+                AddMessageToHistory(peer, chatMessage);
                 await DatabaseService.Instance.SaveMessage(peer, displayName, fileMessage, false, "Received");
 
-                // ✅ SIMPLE: Log pour l'instant (pas d'UI chat direct)
                 await LogToFile($"✅ [FILE-SUCCESS] {fileMessage}");
-
-                // Log comme notification
                 await LogToFile($"📎 [NOTIFICATION] {fileMessage}");
             }
             catch (Exception ex)
