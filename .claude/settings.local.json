@@ -6,7 +6,8 @@
       "Read(//c/VM2/Users/User/Desktop/ChatP2P_Logs/**)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

@@ -29,11 +29,12 @@ namespace ChatP2P.Client
         public event Action<string, byte[]>? FileDataReceived; // peer, binaryData
         public event Action<string, double, string>? FileTransferProgress; // peer, progressPercent, fileName
 
-        // Flow control constants (SIPSorcery best practices)
-        private const ulong BUFFER_THRESHOLD = 65536UL; // 64KB buffer limit
-        private const ulong LOW_BUFFER_THRESHOLD = 32768UL; // 32KB low threshold
-        private const int MAX_CHUNK_SIZE = 16384; // 16KB max chunk size
-        private const int FLOW_CONTROL_DELAY = 10; // Base delay in ms
+        // ✅ OPTIMISATIONS 2025: Flow control constants pour haute performance (>10Mbps)
+        private const ulong BUFFER_THRESHOLD = 1048576UL; // 1MB buffer limit (4x plus agressif)
+        private const ulong LOW_BUFFER_THRESHOLD = 262144UL; // 256KB low threshold (8x plus agressif)
+        private const int MAX_CHUNK_SIZE = 65536; // 64KB max chunk size (4x plus gros chunks)
+        private const int FLOW_CONTROL_DELAY = 1; // 1ms base delay (10x plus rapide)
+        private const int BURST_SIZE = 5; // Send 5 chunks then micro-pause pour flow control
 
         // File reconstruction for chunked transfers
         private readonly Dictionary<string, FileReconstructionState> _fileReconstructions = new();
@@ -96,8 +97,12 @@ namespace ChatP2P.Client
                     maxRetransmits = null // Reliable delivery
                 };
                 var messageChannel = await pc.createDataChannel("messages", msgConfig);
+
+                // ✅ OPTIMISATION 2025: Configurer bufferedAmountLowThreshold pour messages aussi
+                messageChannel.bufferedAmountLowThreshold = LOW_BUFFER_THRESHOLD;
+
                 _messageChannels[targetPeer] = messageChannel;
-                LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ Message DataChannel created (state: {messageChannel.readyState})");
+                LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ Message DataChannel created with optimized buffer thresholds (state: {messageChannel.readyState})");
 
                 // Canal 2: Données fichiers (unordered, performance)
                 var dataConfig = new RTCDataChannelInit
@@ -106,8 +111,12 @@ namespace ChatP2P.Client
                     maxRetransmits = 3 // Limited retries for performance
                 };
                 var dataChannel = await pc.createDataChannel("data", dataConfig);
+
+                // ✅ OPTIMISATION 2025: Configurer bufferedAmountLowThreshold pour haute performance
+                dataChannel.bufferedAmountLowThreshold = LOW_BUFFER_THRESHOLD;
+
                 _dataChannels[targetPeer] = dataChannel;
-                LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ Data DataChannel created (state: {dataChannel.readyState})");
+                LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ Data DataChannel created with optimized buffer thresholds (state: {dataChannel.readyState})");
 
                 // ✅ FIX: Event handlers pour MESSAGE channel
                 WireMessageChannelEvents(messageChannel, targetPeer);
@@ -466,10 +475,15 @@ namespace ChatP2P.Client
                         // ✅ FIXED: Déclencher événement progress pour UI avec filename
                         FileTransferProgress?.Invoke(targetPeer, progress, fileName);
 
-                        // ✅ FIX: Adaptive delay selon buffer state
-                        var bufferRatio = (double)dataChannel.bufferedAmount / BUFFER_THRESHOLD;
-                        var delay = (int)(FLOW_CONTROL_DELAY * Math.Max(1, bufferRatio * 2));
-                        await Task.Delay(delay);
+                        // ✅ OPTIMISATION 2025: Burst control + micro-pauses pour haute performance
+                        if (sentChunks % BURST_SIZE == 0)
+                        {
+                            // Pause micro après chaque burst de chunks
+                            var bufferRatio = (double)dataChannel.bufferedAmount / BUFFER_THRESHOLD;
+                            var delay = (int)(FLOW_CONTROL_DELAY * Math.Max(1, bufferRatio));
+                            await Task.Delay(delay);
+                        }
+                        // Pas de délai entre chunks du même burst = performance maximale
                     }
                     catch (Exception chunkEx)
                     {
@@ -701,36 +715,38 @@ namespace ChatP2P.Client
         }
 
         /// <summary>
-        /// ✅ CRITIQUE: Wait for buffer low selon SIPSorcery best practices
+        /// ✅ OPTIMISÉ 2025: Wait for buffer low avec polling agressif pour haute performance
         /// </summary>
         private async Task WaitForBufferLow(RTCDataChannel channel, string peer)
         {
             int waitCount = 0;
-            const int maxWaits = 100; // 10 secondes max
+            const int maxWaits = 500; // 5 secondes max (was 10s, now more aggressive)
 
             while (channel.bufferedAmount > BUFFER_THRESHOLD && waitCount < maxWaits)
             {
                 if (waitCount == 0)
                 {
-                    LogEvent?.Invoke($"[FLOW-CONTROL] Buffer high for {peer}: {channel.bufferedAmount} bytes - waiting...");
+                    LogEvent?.Invoke($"[FLOW-CONTROL] High buffer for {peer}: {channel.bufferedAmount/1024}KB - polling...");
                 }
 
-                await Task.Delay(100); // 100ms entre vérifications
+                // ✅ OPTIMISATION: 10ms polling au lieu de 100ms = 10x plus rapide
+                await Task.Delay(10);
                 waitCount++;
 
-                if (waitCount % 10 == 0) // Log toutes les secondes
+                // Log toutes les 100 polls (1 seconde) au lieu de toutes les 100ms
+                if (waitCount % 100 == 0)
                 {
-                    LogEvent?.Invoke($"[FLOW-CONTROL] Still waiting for {peer}: {channel.bufferedAmount} bytes ({waitCount * 100}ms)");
+                    LogEvent?.Invoke($"[FLOW-CONTROL] Polling {peer}: {channel.bufferedAmount/1024}KB ({waitCount * 10}ms)");
                 }
             }
 
             if (waitCount >= maxWaits)
             {
-                LogEvent?.Invoke($"[FLOW-CONTROL] ⚠️ Timeout waiting for buffer low on {peer}");
+                LogEvent?.Invoke($"[FLOW-CONTROL] ⚠️ Buffer timeout on {peer} after 5s");
             }
-            else if (waitCount > 0)
+            else if (waitCount > 5) // Log seulement si attente significative
             {
-                LogEvent?.Invoke($"[FLOW-CONTROL] ✅ Buffer ready for {peer}: {channel.bufferedAmount} bytes (waited {waitCount * 100}ms)");
+                LogEvent?.Invoke($"[FLOW-CONTROL] ✅ Buffer ready {peer}: {channel.bufferedAmount/1024}KB (waited {waitCount * 10}ms)");
             }
         }
 
