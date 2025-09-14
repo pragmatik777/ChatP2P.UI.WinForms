@@ -32,8 +32,8 @@ namespace ChatP2P.Server
         {
             try
             {
-                ChatP2P.Core.LocalDb.Init("ChatP2P", "server.db");
-                ChatP2P.Core.LocalDbExtensionsSecurity.EnsurePeerExtraColumns();
+                LocalDb.Init("ChatP2P", "server.db");
+                LocalDbExtensionsSecurity.EnsurePeerExtraColumns();
             }
             catch (Exception ex)
             {
@@ -57,7 +57,7 @@ namespace ChatP2P.Server
                 };
 
                 var json = System.Text.Json.JsonSerializer.Serialize(requestData);
-                ChatP2P.Core.LocalDbExtensions.KvSet($"friend_request_{fromPeer}_{toPeer}_{DateTime.UtcNow.Ticks}", json);
+                LocalDbExtensions.KvSet($"friend_request_{fromPeer}_{toPeer}_{DateTime.UtcNow.Ticks}", json);
             }
             catch (Exception ex)
             {
@@ -70,8 +70,8 @@ namespace ChatP2P.Server
             var requests = new List<FriendRequestData>();
             try
             {
-                var dt = ChatP2P.Core.LocalDb.Query("SELECT K, V FROM Kv WHERE K LIKE @pattern;", 
-                                                   ChatP2P.Core.LocalDb.P("@pattern", "friend_request_%"));
+                var dt = LocalDb.Query("SELECT K, V FROM Kv WHERE K LIKE @pattern;", 
+                                                   LocalDb.P("@pattern", "friend_request_%"));
                 
                 foreach (DataRow row in dt.Rows)
                 {
@@ -106,45 +106,26 @@ namespace ChatP2P.Server
         {
             try
             {
-                var requests = GetFriendRequestsFor(accepter);
-                var request = requests.Find(r => r.FromPeer == requester);
-                
-                if (request != null)
-                {
-                    // Update request status
-                    request.Status = "accepted";
-                    var json = System.Text.Json.JsonSerializer.Serialize(request);
-                    ChatP2P.Core.LocalDbExtensions.KvSet(request.RequestKey, json);
+                // The friend request exists in ContactManager JSON, not in DatabaseService SQLite
+                // We just need to add the trust relationship to SQLite database
+                Console.WriteLine($"DatabaseService: Processing friend request {requester} -> {accepter}");
 
-                    // Add both users as contacts in the database
-                    EnsurePeerExists(requester);
-                    EnsurePeerExists(accepter);
-                    
-                    // Set both as trusted (this creates the friend relationship)
-                    SetPeerTrusted(requester, true);
-                    SetPeerTrusted(accepter, true);
-                    
-                    // Import the public key if provided
-                    if (!string.IsNullOrEmpty(request.PublicKey))
-                    {
-                        try
-                        {
-                            var keyBytes = Convert.FromBase64String(request.PublicKey);
-                            ChatP2P.Core.LocalDbExtensions.PeerSetEd25519_Tofu(requester, keyBytes);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Error importing public key: {ex.Message}");
-                        }
-                    }
-                    
-                    Console.WriteLine($"Friend request accepted: {requester} and {accepter} are now friends");
-                    return true;
-                }
+                // Add both users as contacts in the database
+                EnsurePeerExists(requester);
+                EnsurePeerExists(accepter);
+                
+                // Only mark the requester as trusted by the accepter
+                // The accepter (who is accepting) trusts the requester (who requested)
+                SetPeerTrusted(requester, true);
+                
+                Console.WriteLine($"DatabaseService: Marked {requester} as trusted (accepted by {accepter})");
+                
+                Console.WriteLine($"DatabaseService: Friend request accepted successfully: {requester} -> {accepter}");
+                return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error accepting friend request: {ex.Message}");
+                Console.WriteLine($"DatabaseService: Error accepting friend request: {ex.Message}");
             }
             return false;
         }
@@ -160,7 +141,7 @@ namespace ChatP2P.Server
                 {
                     request.Status = "rejected";
                     var json = System.Text.Json.JsonSerializer.Serialize(request);
-                    ChatP2P.Core.LocalDbExtensions.KvSet(request.RequestKey, json);
+                    LocalDbExtensions.KvSet(request.RequestKey, json);
                     return true;
                 }
             }
@@ -177,7 +158,7 @@ namespace ChatP2P.Server
             var peers = new List<PeerSecurityData>();
             try
             {
-                var dt = ChatP2P.Core.LocalDbExtensionsSecurity.PeerList();
+                var dt = LocalDbExtensionsSecurity.PeerList();
                 
                 foreach (DataRow row in dt.Rows)
                 {
@@ -212,7 +193,7 @@ namespace ChatP2P.Server
             try
             {
                 byte[] pk = null!, sk = null!;
-                ChatP2P.Core.LocalDbExtensions.IdentityEnsureEd25519(ref pk, ref sk);
+                LocalDbExtensions.IdentityEnsureEd25519(ref pk, ref sk);
                 
                 if (pk != null && pk.Length > 0)
                 {
@@ -231,7 +212,7 @@ namespace ChatP2P.Server
             try
             {
                 EnsurePeerExists(peerName);
-                ChatP2P.Core.LocalDbExtensionsSecurity.PeerSetTrusted(peerName, trusted);
+                LocalDbExtensionsSecurity.PeerSetTrusted(peerName, trusted);
             }
             catch (Exception ex)
             {
@@ -244,7 +225,7 @@ namespace ChatP2P.Server
             try
             {
                 EnsurePeerExists(peerName);
-                ChatP2P.Core.LocalDbExtensionsSecurity.PeerSetNote(peerName, note ?? "");
+                LocalDbExtensionsSecurity.PeerSetNote(peerName, note ?? "");
             }
             catch (Exception ex)
             {
@@ -256,8 +237,8 @@ namespace ChatP2P.Server
         {
             try
             {
-                ChatP2P.Core.LocalDbExtensionsSecurity.PeerForgetEd25519(peerName);
-                ChatP2P.Core.LocalDbExtensionsSecurity.PeerMarkUnverified(peerName);
+                LocalDbExtensionsSecurity.PeerForgetEd25519(peerName);
+                LocalDbExtensionsSecurity.PeerMarkUnverified(peerName);
             }
             catch (Exception ex)
             {
@@ -274,8 +255,8 @@ namespace ChatP2P.Server
                     throw new ArgumentException("Invalid key length for Ed25519");
                 
                 EnsurePeerExists(peerName);
-                ChatP2P.Core.LocalDbExtensions.PeerSetEd25519_Tofu(peerName, keyBytes);
-                ChatP2P.Core.LocalDbExtensionsSecurity.PeerMarkUnverified(peerName);
+                LocalDbExtensions.PeerSetEd25519_Tofu(peerName, keyBytes);
+                LocalDbExtensionsSecurity.PeerMarkUnverified(peerName);
             }
             catch (Exception ex)
             {
@@ -289,7 +270,7 @@ namespace ChatP2P.Server
             try
             {
                 byte[] pk = null!, sk = null!;
-                ChatP2P.Core.LocalDbExtensions.IdentityEnsureEd25519(ref pk, ref sk);
+                LocalDbExtensions.IdentityEnsureEd25519(ref pk, ref sk);
                 
                 if (pk != null && pk.Length > 0)
                 {
@@ -311,7 +292,7 @@ namespace ChatP2P.Server
             var contacts = new List<string>();
             try
             {
-                var dt = ChatP2P.Core.LocalDb.Query("SELECT Name FROM Peers WHERE Trusted = 1;");
+                var dt = LocalDb.Query("SELECT Name FROM Peers WHERE Trusted = 1;");
                 foreach (DataRow row in dt.Rows)
                 {
                     var name = GetRowString(row, "Name");
@@ -332,28 +313,28 @@ namespace ChatP2P.Server
             
             try
             {
-                var existing = ChatP2P.Core.LocalDb.ExecScalar<object>(
+                var existing = LocalDb.ExecScalar<object>(
                     "SELECT COUNT(*) FROM Peers WHERE Name = @name;", 
-                    ChatP2P.Core.LocalDb.P("@name", peerName));
+                    LocalDb.P("@name", peerName));
                 
                 var count = Convert.ToInt32(existing);
                 if (count == 0)
                 {
                     var nowUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-                    ChatP2P.Core.LocalDb.ExecNonQuery(
+                    LocalDb.ExecNonQuery(
                         "INSERT INTO Peers (Name, Verified, CreatedUtc, LastSeenUtc, Trusted, TrustNote) VALUES (@name, 0, @created, @seen, 0, '');",
-                        ChatP2P.Core.LocalDb.P("@name", peerName),
-                        ChatP2P.Core.LocalDb.P("@created", nowUtc),
-                        ChatP2P.Core.LocalDb.P("@seen", nowUtc));
+                        LocalDb.P("@name", peerName),
+                        LocalDb.P("@created", nowUtc),
+                        LocalDb.P("@seen", nowUtc));
                 }
                 else
                 {
                     // Update LastSeenUtc
                     var nowUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-                    ChatP2P.Core.LocalDb.ExecNonQuery(
+                    LocalDb.ExecNonQuery(
                         "UPDATE Peers SET LastSeenUtc = @seen WHERE Name = @name;",
-                        ChatP2P.Core.LocalDb.P("@name", peerName),
-                        ChatP2P.Core.LocalDb.P("@seen", nowUtc));
+                        LocalDb.P("@name", peerName),
+                        LocalDb.P("@seen", nowUtc));
                 }
             }
             catch (Exception ex)

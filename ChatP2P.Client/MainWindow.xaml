@@ -11,7 +11,7 @@
         Background="#FF2B2B2B">
 
     <Grid>
-        <TabControl Name="mainTabControl" Background="#FF1E1E1E" BorderBrush="#FF333333">
+        <TabControl Name="mainTabControl" Background="#FF1E1E1E" BorderBrush="#FF333333" SelectionChanged="MainTabControl_SelectionChanged">
             <!-- Connection Tab -->
             <TabItem Header="Connection" Name="connectionTab" Foreground="White">
                 <Grid Margin="20" Background="#FF2B2B2B">
@@ -70,6 +70,8 @@
                             <CheckBox Name="chkVerbose" Content="Verbose Logging" Margin="0,0,25,0" 
                                       Foreground="White"/>
                             <CheckBox Name="chkEncryptRelay" Content="Encrypt Relay" Margin="0,0,25,0" 
+                                      Foreground="White"/>
+                            <CheckBox Name="chkEncryptP2P" Content="Encrypt P2P" Margin="0,0,25,0" 
                                       Foreground="White"/>
                             <CheckBox Name="chkPqRelay" Content="Post-Quantum Relay" 
                                       Foreground="White"/>
@@ -167,7 +169,15 @@
             </TabItem>
             
             <!-- Chat Windows Tab -->
-            <TabItem Header="Chat" Name="chatTab" Foreground="White">
+            <TabItem Name="chatTab" Foreground="White">
+                <TabItem.Header>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Name="chatTabHeader" Text="Chat" Foreground="White"/>
+                        <Ellipse Name="chatNotificationDot" Width="8" Height="8" 
+                                 Fill="#FFFF6B6B" Margin="5,0,0,0" 
+                                 Visibility="Collapsed"/>
+                    </StackPanel>
+                </TabItem.Header>
                 <Grid Background="#FF2B2B2B">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="300"/>
@@ -206,6 +216,12 @@
                                         </Style.Triggers>
                                     </Style>
                                 </ListView.ItemContainerStyle>
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding PeerName}" 
+                                                   Foreground="White" FontSize="14" FontWeight="SemiBold"/>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
                             </ListView>
                             
                             <Button Name="btnNewChat" Grid.Row="2" Content="+ New Chat" Height="40" 
@@ -327,6 +343,14 @@
                               Foreground="White" BorderBrush="#FFFF8C42">
                         <ListView Name="lstFriendRequests" Background="#FF404040" 
                                   Foreground="White" BorderBrush="#FF666666" Height="100">
+                            <ListView.ContextMenu>
+                                <ContextMenu Background="#FF404040">
+                                    <MenuItem Header="Clear Old Requests (7+ days)" Click="MenuItem_ClearOldRequests_Click" 
+                                              Foreground="White" Background="#FF404040"/>
+                                    <MenuItem Header="Clear All Pending Requests" Click="MenuItem_ClearAllRequests_Click" 
+                                              Foreground="White" Background="#FF404040"/>
+                                </ContextMenu>
+                            </ListView.ContextMenu>
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="From" Width="150">
@@ -408,7 +432,7 @@
                     </ListView>
                     
                     <!-- Search and Add Friend Section -->
-                    <GroupBox Grid.Row="1" Header="Add New Friend" Margin="0,20,0,15" 
+                    <GroupBox Grid.Row="2" Header="Add New Friend" Margin="0,20,0,15" 
                               Foreground="White" BorderBrush="#FF0D7377">
                         <Grid Margin="15">
                             <Grid.RowDefinitions>

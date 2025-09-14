@@ -41,9 +41,9 @@ namespace ChatP2P.Client
             try
             {
                 var response = await SendApiRequest("security", "get_my_fingerprint", new { });
-                if (response != null && response.ContainsKey("fingerprint"))
+                if (response != null && response.ContainsKey("Fingerprint"))
                 {
-                    var fp = response["fingerprint"]?.ToString() ?? "(unknown)";
+                    var fp = response["Fingerprint"]?.ToString() ?? "(unknown)";
                     lblMyFingerprint.Content = $"My fingerprint: {fp}";
                 }
                 else
@@ -71,13 +71,13 @@ namespace ChatP2P.Client
                     {
                         var peer = new PeerSecurityInfo
                         {
-                            Name = GetJsonString(peerElement, "name"),
-                            Trusted = GetJsonBool(peerElement, "trusted"),
-                            AuthOk = GetJsonBool(peerElement, "auth_ok"),
-                            Fingerprint = GetJsonString(peerElement, "fingerprint"),
-                            CreatedUtc = GetJsonString(peerElement, "created_utc"),
-                            LastSeenUtc = GetJsonString(peerElement, "last_seen_utc"),
-                            Note = GetJsonString(peerElement, "note")
+                            Name = GetJsonString(peerElement, "Name"),           // Capital N
+                            Trusted = GetJsonBool(peerElement, "Trusted"),      // Capital T  
+                            AuthOk = GetJsonBool(peerElement, "AuthOk"),        // Capital A and O
+                            Fingerprint = GetJsonString(peerElement, "Fingerprint"), // Capital F
+                            CreatedUtc = GetJsonString(peerElement, "CreatedUtc"),   // Capital C and U
+                            LastSeenUtc = GetJsonString(peerElement, "LastSeenUtc"), // Capital L, S and U
+                            Note = GetJsonString(peerElement, "Note")                // Capital N
                         };
                         _peers.Add(peer);
                     }
@@ -99,11 +99,11 @@ namespace ChatP2P.Client
                     return null;
 
                 using var client = new System.Net.Sockets.TcpClient();
-                await client.ConnectAsync(System.Net.IPAddress.Parse(serverAddress), 12345);
+                await client.ConnectAsync(System.Net.IPAddress.Parse(serverAddress), 8889);
                 
                 using var stream = client.GetStream();
                 
-                var request = new { category, action, data };
+                var request = new { Command = category, Action = action, Data = data };
                 var json = System.Text.Json.JsonSerializer.Serialize(request);
                 var buffer = Encoding.UTF8.GetBytes(json + "\n");
                 
@@ -113,7 +113,23 @@ namespace ChatP2P.Client
                 var bytesRead = await stream.ReadAsync(responseBuffer, 0, responseBuffer.Length);
                 var responseJson = Encoding.UTF8.GetString(responseBuffer, 0, bytesRead).Trim();
                 
-                return System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, object>>(responseJson);
+                var apiResponse = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, object>>(responseJson);
+                
+                // Extract the Data field from the API response  
+                if (apiResponse != null && apiResponse.ContainsKey("Success") && apiResponse.ContainsKey("Data"))
+                {
+                    var success = apiResponse["Success"];
+                    if (success is System.Text.Json.JsonElement successElement && successElement.GetBoolean())
+                    {
+                        var responseData = apiResponse["Data"];
+                        if (responseData is System.Text.Json.JsonElement dataElement)
+                        {
+                            return System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, object>>(dataElement.GetRawText());
+                        }
+                    }
+                }
+                
+                return null;
             }
             catch (Exception ex)
             {
@@ -318,10 +334,10 @@ namespace ChatP2P.Client
             try
             {
                 var response = await SendApiRequest("security", "export_my_key", new { });
-                if (response != null && response.ContainsKey("public_key_b64") && response.ContainsKey("fingerprint"))
+                if (response != null && response.ContainsKey("PublicKeyB64") && response.ContainsKey("Fingerprint"))
                 {
-                    var pubKey = response["public_key_b64"]?.ToString() ?? "";
-                    var fingerprint = response["fingerprint"]?.ToString() ?? "";
+                    var pubKey = response["PublicKeyB64"]?.ToString() ?? "";
+                    var fingerprint = response["Fingerprint"]?.ToString() ?? "";
                     var exportText = $"PubKey(Base64): {pubKey}\nFingerprint: {fingerprint}";
                     
                     Clipboard.SetText(exportText);

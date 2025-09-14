@@ -28,6 +28,9 @@ namespace ChatP2P.Server
         private static readonly Dictionary<string, IceP2PSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> _startingPeers = new(StringComparer.OrdinalIgnoreCase);
 
+        // ✅ FIX: Protection globale contre spam answers par peer
+        private static readonly HashSet<string> _answersGenerated = new(StringComparer.OrdinalIgnoreCase);
+
         // anti-doublons de candidates
         private static readonly Dictionary<string, HashSet<string>> _seenCandOut = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, HashSet<string>> _seenCandIn = new(StringComparer.OrdinalIgnoreCase);
@@ -46,7 +49,16 @@ namespace ChatP2P.Server
         public static void StartP2P(string peer, IEnumerable<string>? stunUrls = null)
         {
             if (string.IsNullOrWhiteSpace(peer)) return;
-            stunUrls ??= new string[] { "stun:stun.l.google.com:19302" };
+            
+            // NOUVEAU: Utiliser configuration adaptative optimisée si stunUrls == null
+            if (stunUrls == null)
+            {
+                OnLog?.Invoke(peer, "🚀 Using adaptive high-performance ICE configuration");
+            }
+            else
+            {
+                OnLog?.Invoke(peer, $"📡 Using custom ICE servers: {stunUrls.Count()} servers");
+            }
 
             lock (_gate)
             {
@@ -77,7 +89,7 @@ namespace ChatP2P.Server
                 // Reset dedup OUT/IN pour un nouveau cycle de nego
                 ResetDedup(peer);
 
-                var sess = new IceP2PSession(stunUrls, "dc", isCaller: true);
+                var sess = new IceP2PSession(stunUrls, "data", isCaller: true);
                 WireSessionHandlers(peer, sess);
                 lock (_gate)
                 {
@@ -109,7 +121,34 @@ namespace ChatP2P.Server
                 _sessions.TryGetValue(peer, out s);
             }
             
-            if (s == null || !s.IsOpen) return false;
+            if (s == null || !s.IsOpen)
+            {
+                OnLog?.Invoke(peer, $"[DEBUG] TrySendText: datachannel not ready (s={s != null}, isOpen={s?.IsOpen ?? false})");
+
+                // Attendre jusqu'à 2 secondes pour que le datachannel s'ouvre
+                if (s != null)
+                {
+                    for (int i = 0; i < 20; i++) // 20 x 100ms = 2 secondes max
+                    {
+                        if (s.IsOpen)
+                        {
+                            OnLog?.Invoke(peer, $"[DEBUG] TrySendText: datachannel opened after {i * 100}ms");
+                            break;
+                        }
+                        System.Threading.Thread.Sleep(100);
+                    }
+
+                    if (!s.IsOpen)
+                    {
+                        OnLog?.Invoke(peer, "[DEBUG] TrySendText: datachannel still not open after 2s, falling back to relay");
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
             
             try
             {
@@ -168,26 +207,64 @@ namespace ChatP2P.Server
         public static bool IsP2PConnected(string peer)
         {
             if (string.IsNullOrWhiteSpace(peer)) return false;
-            
+
             IceP2PSession? s = null;
             lock (_gate)
             {
                 _sessions.TryGetValue(peer, out s);
             }
 
+            if (s == null) return false;
+
             bool hasSession = s != null;
             bool isOpen = hasSession && s!.IsOpen;
+
+            // ✅ DEBUG: Console output pour debugging direct
+            Console.WriteLine($"🔍 [P2P-CONN] IsP2PConnected({peer}): hasSession={hasSession}, isOpen={isOpen}");
             OnLog?.Invoke(peer, $"[DEBUG] IsP2PConnected: hasSession={hasSession}, isOpen={isOpen}");
 
-            // TEMPORAIRE: utiliser hasSession au lieu de isOpen car le datachannel prend du temps
-            // TODO: fix le timing du datachannel plus tard
-            return hasSession;  // Au lieu de: s != null && s.IsOpen
+            // ✅ FIX: Utiliser même logique que TrySendText - attendre que DataChannel s'ouvre
+            if (!isOpen)
+            {
+                Console.WriteLine($"⏳ [P2P-CONN] IsP2PConnected({peer}): waiting for datachannel to open...");
+                OnLog?.Invoke(peer, "[DEBUG] IsP2PConnected: waiting for datachannel to open...");
+
+                // Attendre jusqu'à 2 secondes pour que le datachannel s'ouvre (même logique que TrySendText)
+                for (int i = 0; i < 20; i++) // 20 x 100ms = 2 secondes max
+                {
+                    if (s.IsOpen)
+                    {
+                        Console.WriteLine($"✅ [P2P-CONN] IsP2PConnected({peer}): datachannel opened after {i * 100}ms");
+                        OnLog?.Invoke(peer, $"[DEBUG] IsP2PConnected: datachannel opened after {i * 100}ms");
+                        return true;
+                    }
+                    System.Threading.Thread.Sleep(100);
+                }
+
+                Console.WriteLine($"❌ [P2P-CONN] IsP2PConnected({peer}): datachannel still not open after 2s");
+                OnLog?.Invoke(peer, "[DEBUG] IsP2PConnected: datachannel still not open after 2s");
+                return false; // DataChannel pas ouvert après 2s
+            }
+
+            return true; // Session existe ET DataChannel ouvert
         }
 
         public static void HandleOffer(string fromPeer, string sdp, IEnumerable<string>? stunUrls = null)
         {
             if (string.IsNullOrWhiteSpace(fromPeer) || string.IsNullOrWhiteSpace(sdp)) return;
-            stunUrls ??= new string[] { "stun:stun.l.google.com:19302" };
+
+            // ✅ FIX: Vérifier si answer déjà générée pour ce peer
+            lock (_gate)
+            {
+                if (_answersGenerated.Contains(fromPeer))
+                {
+                    OnLog?.Invoke(fromPeer, "⚠️ GLOBAL: Answer already generated for this peer, ignoring duplicate offer");
+                    return;
+                }
+            }
+
+            // ✅ FIX: Permettre mode adaptatif (stunUrls = null) au lieu de forcer legacy mode
+            // stunUrls ??= new string[] { "stun:stun.l.google.com:19302" }; // Ancien code
 
             IceP2PSession? sess = null;
             bool exists;
@@ -198,7 +275,7 @@ namespace ChatP2P.Server
 
             if (!exists || sess == null)
             {
-                sess = new IceP2PSession(stunUrls, "dc", isCaller: false);
+                sess = new IceP2PSession(stunUrls, "data", isCaller: false);
                 WireSessionHandlers(fromPeer, sess);
                 lock (_gate)
                 {
@@ -342,6 +419,13 @@ namespace ChatP2P.Server
                     var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(localSdp));
                     if (string.Equals(kind, "answer", StringComparison.OrdinalIgnoreCase))
                     {
+                        // ✅ FIX: Marquer ce peer comme ayant généré une answer
+                        lock (_gate)
+                        {
+                            _answersGenerated.Add(peer);
+                            OnLog?.Invoke(peer, $"✅ GLOBAL: Answer generated and peer marked - no more answers allowed");
+                        }
+
                         _sendSignal?.Invoke(peer, $"{TAG_ICE_ANSWER}{_localName}:{peer}:{b64}");
                     }
                     else
@@ -415,6 +499,10 @@ namespace ChatP2P.Server
             {
                 _seenCandOut.Remove(peer);
                 _seenCandIn.Remove(peer);
+
+                // ✅ FIX: Reset aussi la protection answer pour permettre nouvelle négociation
+                _answersGenerated.Remove(peer);
+                OnLog?.Invoke(peer, "🔄 GLOBAL: Answer protection reset for new negotiation");
             }
         }
 

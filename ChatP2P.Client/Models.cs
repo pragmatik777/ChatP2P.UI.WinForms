@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Linq;
 
 namespace ChatP2P.Client
 {
@@ -54,6 +55,9 @@ namespace ChatP2P.Client
         private string _status = "Offline";
         private bool _isVerified = false;
         private DateTime _addedDate = DateTime.Now;
+        private string _lastSeen = "Never";
+        private string _trustNote = "";
+        private bool _isPinned = false;
 
         public string PeerName
         {
@@ -77,6 +81,24 @@ namespace ChatP2P.Client
         {
             get => _addedDate;
             set { _addedDate = value; OnPropertyChanged(nameof(AddedDate)); }
+        }
+
+        public string LastSeen
+        {
+            get => _lastSeen;
+            set { _lastSeen = value; OnPropertyChanged(nameof(LastSeen)); }
+        }
+
+        public string TrustNote
+        {
+            get => _trustNote;
+            set { _trustNote = value; OnPropertyChanged(nameof(TrustNote)); }
+        }
+
+        public bool IsPinned
+        {
+            get => _isPinned;
+            set { _isPinned = value; OnPropertyChanged(nameof(IsPinned)); }
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -219,8 +241,57 @@ namespace ChatP2P.Client
         public int ChunkSize { get; set; } = 8192;
         public int MaxFileSize { get; set; } = 104857600; // 100MB
         public bool UseCompression { get; set; } = true;
-        public string[] StunServers { get; set; } = { "stun:stun.l.google.com:19302" };
+        public IceServerConfig[] IceServers { get; set; } = GetDefaultIceServers();
         public int ConnectionTimeout { get; set; } = 30000; // 30 seconds
+        public int IceGatheringTimeout { get; set; } = 15000; // 15 seconds
+        public bool EnableNatTypeDetection { get; set; } = true;
+        public int MaxRetryAttempts { get; set; } = 3;
+
+        // Legacy property for compatibility
+        public string[] StunServers 
+        { 
+            get => IceServers?.Where(s => s.Type == "stun").Select(s => s.Urls[0]).ToArray() ?? new string[0];
+            set => throw new NotSupportedException("Use IceServers property instead");
+        }
+
+        private static IceServerConfig[] GetDefaultIceServers()
+        {
+            return new[]
+            {
+                // Multiple STUN servers for better reliability
+                new IceServerConfig { Type = "stun", Urls = new[] { "stun:stun.l.google.com:19302" } },
+                new IceServerConfig { Type = "stun", Urls = new[] { "stun:stun1.l.google.com:19302" } },
+                new IceServerConfig { Type = "stun", Urls = new[] { "stun:stun2.l.google.com:19302" } },
+                new IceServerConfig { Type = "stun", Urls = new[] { "stun:stun.cloudflare.com:3478" } },
+                new IceServerConfig { Type = "stun", Urls = new[] { "stun:openrelay.metered.ca:80" } },
+                
+                // Free TURN servers for NAT traversal (add authentication as needed)
+                new IceServerConfig 
+                { 
+                    Type = "turn", 
+                    Urls = new[] { "turn:openrelay.metered.ca:80" },
+                    Username = "openrelayproject",
+                    Credential = "openrelayproject"
+                },
+                new IceServerConfig 
+                { 
+                    Type = "turn", 
+                    Urls = new[] { "turn:openrelay.metered.ca:443", "turn:openrelay.metered.ca:443?transport=tcp" },
+                    Username = "openrelayproject", 
+                    Credential = "openrelayproject"
+                }
+            };
+        }
+    }
+
+    public class IceServerConfig
+    {
+        public string Type { get; set; } = "stun"; // "stun" or "turn"
+        public string[] Urls { get; set; } = new string[0];
+        public string? Username { get; set; }
+        public string? Credential { get; set; }
+        public string? CredentialType { get; set; } = "password";
+        public bool Enabled { get; set; } = true;
     }
 
     public class FileTransferInfo

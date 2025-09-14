@@ -1,20 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dotnet clean:*)",
       "Bash(dotnet build:*)",
       "Read(//c/VM1/Users/User/Desktop/ChatP2P_Logs/**)",
-      "Bash(dir:*)",
-      "Read(//c/VM2/Users/User/Desktop/**)",
-      "Bash(find:*)",
-      "Read(//c/VM2/Users/User/**)",
-      "Read(//c/**)",
+      "Read(//c/VM2/Users/User/Desktop/ChatP2P_Logs/**)",
       "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(dotnet new:*)",
-      "Bash(dotnet sln add:*)",
-      "Bash(dotnet add:*)"
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []

@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -15,6 +16,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using ChatP2P.Crypto;
 
 namespace ChatP2P.Client
 {
@@ -27,6 +29,13 @@ namespace ChatP2P.Client
         private ChatSession? _currentChatSession;
         private FileTransferInfo? _currentFileTransfer;
         private P2PConfig _p2pConfig = new();
+        private DispatcherTimer? _refreshTimer;
+        private DispatcherTimer? _fileTransferTimer;
+        private RelayClient? _relayClient;
+        private P2PDirectClient? _p2pDirectClient;
+        private HashSet<string> _onlinePeers = new();
+        private bool _hasNewMessages = false;
+        private string? _lastMessageSender = null;
 
         // Collections for data binding
         private readonly ObservableCollection<PeerInfo> _peers = new();
@@ -35,11 +44,40 @@ namespace ChatP2P.Client
         private readonly ObservableCollection<PeerInfo> _searchResults = new();
         private readonly ObservableCollection<FriendRequest> _friendRequests = new();
         private readonly Dictionary<string, List<ChatMessage>> _chatHistory = new();
+        
+        // Local contact management for decentralized architecture
+        private List<ContactInfo> _localContacts = new List<ContactInfo>();
+        private readonly string _contactsFilePath;
+        private readonly HashSet<string> _processedAcceptedRequests = new(); // Track processed requests
+
+        // ✅ NOUVEAU: Stocker l'IP détectée pour l'envoyer dans les API calls
+        private string _detectedClientIP = "127.0.0.1";
+
+        // ✅ ANTI-SPAM ICE: Tracking des signaux ICE déjà traités pour éviter boucles infinies
+        private readonly HashSet<string> _processedIceSignals = new();
+        private readonly object _iceSignalLock = new();
+
+        // ✅ NOUVEAU: WebRTC décentralisé pour connexions P2P directes
+        private WebRTCDirectClient? _webrtcClient;
+
+        // Variables manquantes pour architecture client/serveur
+        private string _clientId = Environment.MachineName; // Default client ID
 
         public MainWindow()
         {
             InitializeComponent();
+            
+            // Initialize local contacts file path
+            var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var appFolder = Path.Combine(appDataPath, "ChatP2P");
+            Directory.CreateDirectory(appFolder);
+            _contactsFilePath = Path.Combine(appFolder, "local_contacts.json");
             InitializeCollections();
+            InitializeRefreshTimer();
+            InitializeFileTransferTimer();
+            InitializeCheckboxEventHandlers();
+            InitializeP2PDirectClient();
+            LoadLocalContacts(); // Load contacts from local file
             this.Loaded += MainWindow_Loaded;
             this.Closing += MainWindow_Closing;
         }
@@ -56,6 +94,56 @@ namespace ChatP2P.Client
             LoadSettings();
         }
 
+        private void InitializeRefreshTimer()
+        {
+            _refreshTimer = new DispatcherTimer();
+            _refreshTimer.Interval = TimeSpan.FromSeconds(5); // Refresh every 5 seconds
+            _refreshTimer.Tick += async (sender, e) =>
+            {
+                if (_isConnectedToServer)
+                {
+                    await RefreshFriendRequests();
+                    await RefreshPeersList(); // Also refresh peers list  
+                    await CheckForAcceptedRequests(); // Check if our sent requests were accepted
+                    // Removed spam log - only log significant events, not routine refreshes
+                }
+            };
+            _refreshTimer.Start(); // START THE TIMER!
+        }
+
+        private void InitializeFileTransferTimer()
+        {
+            _fileTransferTimer = new DispatcherTimer();
+            _fileTransferTimer.Interval = TimeSpan.FromMilliseconds(500); // Check every 500ms for responsive UI
+            _fileTransferTimer.Tick += async (sender, e) =>
+            {
+                if (_isConnectedToServer)
+                {
+                    await CheckFileTransferProgress();
+                }
+            };
+            _fileTransferTimer.Start();
+        }
+
+        private void InitializeP2PDirectClient()
+        {
+            var displayName = txtDisplayName?.Text?.Trim() ?? Environment.UserName;
+            _p2pDirectClient = new P2PDirectClient(displayName);
+            
+            // Start P2P server in background to receive direct connections
+            _ = Task.Run(async () => 
+            {
+                try
+                {
+                    await _p2pDirectClient.StartP2PServerAsync();
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [P2P-DIRECT] Failed to start server: {ex.Message}");
+                }
+            });
+        }
+
         private void LoadSettings()
         {
             try
@@ -66,6 +154,7 @@ namespace ChatP2P.Client
                 chkStrictTrust.IsChecked = Properties.Settings.Default.StrictTrust;
                 chkVerbose.IsChecked = Properties.Settings.Default.VerboseLogging;
                 chkEncryptRelay.IsChecked = Properties.Settings.Default.EncryptRelay;
+                chkEncryptP2P.IsChecked = GetEncryptP2PSetting();
                 chkPqRelay.IsChecked = Properties.Settings.Default.PqRelay;
                 chkAutoConnect.IsChecked = Properties.Settings.Default.AutoConnect;
             }
@@ -84,6 +173,7 @@ namespace ChatP2P.Client
                 Properties.Settings.Default.StrictTrust = chkStrictTrust.IsChecked ?? false;
                 Properties.Settings.Default.VerboseLogging = chkVerbose.IsChecked ?? false;
                 Properties.Settings.Default.EncryptRelay = chkEncryptRelay.IsChecked ?? false;
+                SetEncryptP2PSetting(chkEncryptP2P.IsChecked ?? false);
                 Properties.Settings.Default.PqRelay = chkPqRelay.IsChecked ?? false;
                 Properties.Settings.Default.AutoConnect = chkAutoConnect.IsChecked ?? false;
                 
@@ -97,6 +187,9 @@ namespace ChatP2P.Client
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            // ✅ NOUVEAU: Configure network IPs AVANT toute connexion P2P
+            ConfigureClientNetworkIPs();
+
             // Auto-connect only if checkbox is checked
             if (chkAutoConnect.IsChecked == true)
             {
@@ -107,8 +200,1124 @@ namespace ChatP2P.Client
 
         private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
+            _refreshTimer?.Stop();
             SaveSettings();
             await DisconnectFromServer();
+        }
+
+        // ===== RelayClient Management =====
+        /// <summary>
+        /// ✅ NOUVEAU: Envoyer un signal WebRTC via le serveur relay
+        /// </summary>
+        private async Task SendWebRTCSignal(string signalType, string fromPeer, string toPeer, string signalData)
+        {
+            try
+            {
+                await LogToFile($"📡 [SIGNAL-RELAY] Sending {signalType}: {fromPeer} → {toPeer}");
+                Console.WriteLine($"📡 [SIGNAL-RELAY] Sending {signalType}: {fromPeer} → {toPeer}");
+
+                // ✅ FIX: Actually send the signal via API to server relay
+                var response = await SendApiRequest("p2p", "ice_signal", new
+                {
+                    ice_type = signalType,
+                    from_peer = fromPeer,
+                    to_peer = toPeer,
+                    ice_data = signalData
+                });
+
+                if (response?.Success == true)
+                {
+                    await LogToFile($"✅ [SIGNAL-RELAY] {signalType} sent successfully: {fromPeer} → {toPeer}");
+                    Console.WriteLine($"✅ [SIGNAL-RELAY] {signalType} sent successfully: {fromPeer} → {toPeer}");
+                }
+                else
+                {
+                    await LogToFile($"❌ [SIGNAL-RELAY] Failed to send {signalType}: {response?.Error}");
+                    Console.WriteLine($"❌ [SIGNAL-RELAY] Failed to send {signalType}: {response?.Error}");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [SIGNAL-RELAY] Error sending {signalType}: {ex.Message}");
+                Console.WriteLine($"❌ [SIGNAL-RELAY] Error sending {signalType}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Initialiser le client WebRTC pour connexions P2P directes
+        /// </summary>
+        private void InitializeWebRTCClient()
+        {
+            try
+            {
+                _webrtcClient?.Dispose(); // Cleanup précédent si existant
+
+                _webrtcClient = new WebRTCDirectClient(_clientId);
+
+                // Event handlers
+                _webrtcClient.MessageReceived += (peer, message) =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        // Afficher le message reçu via WebRTC direct
+                        var timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+                        OnChatMessageReceived(peer, timestamp, message);
+                    });
+                };
+
+                _webrtcClient.ConnectionStatusChanged += async (peer, connected) =>
+                {
+                    await Dispatcher.InvokeAsync(async () =>
+                    {
+                        await LogToFile($"[P2P-STATUS] {peer}: {(connected ? "Connected" : "Disconnected")}");
+                        Console.WriteLine($"[P2P-STATUS] {peer}: {(connected ? "Connected" : "Disconnected")}");
+
+                        if (connected)
+                        {
+                            // ✅ FIX: Notifier le serveur que la connexion P2P est prête
+                            await Task.Delay(1000); // Attendre 1 seconde pour que la connexion se stabilise
+
+                            // Notifier le serveur via API que cette connexion P2P est active
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await LogToFile($"[P2P-NOTIFY] Notifying server of P2P connection with {peer}");
+
+                                    var response = await SendApiRequest("p2p", "notify_connection_ready", new
+                                    {
+                                        from_peer = _clientId,
+                                        to_peer = peer,
+                                        status = "ready"
+                                    });
+
+                                    if (response?.Success == true)
+                                    {
+                                        await LogToFile($"[P2P-NOTIFY] Server notified of P2P readiness with {peer}");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    await LogToFile($"[P2P-NOTIFY] Failed to notify server: {ex.Message}");
+                                }
+                            });
+                        }
+                    });
+                };
+
+                _webrtcClient.LogEvent += (logMessage) =>
+                {
+                    _ = LogToFile(logMessage);
+                };
+
+                // ✅ CRITIQUE: Handle file data received via WebRTC direct
+                _webrtcClient.FileDataReceived += async (peer, fileData) =>
+                {
+                    await Dispatcher.InvokeAsync(async () =>
+                    {
+                        await LogToFile($"[FILE-RX] Received {fileData.Length} bytes from {peer}");
+                        await HandleFileDataReceived(peer, fileData);
+                    });
+                };
+
+                // ✅ NOUVEAU: Handle file transfer progress updates
+                _webrtcClient.FileTransferProgress += (peer, progress) =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        UpdateFileTransferProgress(progress);
+                    });
+                };
+
+                // ✅ FIX: Handle ICE candidates generated locally and send them to peers
+                _webrtcClient.ICECandidateGenerated += async (fromPeer, toPeer, candidate) =>
+                {
+                    try
+                    {
+                        await LogToFile($"[ICE-OUT] Sending candidate: {fromPeer} → {toPeer}");
+
+                        // ✅ CORRECTED: Send raw candidate string - server will handle JSON wrapping
+                        await SendWebRTCSignal("candidate", fromPeer, toPeer, candidate);
+                    }
+                    catch (Exception ex)
+                    {
+                        await LogToFile($"[ICE-OUT] Error sending candidate: {ex.Message}");
+                    }
+                };
+
+                _ = LogToFile($"[INIT] WebRTC Direct Client initialized for {_clientId}");
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[INIT] Error initializing WebRTC client: {ex.Message}");
+            }
+        }
+
+        private async Task InitializeRelayClient(string serverIp)
+        {
+            try
+            {
+                var displayName = txtDisplayName.Text.Trim();
+                if (string.IsNullOrEmpty(displayName))
+                {
+                    displayName = Environment.MachineName;
+                    txtDisplayName.Text = displayName;
+                }
+
+                _relayClient = new RelayClient(serverIp);
+                
+                // Subscribe to events
+                _relayClient.FriendRequestReceived += OnFriendRequestReceived;
+                _relayClient.FriendRequestAccepted += OnFriendRequestAccepted;
+                _relayClient.FriendRequestRejected += OnFriendRequestRejected;
+                _relayClient.PrivateMessageReceived += OnPrivateMessageReceived;
+                _relayClient.PeerListUpdated += OnPeerListUpdated;
+                _relayClient.ChatMessageReceived += OnChatMessageReceived;
+                // ✅ FIX: Désactiver legacy ICE handler pour éviter double traitement avec WebRTC
+                // _relayClient.IceSignalReceived += OnIceSignalReceived;
+                _relayClient.StatusSyncReceived += OnStatusSyncReceived;
+                _relayClient.FileMetadataRelayReceived += OnFileMetadataRelayReceived;
+                _relayClient.FileChunkRelayReceived += OnFileChunkRelayReceived;
+                // NOUVEAU: WebRTC Signaling Event Handlers
+                _relayClient.WebRTCInitiateReceived += OnWebRTCInitiateReceived;
+                _relayClient.WebRTCSignalReceived += OnWebRTCSignalReceived;
+
+                // ✅ REMOVED: VB.NET P2PManager - now using C# server API directly
+                Console.WriteLine("✅ [P2P-INIT] Using C# server API directly (no VB.NET P2PManager)");
+                await LogToFile("✅ [P2P-INIT] Using C# server API directly (no VB.NET P2PManager)");
+                
+                var connected = await _relayClient.ConnectAsync(displayName);
+                if (connected)
+                {
+                    await LogToFile($"RelayClient connected as {displayName}", forceLog: true);
+                }
+                else
+                {
+                    await LogToFile("Failed to connect RelayClient", forceLog: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error initializing RelayClient: {ex.Message}", forceLog: true);
+            }
+        }
+
+        // ===== Server Notification Methods =====
+        private async Task NotifyServerFriendRequestReceived(string fromPeer, string toPeer, string publicKey, string message)
+        {
+            try
+            {
+                var requestData = new
+                {
+                    fromPeer = fromPeer,
+                    toPeer = toPeer,
+                    publicKey = publicKey,
+                    message = message
+                };
+                
+                var response = await SendApiRequest("contacts", "receive_friend_request", requestData);
+                await LogToFile($"Server notified of friend request: {fromPeer} → {toPeer}, Success: {response?.Success}", forceLog: true);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error notifying server of friend request: {ex.Message}", forceLog: true);
+            }
+        }
+
+        // ===== RelayClient Event Handlers =====
+        private void OnFriendRequestReceived(string fromPeer, string toPeer, string publicKey, string message)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                try
+                {
+                    // Ajouter la friend request à la liste UI
+                    var friendRequest = new FriendRequest
+                    {
+                        FromPeer = fromPeer,
+                        ToPeer = toPeer,
+                        Message = message,
+                        PublicKey = publicKey,
+                        RequestDate = DateTime.Now,
+                        Status = "pending"
+                    };
+
+                    _friendRequests.Add(friendRequest);
+                    await LogToFile($"Friend request received: {fromPeer} → {toPeer}", forceLog: true);
+                    
+                    // TOFU: Verify or store the peer's public key
+                    if (!string.IsNullOrEmpty(publicKey) && publicKey != "pending_key")
+                    {
+                        var tofuResult = await VerifyTofuPublicKey(fromPeer, publicKey);
+                        if (!tofuResult)
+                        {
+                            // Key mismatch detected - could be a security issue
+                            MessageBox.Show($"⚠️ Security Warning: Public key mismatch detected for {fromPeer}!\n\n" +
+                                          "This could indicate a potential security issue. The peer's public key " +
+                                          "has changed since your last interaction. Please verify this is expected " +
+                                          "before accepting the friend request.", 
+                                          "TOFU Security Alert", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        }
+                    }
+                    else
+                    {
+                        await LogToFile($"TOFU: Skipping verification for {fromPeer} - no valid public key provided", forceLog: true);
+                    }
+                    
+                    // NOTE: Server persistence is now handled by RelayHub event handler
+                    // No need to call NotifyServerFriendRequestReceived here
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"Error handling friend request: {ex.Message}", forceLog: true);
+                }
+            });
+        }
+
+        private void OnFriendRequestAccepted(string fromPeer, string toPeer)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                // La demande a été acceptée - mettre à jour la DB locale et retirer de la liste
+                try
+                {
+                    await LogToFile($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}", forceLog: true);
+                    Console.WriteLine($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}");
+                    
+                    await DatabaseService.Instance.SetPeerTrusted(toPeer, true, $"Trusted by {toPeer} via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                    await DatabaseService.Instance.SetPeerVerified(toPeer, true); // Mark as verified contact
+                    await DatabaseService.Instance.LogSecurityEvent(toPeer, "FRIEND_ACCEPT_SENDER", $"Our friend request was accepted by {toPeer}, marking them as trusted and verified");
+                    await LogToFile($"Friend request accepted: {fromPeer} ← {toPeer} (now trusted)", forceLog: true);
+                    
+                    // NOUVEAU: Synchroniser le nouveau statut AUTH avec le peer
+                    await SyncStatusWithPeer(toPeer, "AUTH", true);
+                    await LogToFile($"🔐 [TOFU-SYNC] AUTH status synced with {toPeer}: trusted=true");
+                    
+                    // Add the accepter to our local contacts (bidirectional contact)
+                    await LogToFile($"📝 [BIDIRECTIONAL] Adding {toPeer} as local contact on {Environment.MachineName}", forceLog: true);
+                    Console.WriteLine($"📝 [BIDIRECTIONAL] Adding {toPeer} as local contact on {Environment.MachineName}");
+                    await AddLocalContact(toPeer, "Offline"); // Will be updated with real status
+                    
+                    // Supprimer de la liste des pending requests
+                    var requestToRemove = _friendRequests.FirstOrDefault(r => r.FromPeer == fromPeer && r.ToPeer == toPeer);
+                    if (requestToRemove != null)
+                    {
+                        _friendRequests.Remove(requestToRemove);
+                    }
+                    
+                    // Refresh contacts list
+                    await RefreshLocalContactsUI();
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"Error handling friend request acceptance: {ex.Message}", forceLog: true);
+                }
+            });
+        }
+
+        private void OnFriendRequestRejected(string fromPeer, string toPeer)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                await LogToFile($"Friend request rejected: {fromPeer} ← {toPeer}", forceLog: true);
+                
+                // Supprimer de la liste des pending requests
+                var requestToRemove = _friendRequests.FirstOrDefault(r => r.FromPeer == fromPeer && r.ToPeer == toPeer);
+                if (requestToRemove != null)
+                {
+                    _friendRequests.Remove(requestToRemove);
+                }
+            });
+        }
+
+        private void OnPrivateMessageReceived(string fromPeer, string toPeer, string message)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                await LogToFile($"Private message received: {fromPeer} → {toPeer}: {message}", forceLog: true);
+                // TODO: Ajouter à l'historique des messages et afficher dans le chat
+            });
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Callback pour P2PManager.Init() - envoie les signals ICE au serveur C# API
+        /// Convertit ancien format VB.NET vers nouveau format JSON API
+        /// </summary>
+        private async Task SendP2PSignalToServer(string targetPeer, string signal)
+        {
+            try
+            {
+                await LogToFile($"🔄 [P2P-SIGNAL-OUT] Sending P2P signal to server: {targetPeer} | Signal: {signal.Substring(0, Math.Min(100, signal.Length))}...");
+                Console.WriteLine($"🔄 [P2P-SIGNAL-OUT] Sending P2P signal to server: {targetPeer}");
+
+                // Parser l'ancien format: "ICE_ANSWER:VM2:VM1:base64data" ou "ICE_OFFER:VM2:VM1:base64data"
+                if (signal.StartsWith("ICE_ANSWER:") || signal.StartsWith("ICE_OFFER:") || signal.StartsWith("ICE_CAND:"))
+                {
+                    var parts = signal.Split(':', 4);
+                    if (parts.Length >= 4)
+                    {
+                        var iceType = parts[0].Replace("ICE_", "").ToLower(); // "ANSWER" -> "answer"
+                        var fromPeer = parts[1]; // Normalement c'est nous
+                        var toPeer = parts[2];   // Le destinataire
+                        var base64Data = parts[3];
+
+                        // Décoder le SDP/candidate depuis base64
+                        var sdpData = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(base64Data));
+
+                        // Envoyer via l'API serveur C# - laisser SendApiRequest sérialiser tout
+                        object iceDataObject;
+                        if (iceType == "cand")
+                        {
+                            // Pour les candidates, format simple
+                            iceDataObject = sdpData;
+                        }
+                        else
+                        {
+                            // Pour offer/answer, objet avec type et sdp (pas de JSON string)
+                            iceDataObject = new { type = iceType, sdp = sdpData };
+                        }
+
+                        var response = await SendApiRequest("p2p", "ice_signal", new
+                        {
+                            ice_type = iceType,
+                            from_peer = fromPeer,
+                            to_peer = toPeer,
+                            ice_data = iceDataObject
+                        });
+
+                        if (response?.Success == true)
+                        {
+                            await LogToFile($"✅ [P2P-SIGNAL-OUT] {iceType.ToUpper()} sent successfully: {fromPeer} → {toPeer}");
+                            Console.WriteLine($"✅ [P2P-SIGNAL-OUT] {iceType.ToUpper()} sent successfully: {fromPeer} → {toPeer}");
+                        }
+                        else
+                        {
+                            await LogToFile($"❌ [P2P-SIGNAL-OUT] Failed to send {iceType}: {response?.Error ?? "Unknown error"}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [P2P-SIGNAL-OUT] Error sending P2P signal: {ex.Message}");
+                Console.WriteLine($"❌ [P2P-SIGNAL-OUT] Error sending P2P signal: {ex.Message}");
+            }
+        }
+
+        private void OnPeerListUpdated(List<string> peers)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                await LogToFile($"Peer list updated: {peers.Count} peers online", forceLog: true);
+                
+                // Update online peers list and refresh contacts UI
+                _onlinePeers.Clear();
+                foreach (var peer in peers)
+                {
+                    _onlinePeers.Add(peer);
+                }
+                
+                // Refresh contacts UI to show updated online status
+                await RefreshLocalContactsUI();
+            });
+        }
+
+        private void OnChatMessageReceived(string fromPeer, string timestamp, string content)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                await LogToFile($"💬 [CHAT-RX] Message reçu de {fromPeer}: {content}", forceLog: true);
+                Console.WriteLine($"💬 [CHAT-RX] Message reçu de {fromPeer}: {content}");
+
+                // ✅ ROBUSTE: Validation JSON complète pour STATUS_SYNC
+                if (IsStatusSyncMessage(content))
+                {
+                    await LogToFile($"🔄 [STATUS-SYNC-FILTER] Handling STATUS_SYNC message from {fromPeer}", forceLog: true);
+                    await HandleStatusSyncMessage(fromPeer, content);
+                    return; // Ne pas traiter comme message chat normal
+                }
+
+                // ✅ NOUVEAU: Rediriger les messages de transfert de fichiers P2P vers le serveur
+                if (IsFileTransferMessage(content))
+                {
+                    await LogToFile($"📁 [FILE-TRANSFER-RX] Redirecting file transfer message from {fromPeer} to server API", forceLog: true);
+                    await HandleFileTransferMessage(fromPeer, content);
+                    return; // Ne pas traiter comme message chat normal
+                }
+
+                // ✅ SÉCURITÉ: Filtrer les messages corrompus ou partiels
+                if (IsCorruptedMessage(content))
+                {
+                    await LogToFile($"🚨 [MSG-CORRUPTED] Ignoring corrupted/fragmented message from {fromPeer}: {content}", forceLog: true);
+                    return;
+                }
+
+                // Créer un objet ChatMessage
+                var chatMessage = new ChatMessage
+                {
+                    Content = content,
+                    Sender = fromPeer,
+                    IsFromMe = false,
+                    Timestamp = DateTime.TryParse(timestamp, out var parsedTime) ? parsedTime : DateTime.Now,
+                    Type = MessageType.Text
+                };
+
+                // Ajouter à l'historique du chat avec ce peer
+                AddMessageToHistory(fromPeer, chatMessage);
+
+                // Si c'est le chat actuellement ouvert, ajouter à l'UI
+                if (_currentChatSession?.PeerName == fromPeer)
+                {
+                    AddMessageToUI(chatMessage);
+                    await LogToFile($"💬 [CHAT-UI] Message ajouté à l'UI pour chat ouvert avec {fromPeer}");
+                }
+                else
+                {
+                    await LogToFile($"💬 [CHAT-HISTORY] Message ajouté à l'historique pour {fromPeer} (chat non ouvert)");
+                    
+                    // Afficher notification sur l'onglet Chat
+                    ShowChatNotification(fromPeer);
+                    await LogToFile($"🔔 [NOTIFICATION] Point rouge affiché sur onglet Chat pour {fromPeer}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// ✅ ROBUSTE: Vérifier si un message est un STATUS_SYNC valide avec JSON parsing complet
+        /// </summary>
+        private bool IsStatusSyncMessage(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return false;
+
+            try
+            {
+                // Tentative de parsing JSON complet
+                var jsonDoc = System.Text.Json.JsonDocument.Parse(content);
+                var root = jsonDoc.RootElement;
+
+                // Vérifier si c'est un STATUS_SYNC avec structure valide
+                return root.TryGetProperty("type", out var typeElement) &&
+                       typeElement.GetString() == "STATUS_SYNC" &&
+                       root.TryGetProperty("peer", out _) &&
+                       root.TryGetProperty("status_type", out _) &&
+                       root.TryGetProperty("value", out _);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Pas un JSON valide, vérifier si c'est une partie de STATUS_SYNC
+                return content.Contains("\"type\":\"STATUS_SYNC\"") ||
+                       content.Contains("STATUS_SYNC") ||
+                       content.Contains("\"status_type\"") ||
+                       content.Contains("\"peer\":");
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// ✅ SÉCURITÉ: Détecter les messages corrompus ou fragmentés
+        /// ✅ EXCEPTION: Permettre les messages FILE_CHUNK et FILE_METADATA (transferts fichiers P2P)
+        /// </summary>
+        private bool IsCorruptedMessage(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return true;
+
+            // ✅ EXCEPTION: Ne pas filtrer les messages de transfert de fichiers P2P
+            if (IsFileTransferMessage(content))
+                return false;
+
+            // Détecter fragments JSON suspects
+            if (content.Length < 10 && (content.Contains("{") || content.Contains("}") || content.Contains("\"")))
+                return true;
+
+            // Détecter des patterns de corruption typiques
+            if (content.Trim().EndsWith("}") && !content.Trim().StartsWith("{"))
+                return true;
+
+            if (content.Trim().StartsWith("{") && !content.Trim().EndsWith("}") && content.Length < 50)
+                return true;
+
+            // Détecter des caractères de contrôle ou binaires
+            return content.Any(c => char.IsControl(c) && c != '\n' && c != '\r' && c != '\t');
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Détecter les messages de transfert de fichiers P2P
+        /// </summary>
+        private bool IsFileTransferMessage(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+                return false;
+
+            // Détecter messages FILE_CHUNK et FILE_METADATA (P2P direct)
+            return content.Contains("\"type\":\"FILE_CHUNK\"") ||
+                   content.Contains("\"type\":\"FILE_METADATA\"") ||
+                   content.Contains("\"type\":\"FILE_METADATA_WEBRTC\"");
+        }
+
+        private async void OnIceSignalReceived(string iceMessage)
+        {
+            try
+            {
+                // ✅ ANTI-SPAM: Vérifier si ce signal ICE a déjà été traité
+                var signalKey = $"LEGACY:{iceMessage.Substring(0, Math.Min(100, iceMessage.Length))}";
+
+                bool isNewSignal = false;
+                lock (_iceSignalLock)
+                {
+                    if (_processedIceSignals.Contains(signalKey))
+                    {
+                        isNewSignal = false; // Signal déjà traité
+                    }
+                    else
+                    {
+                        _processedIceSignals.Add(signalKey);
+                        isNewSignal = true; // Nouveau signal
+                    }
+                }
+
+                if (!isNewSignal)
+                {
+                    await LogToFile($"🛡️ [ICE-ANTISPAM] Legacy signal déjà traité, ignoré: {iceMessage.Substring(0, Math.Min(30, iceMessage.Length))}...");
+                    Console.WriteLine($"🛡️ [ICE-ANTISPAM] Legacy signal déjà traité, ignoré");
+                    return;
+                }
+
+                await LogToFile($"🧊 [ICE-RX] Processing NEW legacy ICE signal: {iceMessage.Substring(0, Math.Min(50, iceMessage.Length))}...");
+                Console.WriteLine($"🧊 [ICE-RX] Processing NEW legacy ICE signal: {iceMessage.Substring(0, Math.Min(50, iceMessage.Length))}...");
+
+                // Parse ICE message: ICE_OFFER:from:to:sdp_data or ICE_ANSWER:from:to:sdp_data or ICE_CAND:from:to:candidate_data
+                var parts = iceMessage.Split(':', 4);
+                if (parts.Length >= 4)
+                {
+                    var iceType = parts[0];     // ICE_OFFER, ICE_ANSWER, ICE_CAND
+                    var fromPeer = parts[1];    // Source peer
+                    var toPeer = parts[2];      // Destination peer (should be us)
+                    var iceData = parts[3];     // SDP or candidate data
+
+                    await LogToFile($"🎯 [ICE-PARSE] Type: {iceType}, From: {fromPeer}, To: {toPeer}");
+                    Console.WriteLine($"🎯 [ICE-PARSE] Type: {iceType}, From: {fromPeer}, To: {toPeer}");
+
+                    // Forward ICE signal to server for P2P processing
+                    var iceResponse = await SendApiRequest("p2p", "ice_signal", new
+                    {
+                        ice_type = iceType,
+                        from_peer = fromPeer,
+                        to_peer = toPeer,
+                        ice_data = iceData
+                    });
+
+                    if (iceResponse?.Success == true)
+                    {
+                        await LogToFile($"✅ [ICE-FORWARD] ICE signal forwarded to P2P system");
+                        Console.WriteLine($"✅ [ICE-FORWARD] ICE signal forwarded to P2P system");
+                    }
+                    else
+                    {
+                        await LogToFile($"❌ [ICE-FORWARD] Failed to forward ICE signal: {iceResponse?.Error}");
+                        Console.WriteLine($"❌ [ICE-FORWARD] Failed to forward ICE signal: {iceResponse?.Error}");
+                    }
+                }
+                else
+                {
+                    await LogToFile($"❌ [ICE-PARSE] Invalid ICE message format: {parts.Length} parts");
+                    Console.WriteLine($"❌ [ICE-PARSE] Invalid ICE message format: {parts.Length} parts");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [ICE-ERROR] Error processing ICE signal: {ex.Message}");
+                Console.WriteLine($"❌ [ICE-ERROR] Error processing ICE signal: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// NOUVEAU: Handler pour les messages d'initiation WebRTC du serveur
+        /// Le serveur nous demande de créer une ICE offer pour un peer cible
+        /// </summary>
+        private async void OnWebRTCInitiateReceived(string targetPeer, string initiatorPeer)
+        {
+            try
+            {
+                await LogToFile($"🚀 [WEBRTC-INITIATE] Server requests ICE offer creation: {initiatorPeer} → {targetPeer}");
+                await LogIceEvent("INITIATE", initiatorPeer, targetPeer, "Server requests ICE offer creation");
+                Console.WriteLine($"🚀 [WEBRTC-INITIATE] Server requests ICE offer creation: {initiatorPeer} → {targetPeer}");
+
+                // ✅ FIX: Créer l'offer localement avec WebRTCDirectClient puis l'envoyer au serveur
+                if (_webrtcClient != null)
+                {
+                    await LogToFile($"📡 [WEBRTC-LOCAL] Creating local offer for {targetPeer}");
+                    Console.WriteLine($"📡 [WEBRTC-LOCAL] Creating local offer for {targetPeer}");
+
+                    var offer = await _webrtcClient.CreateOfferAsync(targetPeer);
+                    if (!string.IsNullOrEmpty(offer))
+                    {
+                        // Envoyer l'offer via le serveur relay
+                        await SendWebRTCSignal("offer", _clientId, targetPeer, offer);
+                        await LogToFile($"✅ [WEBRTC-LOCAL] Offer created and sent to {targetPeer}");
+                        await LogIceEvent("OFFER", initiatorPeer, targetPeer, "Local offer created and sent via relay");
+                        Console.WriteLine($"✅ [WEBRTC-LOCAL] Offer created and sent to {targetPeer}");
+                    }
+                    else
+                    {
+                        await LogToFile($"❌ [WEBRTC-LOCAL] Failed to create offer for {targetPeer}");
+                        await LogIceEvent("OFFER", initiatorPeer, targetPeer, "Failed to create local offer");
+                        Console.WriteLine($"❌ [WEBRTC-LOCAL] Failed to create offer for {targetPeer}");
+                    }
+                }
+                else
+                {
+                    await LogToFile($"❌ [WEBRTC-LOCAL] WebRTC client not initialized");
+                    Console.WriteLine($"❌ [WEBRTC-LOCAL] WebRTC client not initialized");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [WEBRTC-INITIATE] Error processing initiation: {ex.Message}");
+                Console.WriteLine($"❌ [WEBRTC-INITIATE] Error processing initiation: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// NOUVEAU: Handler pour les messages de signaling WebRTC (offers, answers, candidates)
+        /// Le serveur nous relaye des messages ICE d'autres peers
+        /// </summary>
+        private async void OnWebRTCSignalReceived(string iceType, string fromPeer, string toPeer, string iceData)
+        {
+            try
+            {
+                // ✅ ANTI-SPAM: Créer une clé unique pour ce signal ICE
+                var signalKey = $"{iceType}:{fromPeer}:{toPeer}:{iceData?.Substring(0, Math.Min(50, iceData?.Length ?? 0))}";
+
+                bool isNewSignal = false;
+                List<string>? oldEntriesToClean = null;
+
+                lock (_iceSignalLock)
+                {
+                    if (_processedIceSignals.Contains(signalKey))
+                    {
+                        // Signal déjà traité - sera ignoré
+                        isNewSignal = false;
+                    }
+                    else
+                    {
+                        // Nouveau signal - marquer comme traité
+                        _processedIceSignals.Add(signalKey);
+                        isNewSignal = true;
+
+                        // Nettoyer le cache si il devient trop gros (> 100 entrées)
+                        if (_processedIceSignals.Count > 100)
+                        {
+                            oldEntriesToClean = _processedIceSignals.Take(_processedIceSignals.Count - 50).ToList();
+                            foreach (var oldEntry in oldEntriesToClean)
+                            {
+                                _processedIceSignals.Remove(oldEntry);
+                            }
+                        }
+                    }
+                }
+
+                if (!isNewSignal)
+                {
+                    await LogToFile($"🛡️ [ICE-ANTISPAM] Signal déjà traité, ignoré: {iceType} {fromPeer}→{toPeer}");
+                    Console.WriteLine($"🛡️ [ICE-ANTISPAM] Signal déjà traité, ignoré: {iceType} {fromPeer}→{toPeer}");
+                    return; // Ignorer les signaux déjà traités
+                }
+
+                if (oldEntriesToClean?.Count > 0)
+                {
+                    await LogToFile($"🧹 [ICE-CLEANUP] Cache nettoyé: {oldEntriesToClean.Count} anciens signaux supprimés");
+                }
+
+                await LogToFile($"📡 [WEBRTC-SIGNAL] Processing NEW {iceType}: {fromPeer} → {toPeer}");
+                await LogIceEvent("SIGNAL", fromPeer, toPeer, $"Received {iceType}", iceData?.Substring(0, Math.Min(100, iceData?.Length ?? 0)));
+                Console.WriteLine($"📡 [WEBRTC-SIGNAL] Processing NEW {iceType} LOCALLY: {fromPeer} → {toPeer}");
+
+                // ✅ P2P DÉCENTRALISÉ: Traiter les signaux WebRTC localement avec le client direct
+                try
+                {
+                    if (_webrtcClient == null)
+                    {
+                        await LogToFile($"❌ [WebRTC-DIRECT] WebRTC client not initialized");
+                        Console.WriteLine($"❌ [WebRTC-DIRECT] WebRTC client not initialized");
+                        return;
+                    }
+
+                    if (iceType.ToLower() == "offer" && toPeer == _clientId)
+                    {
+                        await LogToFile($"📥 [WebRTC-DIRECT] Processing offer from {fromPeer} locally");
+                        Console.WriteLine($"📥 [WebRTC-DIRECT] Processing offer from {fromPeer} locally");
+
+                        // Décoder le SDP depuis iceData (format JSON)
+                        var offerData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(iceData);
+                        if (offerData.TryGetProperty("sdp", out var sdpElement))
+                        {
+                            var sdp = sdpElement.GetString();
+                            if (!string.IsNullOrEmpty(sdp))
+                            {
+                                // Traitement LOCAL de l'offer et génération d'answer
+                                var answer = await _webrtcClient.ProcessOfferAsync(fromPeer, sdp);
+                                if (!string.IsNullOrEmpty(answer))
+                                {
+                                    // Envoyer l'answer via le serveur relay
+                                    await SendWebRTCSignal("answer", _clientId, fromPeer, answer);
+                                    await LogToFile($"✅ [WebRTC-DIRECT] Answer sent to {fromPeer}");
+                                }
+                            }
+                        }
+                        else
+                        {
+                            await LogToFile($"❌ [WebRTC-DIRECT] Offer missing SDP: {iceData}");
+                        }
+                    }
+                    else if (iceType.ToLower() == "answer" && toPeer == _clientId)
+                    {
+                        await LogToFile($"📥 [WebRTC-DIRECT] Processing answer from {fromPeer} locally");
+                        Console.WriteLine($"📥 [WebRTC-DIRECT] Processing answer from {fromPeer} locally");
+
+                        // Décoder le SDP depuis iceData (format JSON)
+                        var answerData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(iceData);
+                        if (answerData.TryGetProperty("sdp", out var sdpElement))
+                        {
+                            var sdp = sdpElement.GetString();
+                            if (!string.IsNullOrEmpty(sdp))
+                            {
+                                var success = await _webrtcClient.ProcessAnswerAsync(fromPeer, sdp);
+                                await LogToFile($"✅ [WebRTC-DIRECT] Answer processed: {success}");
+                            }
+                        }
+                        else
+                        {
+                            await LogToFile($"❌ [WebRTC-DIRECT] Answer missing SDP: {iceData}");
+                        }
+                    }
+                    else if ((iceType.ToLower() == "cand" || iceType.ToLower() == "candidate") && toPeer == _clientId)
+                    {
+                        await LogToFile($"📥 [WebRTC-DIRECT] Processing ICE candidate from {fromPeer} locally");
+                        Console.WriteLine($"📥 [WebRTC-DIRECT] Processing ICE candidate from {fromPeer} locally");
+
+                        // iceData contient directement le candidate
+                        var success = await _webrtcClient.ProcessCandidateAsync(fromPeer, iceData);
+                        await LogToFile($"✅ [WebRTC-DIRECT] Candidate processed: {success}");
+                    }
+                    else
+                    {
+                        await LogToFile($"⏭️ [WebRTC-DIRECT] Signal not for me ({toPeer} != {_clientId}) or unknown type: {iceType}");
+                        Console.WriteLine($"⏭️ [WebRTC-DIRECT] Signal not for me ({toPeer} != {_clientId}) or unknown type: {iceType}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [WebRTC-DIRECT] Error processing {iceType} locally: {ex.Message}");
+                    Console.WriteLine($"❌ [WebRTC-DIRECT] Error processing {iceType} locally: {ex.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [WEBRTC-SIGNAL] Error processing signal: {ex.Message}");
+                Console.WriteLine($"❌ [WEBRTC-SIGNAL] Error processing signal: {ex.Message}");
+            }
+        }
+
+        private void OnStatusSyncReceived(string fromPeer, string statusType, bool enabled, string timestamp)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                try
+                {
+                    await LogToFile($"📡 [STATUS-SYNC] Received from {fromPeer}: {statusType} = {enabled} at {timestamp}");
+                    Console.WriteLine($"📡 [STATUS-SYNC] Received from {fromPeer}: {statusType} = {enabled} at {timestamp}");
+                    
+                    // Ne pas traiter nos propres messages de synchronisation
+                    var currentDisplayName = txtDisplayName.Text.Trim();
+                    if (fromPeer == currentDisplayName)
+                    {
+                        await LogToFile($"[STATUS-SYNC] Ignoring own status sync message");
+                        return;
+                    }
+                    
+                    // Mettre à jour les labels de statut selon le type
+                    switch (statusType)
+                    {
+                        case "CRYPTO_P2P":
+                        case "CRYPTO_RELAY":
+                            await LogToFile($"[STATUS-SYNC] Updating crypto status to {enabled}");
+                            lblCryptoStatus.Text = enabled ? "🔒: ✅" : "🔒: ❌";
+                            lblCryptoStatus.Foreground = new SolidColorBrush(enabled ? Colors.Green : Colors.Red);
+                            break;
+                        case "AUTH":
+                            await LogToFile($"[STATUS-SYNC] Updating auth status to {enabled}");
+                            lblAuthStatus.Text = enabled ? "Auth: ✅" : "Auth: ❌";
+                            lblAuthStatus.Foreground = new SolidColorBrush(enabled ? Colors.Green : Colors.Red);
+                            break;
+                        case "P2P_CONNECTED":
+                            await LogToFile($"[STATUS-SYNC] Updating P2P connection status to {enabled}");
+                            lblP2PStatus.Text = enabled ? "P2P: ✅" : "P2P: ❌";
+                            lblP2PStatus.Foreground = new SolidColorBrush(enabled ? Colors.Green : Colors.Red);
+                            break;
+                        default:
+                            await LogToFile($"[STATUS-SYNC] Unknown status type: {statusType}");
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [STATUS-SYNC] Error processing status sync: {ex.Message}");
+                    Console.WriteLine($"❌ [STATUS-SYNC] Error processing status sync: {ex.Message}");
+                }
+            });
+        }
+
+        // ===== File Transfer Event Handlers =====
+        private Dictionary<string, RelayFileTransferState> _relayTransfers = new();
+
+        private class RelayFileTransferState
+        {
+            public string TransferId { get; set; } = "";
+            public string FileName { get; set; } = "";
+            public long FileSize { get; set; }
+            public string FromPeer { get; set; } = "";
+            public List<byte[]> Chunks { get; set; } = new();
+            public int TotalChunks { get; set; }
+            public int ReceivedChunks { get; set; }
+        }
+
+        private void OnFileMetadataRelayReceived(string transferId, string fileName, long fileSize, string fromPeer)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                try
+                {
+                    await LogToFile($"📁 [RELAY-FILE] Metadata received: {fileName} ({fileSize} bytes) from {fromPeer}");
+                    
+                    // Create transfer state
+                    var transferState = new RelayFileTransferState
+                    {
+                        TransferId = transferId,
+                        FileName = fileName,
+                        FileSize = fileSize,
+                        FromPeer = fromPeer
+                    };
+                    
+                    _relayTransfers[transferId] = transferState;
+                    
+                    // Show file transfer progress in UI
+                    ShowFileTransferProgress(fileName, fileSize, true, fromPeer);
+                    
+                    // Add received file message to chat
+                    var message = new ChatMessage
+                    {
+                        Content = $"📎 Receiving file via Relay: {fileName} ({FormatFileSize(fileSize)})",
+                        Sender = fromPeer,
+                        IsFromMe = false,
+                        Type = MessageType.File,
+                        Timestamp = DateTime.Now
+                    };
+                    
+                    if (_currentChatSession?.PeerName == fromPeer)
+                    {
+                        AddMessageToUI(message);
+                    }
+                    AddMessageToHistory(fromPeer, message);
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [RELAY-FILE] Error processing metadata: {ex.Message}");
+                }
+            });
+        }
+
+        private void OnFileChunkRelayReceived(string transferId, int chunkIndex, int totalChunks, byte[] chunkData)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                try
+                {
+                    if (!_relayTransfers.TryGetValue(transferId, out var transfer))
+                    {
+                        await LogToFile($"❌ [RELAY-FILE] Transfer {transferId} not found for chunk {chunkIndex}");
+                        return;
+                    }
+                    
+                    // Initialize chunks list if needed
+                    if (transfer.Chunks.Count == 0)
+                    {
+                        transfer.TotalChunks = totalChunks;
+                        transfer.Chunks = new List<byte[]>(new byte[totalChunks][]);
+                    }
+                    
+                    // Store chunk data
+                    if (chunkIndex < transfer.Chunks.Count)
+                    {
+                        transfer.Chunks[chunkIndex] = chunkData;
+                        transfer.ReceivedChunks++;
+                        
+                        // Update progress
+                        var progress = (transfer.ReceivedChunks / (double)transfer.TotalChunks) * 100;
+                        UpdateFileTransferProgress(progress);
+                        
+                        await LogToFile($"📦 [RELAY-FILE] Chunk {chunkIndex + 1}/{totalChunks} received ({progress:F1}%)");
+                        
+                        // Check if transfer is complete
+                        if (transfer.ReceivedChunks == transfer.TotalChunks)
+                        {
+                            await CompleteRelayFileTransfer(transfer);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [RELAY-FILE] Error processing chunk: {ex.Message}");
+                }
+            });
+        }
+
+        private async Task CompleteRelayFileTransfer(RelayFileTransferState transfer)
+        {
+            try
+            {
+                // Combine all chunks into final file
+                var totalSize = transfer.Chunks.Sum(chunk => chunk?.Length ?? 0);
+                var completeFile = new byte[totalSize];
+                var position = 0;
+                
+                for (int i = 0; i < transfer.Chunks.Count; i++)
+                {
+                    var chunk = transfer.Chunks[i];
+                    if (chunk != null)
+                    {
+                        Array.Copy(chunk, 0, completeFile, position, chunk.Length);
+                        position += chunk.Length;
+                    }
+                }
+                
+                // Save file to ChatP2P_Recv directory
+                var downloadDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ChatP2P_Recv");
+                if (!Directory.Exists(downloadDir))
+                {
+                    Directory.CreateDirectory(downloadDir);
+                }
+                
+                var outputPath = Path.Combine(downloadDir, transfer.FileName);
+                
+                // Avoid overwriting existing files
+                int counter = 1;
+                var originalPath = outputPath;
+                while (File.Exists(outputPath))
+                {
+                    var nameWithoutExt = Path.GetFileNameWithoutExtension(originalPath);
+                    var extension = Path.GetExtension(originalPath);
+                    outputPath = Path.Combine(downloadDir, $"{nameWithoutExt}_{counter}{extension}");
+                    counter++;
+                }
+                
+                await File.WriteAllBytesAsync(outputPath, completeFile);
+                
+                await LogToFile($"✅ [RELAY-FILE] File saved: {outputPath}");
+                
+                // Hide progress and show completion
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+                
+                // Update chat with completion message
+                var message = new ChatMessage
+                {
+                    Content = $"📎 File received via Relay: {transfer.FileName} → {outputPath}",
+                    Sender = transfer.FromPeer,
+                    IsFromMe = false,
+                    Type = MessageType.File,
+                    Timestamp = DateTime.Now
+                };
+                
+                if (_currentChatSession?.PeerName == transfer.FromPeer)
+                {
+                    AddMessageToUI(message);
+                }
+                AddMessageToHistory(transfer.FromPeer, message);
+                
+                // Clean up transfer state
+                _relayTransfers.Remove(transfer.TransferId);
+                
+                MessageBox.Show($"File received successfully!\n\nSaved to: {outputPath}", "File Transfer Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [RELAY-FILE] Error completing transfer: {ex.Message}");
+                MessageBox.Show($"Error completing file transfer: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        // ===== Notification Management =====
+        private void ShowChatNotification(string fromPeer)
+        {
+            // Afficher le point rouge sur l'onglet Chat seulement si on n'est pas déjà sur l'onglet Chat
+            if (mainTabControl.SelectedItem != chatTab)
+            {
+                _hasNewMessages = true;
+                _lastMessageSender = fromPeer;
+                chatNotificationDot.Visibility = Visibility.Visible;
+            }
+        }
+
+        private void HideChatNotification()
+        {
+            _hasNewMessages = false;
+            chatNotificationDot.Visibility = Visibility.Collapsed;
+        }
+
+        // ===== Friend Request Management =====
+        private async Task ClearOldFriendRequests()
+        {
+            try
+            {
+                var cutoffDate = DateTime.Now.AddDays(-7); // Remove requests older than 7 days
+                var oldRequests = _friendRequests.Where(r => r.RequestDate < cutoffDate).ToList();
+                
+                foreach (var oldRequest in oldRequests)
+                {
+                    _friendRequests.Remove(oldRequest);
+                }
+                
+                if (oldRequests.Count > 0)
+                {
+                    await LogToFile($"Cleared {oldRequests.Count} old friend requests", forceLog: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error clearing old friend requests: {ex.Message}");
+            }
+        }
+
+        private async Task ClearAllPendingFriendRequests()
+        {
+            try
+            {
+                var count = _friendRequests.Count;
+                _friendRequests.Clear();
+                await LogToFile($"Cleared all {count} pending friend requests", forceLog: true);
+                MessageBox.Show($"Cleared {count} pending friend requests", "Success", 
+                              MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error clearing all friend requests: {ex.Message}");
+                MessageBox.Show($"Error clearing friend requests: {ex.Message}", "Error", 
+                              MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void MenuItem_ClearOldRequests_Click(object sender, RoutedEventArgs e)
+        {
+            await ClearOldFriendRequests();
+        }
+
+        private async void MenuItem_ClearAllRequests_Click(object sender, RoutedEventArgs e)
+        {
+            await ClearAllPendingFriendRequests();
         }
 
         // ===== Server Connection =====
@@ -140,8 +1349,22 @@ namespace ChatP2P.Client
                 _serverStream = _serverConnection.GetStream();
                 _isConnectedToServer = true;
                 
+                // Initialiser RelayClient pour friend requests
+                await InitializeRelayClient(serverIp);
+
+                // ✅ NOUVEAU: Initialiser WebRTC direct client
+                InitializeWebRTCClient();
+
                 UpdateServerStatus("Connected", Colors.Green);
                 await StartP2PNetwork();
+                
+                // Clean up old friend requests before loading
+                await ClearOldFriendRequests();
+                
+                // Immediate refresh after connection
+                await RefreshFriendRequests();
+                await RefreshPeersList();
+                await LogToFile("Initial refresh after server connection completed");
             }
             catch (Exception ex)
             {
@@ -157,6 +1380,17 @@ namespace ChatP2P.Client
             {
                 _serverStream?.Close();
                 _serverConnection?.Close();
+            }
+            catch { }
+            
+            // NOUVEAU: Déconnecter RelayClient aussi
+            try
+            {
+                if (_relayClient != null)
+                {
+                    await _relayClient.DisconnectAsync();
+                    _relayClient = null;
+                }
             }
             catch { }
             
@@ -187,13 +1421,50 @@ namespace ChatP2P.Client
                 var requestJson = JsonSerializer.Serialize(request);
                 var requestBytes = Encoding.UTF8.GetBytes(requestJson);
                 
+                await LogToFile($"📡 [API-REQ] {command}/{action} - Request size: {requestBytes.Length} bytes");
+                
                 await _serverStream.WriteAsync(requestBytes, 0, requestBytes.Length);
                 
-                var buffer = new byte[8192];
-                var bytesRead = await _serverStream.ReadAsync(buffer, 0, buffer.Length);
-                var responseJson = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                // Lire la réponse avec un buffer plus large et gestion des réponses multiples
+                var responseBuilder = new StringBuilder();
+                var buffer = new byte[16384]; // Buffer plus grand
                 
-                return JsonSerializer.Deserialize<ApiResponse>(responseJson);
+                var bytesRead = await _serverStream.ReadAsync(buffer, 0, buffer.Length);
+                var responseText = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                
+                await LogToFile($"📡 [API-RESP] {command}/{action} - Response size: {bytesRead} bytes");
+                await LogToFile($"📡 [API-RESP-TEXT] First 200 chars: {responseText.Substring(0, Math.Min(200, responseText.Length))}");
+                
+                // Chercher le premier JSON valide dans la réponse
+                var firstBraceIndex = responseText.IndexOf('{');
+                if (firstBraceIndex >= 0)
+                {
+                    var jsonPart = responseText.Substring(firstBraceIndex);
+                    
+                    // Trouver la fin du premier objet JSON
+                    int braceCount = 0;
+                    int endIndex = -1;
+                    for (int i = 0; i < jsonPart.Length; i++)
+                    {
+                        if (jsonPart[i] == '{') braceCount++;
+                        else if (jsonPart[i] == '}') braceCount--;
+                        
+                        if (braceCount == 0)
+                        {
+                            endIndex = i;
+                            break;
+                        }
+                    }
+                    
+                    if (endIndex > 0)
+                    {
+                        var cleanJson = jsonPart.Substring(0, endIndex + 1);
+                        await LogToFile($"📡 [API-CLEAN] Extracted JSON: {cleanJson}");
+                        return JsonSerializer.Deserialize<ApiResponse>(cleanJson);
+                    }
+                }
+                
+                return JsonSerializer.Deserialize<ApiResponse>(responseText);
             }
             catch (Exception ex)
             {
@@ -226,6 +1497,12 @@ namespace ChatP2P.Client
 
         private async Task RefreshPeersList()
         {
+            // DECENTRALIZED: Use local contact management instead of server-managed contacts
+            await RefreshLocalContactsUI();
+            // Contacts refreshed silently - no need to spam logs
+            return;
+            
+            // OLD CENTRALIZED CODE (kept for reference):
             // Get connected peers from server
             var peersResponse = await SendApiRequest("p2p", "peers");
             var contactsResponse = await SendApiRequest("contacts", "list");
@@ -240,46 +1517,73 @@ namespace ChatP2P.Client
                     // Parse connected peers
                     if (peersResponse.Data != null)
                     {
-                        var peersData = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(peersResponse.Data.ToString()!);
-                        if (peersData != null)
+                        if (peersResponse.Data is JsonElement peersElement && peersElement.ValueKind == JsonValueKind.Array)
                         {
-                            connectedPeers = peersData.Select(p => p.GetValueOrDefault("name", "")?.ToString() ?? "").ToList();
+                            foreach (var peerElement in peersElement.EnumerateArray())
+                            {
+                                if (peerElement.TryGetProperty("name", out var nameElement))
+                                {
+                                    var peerName = nameElement.GetString() ?? "";
+                                    if (!string.IsNullOrEmpty(peerName))
+                                        connectedPeers.Add(peerName);
+                                }
+                            }
                         }
                     }
                     
                     // Parse contacts
                     if (contactsResponse.Data != null)
                     {
-                        var contactsData = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(contactsResponse.Data.ToString()!);
-                        if (contactsData != null)
+                        if (contactsResponse.Data is JsonElement contactsElement && contactsElement.ValueKind == JsonValueKind.Array)
                         {
-                            foreach (var contactData in contactsData)
+                            foreach (var contactElement in contactsElement.EnumerateArray())
                             {
-                                var peerName = contactData.GetValueOrDefault("peer_name", "")?.ToString() ?? "";
-                                var status = connectedPeers.Contains(peerName) ? "Online" : "Offline";
+                                string peerName = "";
+                                string status = "Offline";
+                                bool isVerified = false;
+                                DateTime addedDate = DateTime.Now;
                                 
-                                contacts.Add(new ContactInfo
+                                if (contactElement.TryGetProperty("peer_name", out var peerNameElement))
+                                    peerName = peerNameElement.GetString() ?? "";
+                                    
+                                if (contactElement.TryGetProperty("status", out var statusElement))
+                                    status = statusElement.GetString() ?? "Offline";
+                                    
+                                if (contactElement.TryGetProperty("verified", out var verifiedElement))
+                                    isVerified = verifiedElement.GetBoolean();
+                                    
+                                if (contactElement.TryGetProperty("added_date", out var dateElement))
+                                    DateTime.TryParse(dateElement.GetString(), out addedDate);
+                                
+                                if (!string.IsNullOrEmpty(peerName))
                                 {
-                                    PeerName = peerName,
-                                    Status = status,
-                                    IsVerified = contactData.GetValueOrDefault("verified", false)?.ToString() == "True",
-                                    AddedDate = DateTime.TryParse(contactData.GetValueOrDefault("added_date", DateTime.Now)?.ToString(), out var addedDate) ? addedDate : DateTime.Now
-                                });
+                                    contacts.Add(new ContactInfo
+                                    {
+                                        PeerName = peerName,
+                                        Status = status,
+                                        IsVerified = isVerified,
+                                        AddedDate = addedDate
+                                    });
+                                }
                             }
                         }
                     }
                     
                     // Update UI - Friends Online list shows only connected friends
+                    await LogToFile($"Updating contacts list with {contacts.Count} contacts");
+                    
+                    // Add connected contacts to Friends Online list
+                    var onlineContacts = contacts.Where(c => c.Status == "Online").ToList();
+                    await LogToFile($"Found {onlineContacts.Count} online contacts out of {contacts.Count} total");
+                    
                     Dispatcher.Invoke(() =>
                     {
                         _peers.Clear();
                         _contacts.Clear();
                         
-                        Console.WriteLine($"Updating contacts list with {contacts.Count} contacts");
-                        
-                        // Add connected contacts to Friends Online list
-                        foreach (var contact in contacts.Where(c => c.Status == "Online"))
+                        foreach (var contact in onlineContacts)
                         {
+                            Console.WriteLine($"Adding online contact: {contact.PeerName} (Verified: {contact.IsVerified})");
                             _peers.Add(new PeerInfo
                             {
                                 Name = contact.PeerName,
@@ -296,8 +1600,10 @@ namespace ChatP2P.Client
                             _contacts.Add(contact);
                         }
                         
-                        Console.WriteLine($"Added {_peers.Count} online peers and {_contacts.Count} total contacts");
+                        Console.WriteLine($"UI Updated: {_peers.Count} online peers, {_contacts.Count} total contacts");
                     });
+                    
+                    await LogToFile($"UI Updated: {onlineContacts.Count} online peers, {contacts.Count} total contacts");
                 }
                 catch (Exception ex)
                 {
@@ -414,11 +1720,13 @@ namespace ChatP2P.Client
                 await RefreshAll();
                 btnConnect.IsEnabled = false;
                 btnDisconnect.IsEnabled = true;
+                _refreshTimer?.Start(); // Start auto-refresh timer
             }
         }
 
         private async void BtnDisconnect_Click(object sender, RoutedEventArgs e)
         {
+            _refreshTimer?.Stop(); // Stop auto-refresh timer
             await DisconnectFromServer();
             await StopP2PNetwork();
             
@@ -507,26 +1815,43 @@ namespace ChatP2P.Client
             {
                 try
                 {
-                    // Send friend request via server API
-                    var response = await SendApiRequest("contacts", "send_friend_request", new 
-                    { 
-                        peer_name = peerToAdd.Name,
-                        requester = txtDisplayName.Text.Trim()
-                    });
-                    
-                    if (response?.Success == true)
+                    // Send friend request via RelayClient instead of API
+                    if (_relayClient?.IsConnected == true)
                     {
-                        MessageBox.Show($"Friend request sent to {peerToAdd.Name}!", "Success", 
-                                      MessageBoxButton.OK, MessageBoxImage.Information);
+                        var myDisplayName = txtDisplayName.Text.Trim();
                         
-                        // Clear search results
-                        _searchResults.Clear();
-                        lstSearchResults.Visibility = Visibility.Collapsed;
-                        txtSearchPeer.Text = "";
+                        // Get our public key from the server
+                        var myPublicKey = await GetMyPublicKey() ?? "no_public_key";
+                        await LogToFile($"Using public key for friend request: {myPublicKey}", forceLog: true);
+                        
+                        var success = await _relayClient.SendFriendRequestAsync(
+                            myDisplayName, 
+                            peerToAdd.Name, 
+                            myPublicKey, // Use actual public key
+                            $"Friend request from {myDisplayName}"
+                        );
+                        
+                        if (success)
+                        {
+                            MessageBox.Show($"Friend request sent to {peerToAdd.Name}!", "Success", 
+                                          MessageBoxButton.OK, MessageBoxImage.Information);
+                            
+                            // Clear search results
+                            _searchResults.Clear();
+                            lstSearchResults.Visibility = Visibility.Collapsed;
+                            txtSearchPeer.Text = "";
+                            
+                            await LogToFile($"Friend request sent via RelayClient: {myDisplayName} → {peerToAdd.Name}", forceLog: true);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to send friend request via RelayClient", "Error", 
+                                          MessageBoxButton.OK, MessageBoxImage.Error);
+                        }
                     }
                     else
                     {
-                        MessageBox.Show($"Failed to send friend request: {response?.Error}", "Error", 
+                        MessageBox.Show("RelayClient not connected. Cannot send friend request.", "Error", 
                                       MessageBoxButton.OK, MessageBoxImage.Error);
                     }
                 }
@@ -587,24 +1912,46 @@ namespace ChatP2P.Client
                 try
                 {
                     var displayName = txtDisplayName.Text.Trim();
-                    var response = await SendApiRequest("contacts", "accept_friend_request", new 
-                    { 
-                        requester = request.FromPeer,
-                        accepter = displayName
-                    });
                     
-                    if (response?.Success == true)
+                    // Accept friend request via RelayClient
+                    if (_relayClient?.IsConnected == true)
                     {
-                        MessageBox.Show($"Friend request from {request.FromPeer} accepted!", "Success", 
-                                      MessageBoxButton.OK, MessageBoxImage.Information);
+                        var success = await _relayClient.AcceptFriendRequestAsync(request.FromPeer, displayName);
                         
-                        // Refresh both friend requests and contacts
-                        await RefreshFriendRequests();
-                        await RefreshPeersList();
+                        if (success)
+                        {
+                            await LogToFile($"Friend request accepted via RelayClient: {request.FromPeer} -> {displayName}", forceLog: true);
+                            
+                            // Add the requester to our local contacts and mark as trusted (TOFU)
+                            await DatabaseService.Instance.SetPeerTrusted(request.FromPeer, true, $"Trusted via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                            await DatabaseService.Instance.SetPeerVerified(request.FromPeer, true); // Mark as verified contact
+                            await DatabaseService.Instance.LogSecurityEvent(request.FromPeer, "FRIEND_ACCEPT", $"Friend request accepted, peer marked as trusted and verified via TOFU");
+                            await AddLocalContact(request.FromPeer, "Offline"); // Will be updated with real status
+                            
+                            // NOUVEAU: Synchroniser le nouveau statut AUTH avec le peer
+                            await SyncStatusWithPeer(request.FromPeer, "AUTH", true);
+                            await LogToFile($"🔐 [TOFU-SYNC] AUTH status synced with {request.FromPeer}: trusted=true");
+                            
+                            MessageBox.Show($"Friend request from {request.FromPeer} accepted!", "Success", 
+                                          MessageBoxButton.OK, MessageBoxImage.Information);
+                            
+                            // Remove from pending requests UI immediately
+                            _friendRequests.Remove(request);
+                            
+                            // Refresh contacts list
+                            await RefreshLocalContactsUI();
+                            
+                            await LogToFile("Friend request accept process completed", forceLog: true);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to accept friend request via RelayClient", "Error", 
+                                          MessageBoxButton.OK, MessageBoxImage.Error);
+                        }
                     }
                     else
                     {
-                        MessageBox.Show($"Failed to accept friend request: {response?.Error}", "Error", 
+                        MessageBox.Show("RelayClient not connected. Cannot accept friend request.", "Error", 
                                       MessageBoxButton.OK, MessageBoxImage.Error);
                     }
                 }
@@ -624,23 +1971,31 @@ namespace ChatP2P.Client
                 try
                 {
                     var displayName = txtDisplayName.Text.Trim();
-                    var response = await SendApiRequest("contacts", "reject_friend_request", new 
-                    { 
-                        requester = request.FromPeer,
-                        rejecter = displayName
-                    });
                     
-                    if (response?.Success == true)
+                    // Reject friend request via RelayClient
+                    if (_relayClient?.IsConnected == true)
                     {
-                        MessageBox.Show($"Friend request from {request.FromPeer} rejected.", "Success", 
-                                      MessageBoxButton.OK, MessageBoxImage.Information);
+                        var success = await _relayClient.RejectFriendRequestAsync(request.FromPeer, displayName);
                         
-                        // Refresh friend requests
-                        await RefreshFriendRequests();
+                        if (success)
+                        {
+                            MessageBox.Show($"Friend request from {request.FromPeer} rejected.", "Success", 
+                                          MessageBoxButton.OK, MessageBoxImage.Information);
+                            
+                            // Remove from pending requests UI immediately
+                            _friendRequests.Remove(request);
+                            
+                            await LogToFile($"Friend request rejected via RelayClient: {request.FromPeer} <- {displayName}", forceLog: true);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to reject friend request via RelayClient", "Error", 
+                                          MessageBoxButton.OK, MessageBoxImage.Error);
+                        }
                     }
                     else
                     {
-                        MessageBox.Show($"Failed to reject friend request: {response?.Error}", "Error", 
+                        MessageBox.Show("RelayClient not connected. Cannot reject friend request.", "Error", 
                                       MessageBoxButton.OK, MessageBoxImage.Error);
                     }
                 }
@@ -706,7 +2061,21 @@ namespace ChatP2P.Client
             {
                 _currentChatSession = session;
                 _currentPeer = session.PeerName;
+                
                 LoadChatForSession(session);
+            }
+        }
+
+        private void MainTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // Cacher la notification et ouvrir automatiquement le chat du dernier expéditeur
+            if (mainTabControl.SelectedItem == chatTab && _hasNewMessages && _lastMessageSender != null)
+            {
+                HideChatNotification();
+                
+                // Ouvrir automatiquement le chat du dernier expéditeur
+                OpenChatWindow(_lastMessageSender);
+                _lastMessageSender = null;
             }
         }
 
@@ -755,14 +2124,44 @@ namespace ChatP2P.Client
             }
         }
 
-        private void BtnClearChat_Click(object sender, RoutedEventArgs e)
+        private async void BtnClearChat_Click(object sender, RoutedEventArgs e)
         {
             if (_currentChatSession != null)
             {
-                messagesPanel.Children.Clear();
-                if (_chatHistory.ContainsKey(_currentChatSession.PeerName))
+                var result = MessageBox.Show(
+                    $"Delete all messages with {_currentChatSession.PeerName}?\n\n" +
+                    "This will permanently delete messages from the database.",
+                    "Confirm Message Deletion",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (result == MessageBoxResult.Yes)
                 {
-                    _chatHistory[_currentChatSession.PeerName].Clear();
+                    try
+                    {
+                        // 1. Clear UI
+                        messagesPanel.Children.Clear();
+                        
+                        // 2. Clear memory cache
+                        if (_chatHistory.ContainsKey(_currentChatSession.PeerName))
+                        {
+                            _chatHistory[_currentChatSession.PeerName].Clear();
+                        }
+                        
+                        // 3. Delete from database
+                        await DatabaseService.Instance.DeleteAllMessagesWithPeer(_currentChatSession.PeerName);
+                        
+                        await LogToFile($"🗑️ [CLEAR-CHAT] Deleted all messages with {_currentChatSession.PeerName} from UI, memory, and database");
+                        
+                        MessageBox.Show($"All messages with {_currentChatSession.PeerName} have been deleted.", 
+                                      "Messages Deleted", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        await LogToFile($"❌ [CLEAR-CHAT] Error: {ex.Message}");
+                        MessageBox.Show($"Error deleting messages: {ex.Message}", "Error", 
+                                      MessageBoxButton.OK, MessageBoxImage.Error);
+                    }
                 }
             }
         }
@@ -798,7 +2197,10 @@ namespace ChatP2P.Client
             var existingSession = _chatSessions.FirstOrDefault(s => s.PeerName == peerName);
             if (existingSession == null)
             {
-                existingSession = new ChatSession { PeerName = peerName };
+                existingSession = new ChatSession 
+                { 
+                    PeerName = peerName
+                };
                 _chatSessions.Add(existingSession);
                 
                 if (!_chatHistory.ContainsKey(peerName))
@@ -810,7 +2212,7 @@ namespace ChatP2P.Client
             lstActiveChats.SelectedItem = existingSession;
         }
 
-        private void LoadChatForSession(ChatSession session)
+        private async void LoadChatForSession(ChatSession session)
         {
             lblChatPeer.Text = session.PeerName;
             UpdateChatStatus(session.PeerName, session.IsP2PConnected, session.IsCryptoActive, session.IsAuthenticated);
@@ -819,28 +2221,58 @@ namespace ChatP2P.Client
             txtMessage.IsEnabled = true;
             btnSendMessage.IsEnabled = true;
             
-            // Load message history
+            // Load message history from database
             messagesPanel.Children.Clear();
             
-            if (_chatHistory.TryGetValue(session.PeerName, out var messages))
+            try
             {
-                foreach (var message in messages)
+                var dbMessages = await DatabaseService.Instance.GetLastMessages(session.PeerName, 50);
+                var messages = new List<ChatMessage>();
+
+                foreach (var dbMsg in dbMessages)
                 {
-                    AddMessageToUI(message);
+                    var chatMessage = new ChatMessage
+                    {
+                        Content = dbMsg.Body,
+                        Sender = dbMsg.Sender,
+                        IsFromMe = dbMsg.Direction == "send",
+                        Timestamp = dbMsg.CreatedUtc,
+                        Type = MessageType.Text
+                    };
+                    messages.Add(chatMessage);
+                    AddMessageToUI(chatMessage);
+                }
+
+                // Update in-memory history for compatibility
+                _chatHistory[session.PeerName] = messages;
+                
+                await LogToFile($"📖 [DB] Chargé {messages.Count} messages depuis DB pour {session.PeerName}");
+                
+                // Add welcome message if no history
+                if (messages.Count == 0)
+                {
+                    var welcomeMessage = new ChatMessage
+                    {
+                        Content = $"Chat started with {session.PeerName}",
+                        Sender = "System",
+                        Type = MessageType.System,
+                        Timestamp = DateTime.Now
+                    };
+                    AddMessageToUI(welcomeMessage);
                 }
             }
-            
-            // Add welcome message if no history
-            if (messages == null || messages.Count == 0)
+            catch (Exception ex)
             {
-                var welcomeMessage = new ChatMessage
+                await LogToFile($"❌ [DB] Erreur chargement historique pour {session.PeerName}: {ex.Message}");
+                
+                // Fallback to in-memory history
+                if (_chatHistory.TryGetValue(session.PeerName, out var messages))
                 {
-                    Content = $"Chat started with {session.PeerName}",
-                    Sender = "System",
-                    Type = MessageType.System,
-                    Timestamp = DateTime.Now
-                };
-                AddMessageToUI(welcomeMessage);
+                    foreach (var message in messages)
+                    {
+                        AddMessageToUI(message);
+                    }
+                }
             }
         }
 
@@ -866,23 +2298,49 @@ namespace ChatP2P.Client
             AddMessageToUI(message);
             AddMessageToHistory(_currentChatSession.PeerName, message);
 
-            // Send via P2P API
-            var response = await SendApiRequest("p2p", "send_message", new { 
-                peer = _currentChatSession.PeerName, 
-                message = messageText 
-            });
-
-            if (response?.Success != true)
+            // ✅ FIX CRITIQUE: Utiliser WebRTCDirectClient pour vrai P2P
+            try
             {
-                // Mark as failed or retry
-                var errorMessage = new ChatMessage
+                await LogToFile($"🚀 [P2P-WEBRTC] Attempting to send message to {_currentChatSession.PeerName} via DataChannel");
+                Console.WriteLine($"🚀 [P2P-WEBRTC] Attempting to send message to {_currentChatSession.PeerName} via DataChannel");
+
+                // ✅ FIX: Utiliser WebRTCDirectClient au lieu de hardcoded false
+                var success = _webrtcClient != null && await _webrtcClient.SendMessageAsync(_currentChatSession.PeerName, messageText);
+
+                if (success)
                 {
-                    Content = "❌ Message failed to send",
-                    Sender = "System",
-                    Type = MessageType.System,
-                    Timestamp = DateTime.Now
-                };
-                AddMessageToUI(errorMessage);
+                    await LogToFile($"✅ [P2P-WEBRTC] Message sent successfully via DataChannel to {_currentChatSession.PeerName}");
+                    Console.WriteLine($"✅ [P2P-WEBRTC] Message sent successfully via DataChannel to {_currentChatSession.PeerName}");
+                }
+                else
+                {
+                    await LogToFile($"❌ [P2P-WEBRTC] DataChannel not available for {_currentChatSession.PeerName} - falling back to relay");
+                    Console.WriteLine($"❌ [P2P-WEBRTC] DataChannel not available - trying relay fallback");
+
+                    // Fallback: envoyer via l'API serveur si P2P échoue
+                    var response = await SendApiRequest("p2p", "send_message", new {
+                        from = Properties.Settings.Default.DisplayName,
+                        peer = _currentChatSession.PeerName,
+                        message = messageText
+                    });
+
+                    if (response?.Success != true)
+                    {
+                        await LogToFile($"❌ Failed to send message via relay fallback: {response?.Error}");
+                        MessageBox.Show($"Failed to send message: {response?.Error ?? "Unknown error"}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+                    else
+                    {
+                        await LogToFile($"✅ [RELAY-FALLBACK] Message sent via server relay");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [P2P-LOCAL] Exception sending message: {ex.Message}");
+                MessageBox.Show($"Failed to send message: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
             }
         }
 
@@ -896,13 +2354,28 @@ namespace ChatP2P.Client
             });
         }
 
-        private void AddMessageToHistory(string peerName, ChatMessage message)
+        private async void AddMessageToHistory(string peerName, ChatMessage message)
         {
+            // Ajouter à l'historique en mémoire (pour compatibilité)
             if (!_chatHistory.ContainsKey(peerName))
             {
                 _chatHistory[peerName] = new List<ChatMessage>();
             }
             _chatHistory[peerName].Add(message);
+
+            // Sauvegarder en base de données
+            try
+            {
+                var direction = message.IsFromMe ? "send" : "recv";
+                var isP2P = true; // On assume P2P pour l'instant, peut être amélioré plus tard
+                
+                await DatabaseService.Instance.SaveMessage(peerName, message.Sender, message.Content, isP2P, direction);
+                await LogToFile($"💾 [DB] Message sauvegardé en DB: {message.Sender} -> {peerName}: {message.Content}");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [DB] Erreur sauvegarde message: {ex.Message}");
+            }
         }
 
         private FrameworkElement CreateMessageElement(ChatMessage message)
@@ -958,23 +2431,67 @@ namespace ChatP2P.Client
                 try
                 {
                     var fileInfo = new FileInfo(dialog.FileName);
-                    var fileData = await File.ReadAllBytesAsync(dialog.FileName);
-                    var base64Data = Convert.ToBase64String(fileData);
+                    await LogToFile($"📁 [FILE-TRANSFER] Starting file transfer: {fileInfo.Name} ({fileInfo.Length} bytes) → {peerName}");
 
                     // Show transfer progress
                     ShowFileTransferProgress(fileInfo.Name, fileInfo.Length, false);
 
-                    var response = await SendApiRequest("p2p", "send_file", new {
-                        peer = peerName,
-                        filename = fileInfo.Name,
-                        data = base64Data
-                    });
+                    // Ask user to choose transfer method
+                    // ✅ FIX: Force P2P WebRTC Direct par défaut (plus de choix manuel)
+                    // Le WebRTC fonctionne maintenant correctement, plus besoin du fallback Relay
+                    var useP2P = true;
+                    var method = useP2P ? "P2P" : "Relay";
+
+                    await LogToFile($"📁 [FILE-TRANSFER] Using {method} transfer method");
+
+                    ApiResponse? response = null;
+
+                    if (useP2P && _webrtcClient != null)
+                    {
+                        // ✅ FIX CRITIQUE: Log l'état de connexion pour debug
+                        var connectionState = _webrtcClient.GetConnectionState(peerName);
+                        var isFullyConnected = _webrtcClient.IsConnected(peerName);
+                        await LogToFile($"🔍 [DEBUG] WebRTC state for {peerName}: {connectionState}, FullyConnected: {isFullyConnected}");
+
+                        if (isFullyConnected)
+                        {
+                            // ✅ NOUVEAU: WebRTC Direct avec dual-channel et flow control
+                            await LogToFile($"✅ [FILE-TRANSFER] Using NEW dual-channel method for {peerName}");
+                            response = await SendFileViaWebRTCDirectNew(peerName, dialog.FileName, fileInfo);
+                        }
+                        else
+                        {
+                            // ✅ FIX: Essayer la nouvelle méthode même avec un seul canal
+                            await LogToFile($"⚠️ [FILE-TRANSFER] Dual-channel not ready, attempting NEW method anyway for {peerName}");
+                            try
+                            {
+                                response = await SendFileViaWebRTCDirectNew(peerName, dialog.FileName, fileInfo);
+                            }
+                            catch (Exception ex)
+                            {
+                                await LogToFile($"❌ [FILE-TRANSFER] NEW method failed: {ex.Message}, falling back to OLD method");
+                                // Fallback: WebRTC via serveur relay (ancien code)
+                                response = await SendFileViaWebRTCDirect(peerName, dialog.FileName, fileInfo);
+                            }
+                        }
+                    }
+                    else if (useP2P)
+                    {
+                        // Fallback: WebRTC via serveur relay (ancien code)
+                        await LogToFile($"❌ [FILE-TRANSFER] WebRTC client not available, using OLD relay method");
+                        response = await SendFileViaWebRTCDirect(peerName, dialog.FileName, fileInfo);
+                    }
+                    else
+                    {
+                        // Relay: Envoyer le fichier directement depuis le client
+                        response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo);
+                    }
 
                     if (response?.Success == true)
                     {
                         var message = new ChatMessage
                         {
-                            Content = $"📎 Sent file: {fileInfo.Name} ({FormatFileSize(fileInfo.Length)})",
+                            Content = $"📎 Sent file via {method}: {fileInfo.Name} ({FormatFileSize(fileInfo.Length)})",
                             Sender = txtDisplayName.Text,
                             IsFromMe = true,
                             Type = MessageType.File,
@@ -986,14 +2503,19 @@ namespace ChatP2P.Client
                             AddMessageToUI(message);
                         }
                         AddMessageToHistory(peerName, message);
+
+                        await LogToFile($"✅ [FILE-TRANSFER] File transfer initiated successfully via {method}");
                     }
                     else
                     {
+                        await LogToFile($"❌ [FILE-TRANSFER] Failed to send file: {response?.Error}");
                         MessageBox.Show($"Failed to send file: {response?.Error}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        fileTransferBorder.Visibility = Visibility.Collapsed;
                     }
                 }
                 catch (Exception ex)
                 {
+                    await LogToFile($"❌ [FILE-TRANSFER] Error sending file: {ex.Message}");
                     MessageBox.Show($"Error sending file: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                     await LogToFile($"File send error: {ex.Message}");
                 }
@@ -1004,13 +2526,571 @@ namespace ChatP2P.Client
             }
         }
 
-        private void ShowFileTransferProgress(string fileName, long fileSize, bool isIncoming)
+        private void ShowFileTransferProgress(string fileName, long fileSize, bool isIncoming, string fromPeer = "")
         {
             Dispatcher.Invoke(() =>
             {
-                lblFileTransferStatus.Text = $"{(isIncoming ? "Receiving" : "Sending")} {fileName}...";
+                var peerInfo = !string.IsNullOrEmpty(fromPeer) ? $" from {fromPeer}" : "";
+                lblFileTransferStatus.Text = $"{(isIncoming ? "Receiving" : "Sending")} {fileName}{peerInfo}...";
                 progressFileTransfer.Value = 0;
                 fileTransferBorder.Visibility = Visibility.Visible;
+            });
+        }
+
+        /// <summary>
+        /// Envoie un fichier via le RelayClient directement (sans passer par le serveur)
+        /// </summary>
+        private async Task<ApiResponse> SendFileViaRelay(string peerName, string filePath, FileInfo fileInfo)
+        {
+            try
+            {
+                if (_relayClient == null || !_relayClient.IsConnected)
+                {
+                    return new ApiResponse { Success = false, Error = "RelayClient not connected" };
+                }
+
+                var displayName = txtDisplayName.Text.Trim();
+                var transferId = Guid.NewGuid().ToString();
+
+                await LogToFile($"📁 [RELAY-FILE] Starting direct relay transfer: {fileInfo.Name} → {peerName}");
+
+                // 1. Envoyer les métadonnées
+                var metadata = new
+                {
+                    type = "FILE_METADATA_RELAY",
+                    transferId = transferId,
+                    fileName = fileInfo.Name,
+                    fileSize = fileInfo.Length,
+                    fromPeer = displayName,
+                    toPeer = peerName
+                };
+
+                var metadataMessage = $"FILE_META_RELAY:{System.Text.Json.JsonSerializer.Serialize(metadata)}";
+                var metadataSent = await _relayClient.SendPrivateMessageAsync(displayName, peerName, metadataMessage);
+
+                if (!metadataSent)
+                {
+                    await LogToFile($"❌ [RELAY-FILE] Failed to send metadata to {peerName}");
+                    return new ApiResponse { Success = false, Error = "Failed to send metadata" };
+                }
+
+                await LogToFile($"📁 [RELAY-FILE] Metadata sent successfully");
+
+                // 2. Envoyer le fichier en chunks
+                const int chunkSize = 32768; // 32KB pour relay
+                using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+                var buffer = new byte[chunkSize];
+                var chunkIndex = 0;
+                var totalChunks = (int)Math.Ceiling(fileInfo.Length / (double)chunkSize);
+
+                while (true)
+                {
+                    var bytesRead = await fileStream.ReadAsync(buffer, 0, chunkSize);
+                    if (bytesRead == 0) break;
+
+                    // Créer chunk data
+                    var chunkData = new byte[bytesRead];
+                    Array.Copy(buffer, chunkData, bytesRead);
+
+                    var chunkMessage = new
+                    {
+                        type = "FILE_CHUNK_RELAY",
+                        transferId = transferId,
+                        chunkIndex = chunkIndex,
+                        totalChunks = totalChunks,
+                        chunkData = Convert.ToBase64String(chunkData)
+                    };
+
+                    var chunkMessageJson = $"FILE_CHUNK_RELAY:{System.Text.Json.JsonSerializer.Serialize(chunkMessage)}";
+                    
+                    var chunkSent = await _relayClient.SendPrivateMessageAsync(displayName, peerName, chunkMessageJson);
+                    if (!chunkSent)
+                    {
+                        await LogToFile($"❌ [RELAY-FILE] Failed to send chunk {chunkIndex}");
+                        return new ApiResponse { Success = false, Error = $"Failed to send chunk {chunkIndex}" };
+                    }
+
+                    chunkIndex++;
+                    var progress = (chunkIndex / (double)totalChunks) * 100;
+                    
+                    // Update progress UI
+                    UpdateFileTransferProgress(progress);
+                    
+                    if (chunkIndex % 10 == 0) // Log every 10 chunks
+                    {
+                        await LogToFile($"📦 [RELAY-FILE] Progress: {progress:F1}% ({chunkIndex}/{totalChunks} chunks)");
+                    }
+
+                    // Small delay to prevent overwhelming the relay
+                    await Task.Delay(10);
+                }
+
+                await LogToFile($"✅ [RELAY-FILE] File {fileInfo.Name} sent successfully ({chunkIndex} chunks)");
+                
+                // Hide progress after completion
+                await Task.Delay(1000);
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                return new ApiResponse { Success = true, Data = "File transfer initiated successfully" };
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [RELAY-FILE] Error in SendFileViaRelay: {ex.Message}");
+                return new ApiResponse { Success = false, Error = ex.Message };
+            }
+        }
+
+        /// <summary>
+        /// Envoie un fichier via P2P avec chunking client-side et streaming direct DataChannel
+        /// </summary>
+        private async Task<ApiResponse> SendFileViaP2P(string peerName, string filePath, FileInfo fileInfo)
+        {
+            try
+            {
+                var displayName = txtDisplayName.Text.Trim();
+                var transferId = Guid.NewGuid().ToString();
+
+                await LogToFile($"🚀 [P2P-DIRECT] Starting client-side chunked P2P transfer: {fileInfo.Name} → {peerName}");
+
+                // 1. Establish P2P connection
+                var connectResponse = await SendApiRequest("p2p", "connect", new { peer = peerName });
+                if (connectResponse?.Success != true)
+                {
+                    await LogToFile($"❌ [P2P-DIRECT] Failed to establish P2P connection to {peerName}");
+                    return new ApiResponse { Success = false, Error = "Failed to establish P2P connection" };
+                }
+
+                await Task.Delay(2000); // Wait for P2P connection to establish
+
+                // 2. Read file and perform client-side chunking
+                byte[] fileBytes;
+                try
+                {
+                    fileBytes = await File.ReadAllBytesAsync(filePath);
+                    await LogToFile($"📁 [P2P-DIRECT] Read {fileBytes.Length} bytes from {fileInfo.Name}");
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [P2P-DIRECT] Failed to read file: {ex.Message}");
+                    return new ApiResponse { Success = false, Error = $"Failed to read file: {ex.Message}" };
+                }
+
+                // 3. Send metadata first via regular P2P message
+                var metadata = new
+                {
+                    type = "FILE_METADATA",
+                    transferId = transferId,
+                    fileName = fileInfo.Name,
+                    fileSize = fileBytes.Length,
+                    fromPeer = displayName,
+                    toPeer = peerName
+                };
+                
+                var metadataJson = System.Text.Json.JsonSerializer.Serialize(metadata);
+                var metadataResponse = await SendApiRequest("p2p", "send_message", new {
+                    peer = peerName,
+                    message = metadataJson,
+                    encrypted = "false",
+                    from = displayName
+                });
+
+                if (metadataResponse?.Success != true)
+                {
+                    await LogToFile($"❌ [P2P-DIRECT] Failed to send metadata to {peerName}");
+                    return new ApiResponse { Success = false, Error = "Failed to send metadata" };
+                }
+
+                await LogToFile($"✅ [P2P-DIRECT] Metadata sent successfully");
+
+                // 4. Client-side chunking and direct DataChannel streaming  
+                const int chunkSize = 1536; // 1.5KB chunks pour éviter erreurs JSON (1.5KB bin = ~2KB base64, très safe)
+                var totalChunks = (int)Math.Ceiling(fileBytes.Length / (double)chunkSize);
+                var sentChunks = 0;
+
+                UpdateFileTransferProgress(10); // Starting chunks
+
+                for (int i = 0; i < totalChunks; i++)
+                {
+                    var offset = i * chunkSize;
+                    var remainingBytes = fileBytes.Length - offset;
+                    var currentChunkSize = Math.Min(chunkSize, remainingBytes);
+                    
+                    var chunkData = new byte[currentChunkSize];
+                    Array.Copy(fileBytes, offset, chunkData, 0, currentChunkSize);
+                    
+                    // Send chunk directly via DataChannel (no JSON wrapper overhead)
+                    var chunkBase64 = Convert.ToBase64String(chunkData);
+                    var rawResponse = await SendApiRequest("p2p", "send_raw_data", new {
+                        peer = peerName,
+                        data = chunkBase64,
+                        fromPeer = displayName
+                    });
+
+                    if (rawResponse?.Success != true)
+                    {
+                        await LogToFile($"❌ [P2P-DIRECT] Failed to send chunk {i}");
+                        fileTransferBorder.Visibility = Visibility.Collapsed;
+                        return new ApiResponse { Success = false, Error = $"Failed to send chunk {i}" };
+                    }
+
+                    sentChunks++;
+                    
+                    // Update progress more frequently for better UX
+                    var progress = 10 + (double)sentChunks / totalChunks * 85; // 10% to 95%
+                    UpdateFileTransferProgress(progress);
+                    
+                    if (i % 50 == 0) // Log every 50 chunks
+                    {
+                        await LogToFile($"🚀 [P2P-DIRECT] Progress: {progress:F1}% ({sentChunks}/{totalChunks} chunks)");
+                    }
+
+                    // Small delay to prevent overwhelming the DataChannel
+                    if (i % 20 == 0) await Task.Delay(5);
+                }
+
+                UpdateFileTransferProgress(100); // Complete
+                await LogToFile($"✅ [P2P-DIRECT] File {fileInfo.Name} sent via client-side chunking ({sentChunks}/{totalChunks} chunks)");
+                
+                // 5. Save message to database
+                var fileMessage = $"📎 Sent file via P2P Direct: {fileInfo.Name} ({FormatFileSize(fileInfo.Length)})";
+                await DatabaseService.Instance.SaveMessage(peerName, displayName, fileMessage, true, "Sent");
+                
+                await LogToFile($"💾 [DB] Message saved: {displayName} -> {peerName}: {fileMessage}");
+                
+                // Hide progress after completion
+                await Task.Delay(1000);
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                return new ApiResponse { Success = true, Data = "P2P direct file transfer completed successfully" };
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [P2P-DIRECT] Error: {ex.Message}");
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+                return new ApiResponse { Success = false, Error = $"P2P direct file transfer failed: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// Envoie un fichier via WebRTC DataChannel direct (bypass relay complètement)
+        /// </summary>
+        private async Task<ApiResponse> SendFileViaWebRTCDirect(string peerName, string filePath, FileInfo fileInfo)
+        {
+            try
+            {
+                var displayName = txtDisplayName.Text.Trim();
+                var transferId = Guid.NewGuid().ToString();
+
+                await LogToFile($"🚀 [WEBRTC-DIRECT] Starting WebRTC P2P direct transfer: {fileInfo.Name} → {peerName}");
+
+                // 1. Vérifier la connexion P2P WebRTC
+                var connectionCheck = await SendApiRequest("p2p", "check_connection", new { peer = peerName });
+                if (connectionCheck?.Success != true)
+                {
+                    await LogToFile($"❌ [WEBRTC-DIRECT] No active WebRTC connection to {peerName}");
+                    return new ApiResponse { Success = false, Error = "No active WebRTC connection" };
+                }
+
+                // 2. Lire et préparer le fichier
+                byte[] fileBytes;
+                try
+                {
+                    fileBytes = await File.ReadAllBytesAsync(filePath);
+                    await LogToFile($"📁 [WEBRTC-DIRECT] Read {fileBytes.Length} bytes from {fileInfo.Name}");
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [WEBRTC-DIRECT] Failed to read file: {ex.Message}");
+                    return new ApiResponse { Success = false, Error = $"Failed to read file: {ex.Message}" };
+                }
+
+                // 3. Envoyer métadonnées via WebRTC DataChannel
+                var metadata = new
+                {
+                    type = "FILE_METADATA_WEBRTC",
+                    transferId = transferId,
+                    fileName = fileInfo.Name,
+                    fileSize = fileBytes.Length,
+                    fromPeer = displayName,
+                    toPeer = peerName
+                };
+                
+                var metadataJson = System.Text.Json.JsonSerializer.Serialize(metadata);
+                var metadataResponse = await SendApiRequest("p2p", "send_webrtc_direct", new {
+                    peer = peerName,
+                    data = metadataJson,
+                    is_binary = false
+                });
+
+                if (metadataResponse?.Success != true)
+                {
+                    await LogToFile($"❌ [WEBRTC-DIRECT] Failed to send metadata");
+                    return new ApiResponse { Success = false, Error = "Failed to send metadata" };
+                }
+
+                await Task.Delay(500); // Attendre que le peer traite les métadonnées
+
+                // 4. Envoyer le fichier en chunks via WebRTC DataChannel direct
+                const int chunkSize = 1536; // 1.5KB chunks pour éviter erreurs JSON (1.5KB bin = ~2KB base64, très safe)
+                var totalChunks = (int)Math.Ceiling(fileBytes.Length / (double)chunkSize);
+                var sentChunks = 0;
+
+                UpdateFileTransferProgress(5); // Starting transfer
+
+                for (int i = 0; i < totalChunks; i++)
+                {
+                    var offset = i * chunkSize;
+                    var remainingBytes = fileBytes.Length - offset;
+                    var currentChunkSize = Math.Min(chunkSize, remainingBytes);
+                    
+                    var chunkData = new byte[currentChunkSize];
+                    Array.Copy(fileBytes, offset, chunkData, 0, currentChunkSize);
+                    
+                    // Envoyer directement via WebRTC DataChannel (pas via relay!)
+                    var chunkBase64 = Convert.ToBase64String(chunkData);
+                    var chunkResponse = await SendApiRequest("p2p", "send_webrtc_direct", new {
+                        peer = peerName,
+                        data = chunkBase64,
+                        is_binary = true,
+                        chunk_index = i,
+                        total_chunks = totalChunks
+                    });
+
+                    if (chunkResponse?.Success != true)
+                    {
+                        await LogToFile($"❌ [WEBRTC-DIRECT] Failed to send chunk {i}");
+                        fileTransferBorder.Visibility = Visibility.Collapsed;
+                        return new ApiResponse { Success = false, Error = $"Failed to send chunk {i}" };
+                    }
+
+                    sentChunks++;
+                    var progress = 5 + (double)sentChunks / totalChunks * 90; // 5% to 95%
+                    UpdateFileTransferProgress(progress);
+                    
+                    if (i % 25 == 0) // Log every 25 chunks
+                    {
+                        await LogToFile($"🚀 [WEBRTC-DIRECT] Progress: {progress:F1}% ({sentChunks}/{totalChunks} chunks)");
+                    }
+
+                    // Petit délai pour éviter de surcharger le DataChannel
+                    if (i % 10 == 0) await Task.Delay(5);
+                }
+
+                UpdateFileTransferProgress(100); // Complete
+                await LogToFile($"✅ [WEBRTC-DIRECT] File {fileInfo.Name} sent via WebRTC DataChannel ({sentChunks}/{totalChunks} chunks)");
+                
+                // 5. Sauvegarder en base
+                var fileMessage = $"📎 Sent file via WebRTC Direct: {fileInfo.Name} ({FormatFileSize(fileInfo.Length)})";
+                await DatabaseService.Instance.SaveMessage(peerName, displayName, fileMessage, true, "Sent");
+                
+                // Cacher la progress bar après délai
+                await Task.Delay(1000);
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                return new ApiResponse { Success = true, Data = "File sent successfully via WebRTC DataChannel" };
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [WEBRTC-DIRECT] Error: {ex.Message}");
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+                return new ApiResponse { Success = false, Error = $"WebRTC Direct transfer failed: {ex.Message}" };
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Envoie fichier via WebRTC Direct avec dual-channel et flow control
+        /// </summary>
+        private async Task<ApiResponse> SendFileViaWebRTCDirectNew(string peerName, string filePath, FileInfo fileInfo)
+        {
+            try
+            {
+                await LogToFile($"🚀 [WEBRTC-NEW] Starting direct file transfer: {fileInfo.Name} → {peerName}");
+
+                // 1. Vérifier la connexion dual-channel
+                if (_webrtcClient == null || !_webrtcClient.IsConnected(peerName))
+                {
+                    await LogToFile($"❌ [WEBRTC-NEW] No dual-channel connection to {peerName}");
+                    return new ApiResponse { Success = false, Error = "No dual-channel connection available" };
+                }
+
+                // 2. Lire le fichier
+                byte[] fileData;
+                try
+                {
+                    fileData = await File.ReadAllBytesAsync(filePath);
+                    await LogToFile($"📁 [WEBRTC-NEW] Read {fileData.Length} bytes from {fileInfo.Name}");
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ [WEBRTC-NEW] Failed to read file: {ex.Message}");
+                    return new ApiResponse { Success = false, Error = $"Failed to read file: {ex.Message}" };
+                }
+
+                // 3. Progress bar
+                UpdateFileTransferProgress(5);
+
+                // 4. ✅ NOUVEAU: Envoyer via WebRTCDirectClient avec flow control
+                bool success = await _webrtcClient.SendFileAsync(peerName, fileData, fileInfo.Name);
+
+                if (success)
+                {
+                    UpdateFileTransferProgress(100);
+                    await LogToFile($"✅ [WEBRTC-NEW] File transfer completed: {fileInfo.Name}");
+
+                    // Sauvegarder en base
+                    var displayName = txtDisplayName.Text.Trim();
+                    var fileMessage = $"📎 Sent file via WebRTC Direct (New): {fileInfo.Name} ({FormatFileSize(fileInfo.Length)})";
+                    await DatabaseService.Instance.SaveMessage(peerName, displayName, fileMessage, true, "Sent");
+
+                    // Cacher progress bar
+                    await Task.Delay(1000);
+                    fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                    return new ApiResponse { Success = true, Data = "File sent successfully via WebRTC Direct (New)" };
+                }
+                else
+                {
+                    await LogToFile($"❌ [WEBRTC-NEW] File transfer failed");
+                    fileTransferBorder.Visibility = Visibility.Collapsed;
+                    return new ApiResponse { Success = false, Error = "File transfer failed via WebRTC Direct" };
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [WEBRTC-NEW] Error: {ex.Message}");
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+                return new ApiResponse { Success = false, Error = ex.Message };
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Gère la réception de données de fichier via WebRTC direct
+        /// </summary>
+        private async Task HandleFileDataReceived(string peer, byte[] fileData)
+        {
+            try
+            {
+                await LogToFile($"[FILE-HANDLER] Processing {fileData.Length} bytes from {peer}");
+
+                // ✅ NOUVEAU: Détecter si c'est le début d'un transfert pour afficher la progressbar
+                var initialHeader = System.Text.Encoding.UTF8.GetString(fileData, 0, Math.Min(200, fileData.Length));
+                if (initialHeader.StartsWith("FILENAME:") || initialHeader.Contains("FILESTART:"))
+                {
+                    // Afficher la progressbar pour la réception
+                    fileTransferBorder.Visibility = Visibility.Visible;
+                    UpdateFileTransferProgress(0); // Démarrer à 0%
+                    await LogToFile($"[FILE-HANDLER] 📊 Reception progress bar started for {peer}");
+                }
+
+                // Créer le dossier de réception s'il n'existe pas
+                var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                var receiveFolder = Path.Combine(desktopPath, "ChatP2P_Recv");
+
+                if (!Directory.Exists(receiveFolder))
+                {
+                    Directory.CreateDirectory(receiveFolder);
+                    await LogToFile($"[FILE-HANDLER] Created receive folder: {receiveFolder}");
+                }
+
+                // ✅ FIX: Extraire le nom de fichier s'il y en a un
+                string originalFileName = null;
+                byte[] actualFileData = fileData;
+
+                var headerText = System.Text.Encoding.UTF8.GetString(fileData, 0, Math.Min(200, fileData.Length));
+
+                // ✅ FIX CRITIQUE: Nouveau format chunked FILESTART ou ancien format FILENAME
+                if (headerText.StartsWith("FILESTART:") || headerText.StartsWith("FILENAME:"))
+                {
+                    // Parser le header pour extraire le nom
+                    var headerEnd = headerText.IndexOf("|END|");
+                    if (headerEnd < 0)
+                    {
+                        // ✅ FIX: Pour format simple FILENAME:nom|, chercher le premier |
+                        headerEnd = headerText.IndexOf('|');
+                    }
+
+                    if (headerEnd > 0)
+                    {
+                        var fullHeader = headerText.Substring(0, headerEnd + (headerText.Contains("|END|") ? 4 : 1));
+                        var headerParts = fullHeader.Split('|');
+
+                        foreach (var part in headerParts)
+                        {
+                            if (part.StartsWith("FILENAME:"))
+                            {
+                                originalFileName = part.Substring(9);
+                                await LogToFile($"[FILE-HANDLER] 🔍 Found filename in header: {originalFileName}");
+                                break;
+                            }
+                        }
+
+                        // Extraire les données après le header
+                        var headerBytes = System.Text.Encoding.UTF8.GetBytes(fullHeader);
+                        actualFileData = new byte[fileData.Length - headerBytes.Length];
+                        Array.Copy(fileData, headerBytes.Length, actualFileData, 0, actualFileData.Length);
+
+                        await LogToFile($"[FILE-HANDLER] ✅ Extracted filename: {originalFileName}, data: {actualFileData.Length} bytes");
+                    }
+                    else
+                    {
+                        await LogToFile($"[FILE-HANDLER] ⚠️ Could not parse header: {headerText.Substring(0, Math.Min(50, headerText.Length))}...");
+                    }
+                }
+                else
+                {
+                    await LogToFile($"[FILE-HANDLER] ℹ️ No header found, treating as raw file data: {headerText.Substring(0, Math.Min(20, headerText.Length))}...");
+                }
+
+                // Générer le nom de fichier final (préserver nom original)
+                var fileName = !string.IsNullOrEmpty(originalFileName)
+                    ? originalFileName  // ✅ FIX: Préserver nom original sans horodatage
+                    : $"received_from_{peer}_{DateTime.Now:yyyyMMdd_HHmmss}.bin";
+
+                var fullPath = Path.Combine(receiveFolder, fileName);
+
+                // Écrire le fichier
+                await File.WriteAllBytesAsync(fullPath, actualFileData);
+
+                await LogToFile($"✅ [FILE-HANDLER] File saved: {fullPath} ({FormatFileSize(actualFileData.Length)})");
+
+                // ✅ NOUVEAU: Finir la progressbar à 100% et la cacher
+                UpdateFileTransferProgress(100);
+                await Task.Delay(1000); // Laisser voir 100% pendant 1 seconde
+                fileTransferBorder.Visibility = Visibility.Collapsed;
+                await LogToFile($"[FILE-HANDLER] 📊 Reception progress bar completed and hidden");
+
+                // Afficher notification dans l'UI
+                var displayName = txtDisplayName.Text.Trim();
+                var fileMessage = $"📎 Received file from {peer}: {fileName} ({FormatFileSize(actualFileData.Length)})";
+
+                // Sauvegarder en base
+                await DatabaseService.Instance.SaveMessage(peer, displayName, fileMessage, false, "Received");
+
+                // ✅ SIMPLE: Log pour l'instant (pas d'UI chat direct)
+                await LogToFile($"✅ [FILE-SUCCESS] {fileMessage}");
+
+                // Log comme notification
+                await LogToFile($"📎 [NOTIFICATION] {fileMessage}");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [FILE-HANDLER] Error: {ex.Message}");
+            }
+        }
+
+        private string ComputeChunkHash(byte[] data)
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var hashBytes = sha.ComputeHash(data);
+            return Convert.ToBase64String(hashBytes);
+        }
+
+
+        private void UpdateFileTransferProgress(double progress)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                progressFileTransfer.Value = progress;
             });
         }
 
@@ -1025,7 +3105,8 @@ namespace ChatP2P.Client
         // ===== P2P Connection Management =====
         private async void StartP2PConnection(string peerName)
         {
-            var response = await SendApiRequest("p2p", "connect", new { peer = peerName });
+            var displayName = txtDisplayName.Text.Trim();
+            var response = await SendApiRequest("p2p", "connect", new { peer = peerName, from = displayName });
             if (response?.Success == true)
             {
                 // Update chat session status
@@ -1037,6 +3118,13 @@ namespace ChatP2P.Client
                     {
                         UpdateChatStatus(peerName, true, session.IsCryptoActive, session.IsAuthenticated);
                     }
+                    
+                    // NOUVEAU: Synchroniser automatiquement tous les statuts avec le peer
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(1000); // Petit délai pour s'assurer que la connexion P2P est stable
+                        await SyncAllStatusWithPeer(peerName);
+                    });
                 }
             }
         }
@@ -1055,10 +3143,126 @@ namespace ChatP2P.Client
             return $"{len:0.##} {sizes[order]}";
         }
 
-        private async Task LogToFile(string message)
+        // ===== TOFU SECURITY METHODS =====
+        
+        /// <summary>
+        /// Verify a peer's public key against stored TOFU keys
+        /// </summary>
+        private async Task<bool> VerifyTofuPublicKey(string peerName, string base64PublicKey)
         {
             try
             {
+                var publicKeyBytes = Convert.FromBase64String(base64PublicKey);
+                var storedKeys = await DatabaseService.Instance.GetPeerKeys(peerName, "Ed25519");
+                
+                if (storedKeys.Count == 0)
+                {
+                    // First time seeing this peer - store the key (TOFU)
+                    await DatabaseService.Instance.AddPeerKey(peerName, "Ed25519", publicKeyBytes, "First public key exchange (TOFU)");
+                    await DatabaseService.Instance.LogSecurityEvent(peerName, "TOFU_FIRST", "First public key stored via TOFU");
+                    await LogToFile($"TOFU: First public key stored for {peerName}", forceLog: true);
+                    return true;
+                }
+                
+                // Check if key matches the most recent non-revoked key
+                var latestKey = storedKeys.Where(k => !k.Revoked).OrderByDescending(k => k.CreatedUtc).FirstOrDefault();
+                if (latestKey?.Public != null && publicKeyBytes.SequenceEqual(latestKey.Public))
+                {
+                    await LogToFile($"TOFU: Public key verified for {peerName}", forceLog: true);
+                    return true;
+                }
+                
+                // Key mismatch - potential security issue
+                await DatabaseService.Instance.LogSecurityEvent(peerName, "PUBKEY_MISMATCH", 
+                    $"Public key mismatch detected. Expected: {Convert.ToBase64String(latestKey?.Public ?? new byte[0])}, Got: {base64PublicKey}");
+                await LogToFile($"TOFU WARNING: Public key mismatch for {peerName}!", forceLog: true);
+                
+                return false;
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"TOFU Error: Failed to verify public key for {peerName}: {ex.Message}", forceLog: true);
+                return false;
+            }
+        }
+        
+        /// <summary>
+        /// Handle TOFU reset for a peer (when user manually accepts new key)
+        /// </summary>
+        private async Task ResetTofuForPeer(string peerName, string newBase64PublicKey, string reason)
+        {
+            try
+            {
+                var newPublicKeyBytes = Convert.FromBase64String(newBase64PublicKey);
+                
+                // Revoke all existing keys
+                var existingKeys = await DatabaseService.Instance.GetPeerKeys(peerName, "Ed25519");
+                foreach (var key in existingKeys.Where(k => !k.Revoked))
+                {
+                    await DatabaseService.Instance.RevokePeerKey(key.Id, $"TOFU Reset: {reason}");
+                }
+                
+                // Add new key
+                await DatabaseService.Instance.AddPeerKey(peerName, "Ed25519", newPublicKeyBytes, $"TOFU Reset: {reason}");
+                await DatabaseService.Instance.LogSecurityEvent(peerName, "TOFU_RESET", reason);
+                await LogToFile($"TOFU: Reset completed for {peerName}, new key stored", forceLog: true);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"TOFU Error: Failed to reset for {peerName}: {ex.Message}", forceLog: true);
+            }
+        }
+
+        // ===== CRYPTO METHODS =====
+        
+        /// <summary>
+        /// Get our own public key using the VB.NET crypto module
+        /// </summary>
+        private async Task<string?> GetMyPublicKey()
+        {
+            try
+            {
+                // Use the original VB.NET P2PMessageCrypto module
+                var keyPair = P2PMessageCrypto.GenerateKeyPair();
+                var publicKeyBase64 = Convert.ToBase64String(keyPair.PublicKey);
+                
+                await LogToFile($"Generated P2P public key: {keyPair.Algorithm} ({publicKeyBase64.Substring(0, Math.Min(16, publicKeyBase64.Length))}...)", forceLog: true);
+                
+                return publicKeyBase64;
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error generating P2P public key: {ex.Message}", forceLog: true);
+                
+                // Fallback: try server API
+                try
+                {
+                    var response = await SendApiRequest("crypto", "get_my_key");
+                    if (response?.Success == true && response.Data != null)
+                    {
+                        var keyData = JsonSerializer.Deserialize<JsonElement>(response.Data.ToString() ?? "");
+                        if (keyData.TryGetProperty("public_key", out var keyElement))
+                        {
+                            return keyElement.GetString();
+                        }
+                    }
+                }
+                catch (Exception serverEx)
+                {
+                    await LogToFile($"Server fallback also failed: {serverEx.Message}", forceLog: true);
+                }
+                
+                return null;
+            }
+        }
+
+        private async Task LogToFile(string message, bool forceLog = false)
+        {
+            try
+            {
+                // Respecter les paramètres de verbosité, sauf si forceLog=true
+                if (!forceLog && !Properties.Settings.Default.VerboseLogging)
+                    return;
                 var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
                 var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
                 Directory.CreateDirectory(logDir);
@@ -1075,12 +3279,503 @@ namespace ChatP2P.Client
             }
         }
 
+        private async Task LogIceEvent(string iceType, string fromPeer, string toPeer, string status, string? iceData = null)
+        {
+            try
+            {
+                var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
+                Directory.CreateDirectory(logDir);
+                
+                var logFile = Path.Combine(logDir, "client_ice.log");
+                var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                
+                var logEntry = $"[{timestamp}] 🧊 [ICE-{iceType.ToUpper()}] {fromPeer} → {toPeer} | {status}";
+                if (!string.IsNullOrEmpty(iceData))
+                    logEntry += $" | Data: {iceData}";
+                logEntry += Environment.NewLine;
+                
+                await File.AppendAllTextAsync(logFile, logEntry);
+            }
+            catch
+            {
+                // Ignore logging errors
+            }
+        }
+
         // ===== Data Classes =====
         public class ApiRequest
         {
             public string Command { get; set; } = "";
             public string? Action { get; set; }
             public object? Data { get; set; }
+        }
+        
+        #region Local Contact Management (Decentralized)
+        
+        private void LoadLocalContacts()
+        {
+            try
+            {
+                if (File.Exists(_contactsFilePath))
+                {
+                    var json = File.ReadAllText(_contactsFilePath);
+                    _localContacts = JsonSerializer.Deserialize<List<ContactInfo>>(json) ?? new List<ContactInfo>();
+                    Console.WriteLine($"Loaded {_localContacts.Count} local contacts");
+                }
+                else
+                {
+                    _localContacts = new List<ContactInfo>();
+                    Console.WriteLine("No local contacts file found, starting with empty list");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading local contacts: {ex.Message}");
+                _localContacts = new List<ContactInfo>();
+            }
+        }
+        
+        private async Task SaveLocalContacts()
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(_localContacts, new JsonSerializerOptions { WriteIndented = true });
+                await File.WriteAllTextAsync(_contactsFilePath, json);
+                await LogToFile($"Saved {_localContacts.Count} local contacts");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error saving local contacts: {ex.Message}");
+            }
+        }
+        
+        private async Task AddLocalContact(string peerName, string status = "Offline")
+        {
+            await LogToFile($"🔍 [AddLocalContact] Called for peerName={peerName}, status={status} on {Environment.MachineName}", forceLog: true);
+            Console.WriteLine($"🔍 [AddLocalContact] Called for peerName={peerName}, status={status} on {Environment.MachineName}");
+            
+            // Check if contact already exists
+            var existing = _localContacts.Find(c => c.PeerName == peerName);
+            if (existing == null)
+            {
+                await LogToFile($"✅ [AddLocalContact] Adding new contact {peerName} - not found in existing contacts", forceLog: true);
+                Console.WriteLine($"✅ [AddLocalContact] Adding new contact {peerName} - not found in existing contacts");
+                var newContact = new ContactInfo
+                {
+                    PeerName = peerName,
+                    Status = status,
+                    IsVerified = true, // Friend requests are pre-verified
+                    AddedDate = DateTime.Now
+                };
+                
+                _localContacts.Add(newContact);
+                await SaveLocalContacts();
+                await LogToFile($"Added local contact: {peerName}");
+                
+                // Update UI - Add to both contacts and peers collections
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    _contacts.Add(newContact);
+                    
+                    // Also add to peers collection for "Friends Online" display
+                    var peerInfo = new PeerInfo
+                    {
+                        Name = peerName,
+                        Status = status,
+                        P2PStatus = "Ready",
+                        CryptoStatus = "Enabled",
+                        AuthStatus = "Trusted"
+                    };
+                    _peers.Add(peerInfo);
+                });
+            }
+            else
+            {
+                await LogToFile($"⚠️ [AddLocalContact] Contact {peerName} already exists in local list on {Environment.MachineName}", forceLog: true);
+                Console.WriteLine($"⚠️ [AddLocalContact] Contact {peerName} already exists in local list on {Environment.MachineName}");
+            }
+        }
+        
+        private async Task RefreshLocalContactsUI()
+        {
+            // NOUVELLE APPROCHE: Utiliser DatabaseService local au lieu de l'API serveur
+            try
+            {
+                // Charger les contacts trusted depuis la base locale
+                var trustedPeers = await DatabaseService.Instance.GetTrustedPeers();
+                await LogToFile($"Loaded {trustedPeers.Count} trusted peers from local database");
+                
+                // Use RelayClient peer list for online status (more reliable than API)
+                var onlinePeers = _onlinePeers;
+                
+                // Mettre à jour l'UI avec les données locales
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    _contacts.Clear();
+                    _peers.Clear();
+                    
+                    foreach (var peer in trustedPeers)
+                    {
+                        var isOnline = onlinePeers.Contains(peer.Name);
+                        var status = isOnline ? "Online" : "Offline";
+                        
+                        // Créer ContactInfo pour l'onglet Contacts
+                        var contact = new ContactInfo
+                        {
+                            PeerName = peer.Name,
+                            Status = status,
+                            IsVerified = peer.Verified,
+                            AddedDate = peer.CreatedUtc ?? DateTime.Now,
+                            LastSeen = peer.LastSeenUtc?.ToString("yyyy-MM-dd HH:mm") ?? "Never",
+                            TrustNote = peer.TrustNote ?? "",
+                            IsPinned = peer.Pinned
+                        };
+                        _contacts.Add(contact);
+                        
+                        // Ajouter aux peers online si connecté
+                        if (isOnline)
+                        {
+                            var peerInfo = new PeerInfo
+                            {
+                                Name = peer.Name,
+                                Status = status,
+                                P2PStatus = "Ready",
+                                CryptoStatus = peer.Verified ? "Verified" : "Pending",
+                                AuthStatus = peer.Trusted ? "Trusted" : "Unknown"
+                            };
+                            _peers.Add(peerInfo);
+                        }
+                    }
+                    
+                });
+                
+                await LogToFile($"UI Updated: {_peers.Count} online peers, {_contacts.Count} total contacts from local DB");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error refreshing local contacts UI: {ex.Message}");
+            }
+        }
+        
+        private async Task CheckForAcceptedRequests()
+        {
+            // Check if any of our sent friend requests have been accepted
+            try
+            {
+                var displayName = txtDisplayName?.Text?.Trim() ?? Environment.MachineName;
+                var response = await SendApiRequest("contacts", "get_friend_requests", new { peer_name = displayName });
+                
+                if (response.Success && response.Data is JsonElement dataElement && dataElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var element in dataElement.EnumerateArray())
+                    {
+                        if (element.TryGetProperty("status", out var statusElement) && statusElement.GetString() == "accepted" &&
+                            element.TryGetProperty("from_peer", out var fromElement) && element.TryGetProperty("to_peer", out var toElement))
+                        {
+                            var fromPeer = fromElement.GetString() ?? "";
+                            var toPeer = toElement.GetString() ?? "";
+                            
+                            // If we sent this request and it's accepted
+                            if (fromPeer == displayName && !string.IsNullOrEmpty(toPeer))
+                            {
+                                var requestKey = $"{fromPeer}->{toPeer}";
+                                if (!_processedAcceptedRequests.Contains(requestKey))
+                                {
+                                    await LogToFile($"[DECENTRALIZED] Detected accepted friend request: {fromPeer} -> {toPeer}");
+                                    await AddLocalContact(toPeer, "Offline");
+                                    _processedAcceptedRequests.Add(requestKey);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error checking for accepted requests: {ex.Message}");
+            }
+        }
+        
+        #endregion
+
+        // ===== Settings Helper Methods =====
+        
+        private bool GetEncryptP2PSetting()
+        {
+            try
+            {
+                // Try to read from a config file first
+                var configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P", "encrypt_p2p.txt");
+                if (File.Exists(configPath))
+                {
+                    var content = File.ReadAllText(configPath).Trim();
+                    return bool.TryParse(content, out var result) && result;
+                }
+                return true; // Default to enabled
+            }
+            catch
+            {
+                return true; // Default to enabled
+            }
+        }
+        
+        private void SetEncryptP2PSetting(bool enabled)
+        {
+            try
+            {
+                var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                var appFolder = Path.Combine(appDataPath, "ChatP2P");
+                Directory.CreateDirectory(appFolder);
+                var configPath = Path.Combine(appFolder, "encrypt_p2p.txt");
+                File.WriteAllText(configPath, enabled.ToString());
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"Error saving EncryptP2P setting: {ex.Message}");
+            }
+        }
+
+        // ===== Checkbox Event Handlers & Status Sync =====
+        
+        private void InitializeCheckboxEventHandlers()
+        {
+            // Subscribe to checkbox events
+            chkEncryptP2P.Checked += ChkEncryptP2P_Changed;
+            chkEncryptP2P.Unchecked += ChkEncryptP2P_Changed;
+            chkEncryptRelay.Checked += ChkEncryptRelay_Changed;
+            chkEncryptRelay.Unchecked += ChkEncryptRelay_Changed;
+            chkPqRelay.Checked += ChkPqRelay_Changed;
+            chkPqRelay.Unchecked += ChkPqRelay_Changed;
+        }
+
+        private async void ChkEncryptP2P_Changed(object sender, RoutedEventArgs e)
+        {
+            var isEnabled = chkEncryptP2P?.IsChecked == true;
+            
+            // Persist setting
+            SetEncryptP2PSetting(isEnabled);
+            
+            await LogToFile($"P2P Encryption {(isEnabled ? "enabled" : "disabled")}", forceLog: true);
+            
+            // Sync avec peer courant si P2P actif
+            if (_currentChatSession?.IsP2PConnected == true)
+            {
+                await SyncStatusWithPeer(_currentChatSession.PeerName, "CRYPTO_P2P", isEnabled);
+                UpdateChatStatus(_currentChatSession.PeerName, true, isEnabled, _currentChatSession.IsAuthenticated);
+            }
+            
+            // Update all chat sessions crypto status
+            foreach (var session in _chatSessions)
+            {
+                if (session.IsP2PConnected)
+                {
+                    session.IsCryptoActive = isEnabled;
+                }
+            }
+        }
+
+        private async void ChkEncryptRelay_Changed(object sender, RoutedEventArgs e)
+        {
+            var isEnabled = chkEncryptRelay?.IsChecked == true;
+            
+            // Persist setting
+            Properties.Settings.Default.EncryptRelay = isEnabled;
+            Properties.Settings.Default.Save();
+            
+            await LogToFile($"Relay Encryption {(isEnabled ? "enabled" : "disabled")}", forceLog: true);
+            
+            // Sync avec tous les peers
+            foreach (var session in _chatSessions)
+            {
+                if (!session.IsP2PConnected) // Relay mode
+                {
+                    await SyncStatusWithPeer(session.PeerName, "CRYPTO_RELAY", isEnabled);
+                }
+            }
+        }
+
+        private async void ChkPqRelay_Changed(object sender, RoutedEventArgs e)
+        {
+            var isEnabled = chkPqRelay?.IsChecked == true;
+            
+            // Persist setting
+            Properties.Settings.Default.PqRelay = isEnabled;
+            Properties.Settings.Default.Save();
+            
+            await LogToFile($"Post-Quantum Relay {(isEnabled ? "enabled" : "disabled")}", forceLog: true);
+        }
+
+        /// <summary>
+        /// Synchronise les paramètres de status (P2P/Auth/Crypto) avec un peer distant
+        /// </summary>
+        private async Task SyncStatusWithPeer(string peerName, string statusType, bool enabled)
+        {
+            try
+            {
+                // ✅ FIX THREADING: Ensure UI access happens on UI thread
+                string displayName = "";
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    displayName = txtDisplayName.Text.Trim();
+                });
+
+                if (string.IsNullOrEmpty(displayName) || string.IsNullOrEmpty(peerName)) return;
+
+                var statusMsg = new
+                {
+                    type = "STATUS_SYNC",
+                    from = displayName,
+                    statusType = statusType,  // CRYPTO_P2P, CRYPTO_RELAY, AUTH, P2P_CONNECTED
+                    enabled = enabled,
+                    timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
+                };
+
+                var jsonMessage = System.Text.Json.JsonSerializer.Serialize(statusMsg);
+                
+                // Déterminer le canal d'envoi selon le type de connexion
+                var session = _chatSessions.FirstOrDefault(s => s.PeerName == peerName);
+                if (session?.IsP2PConnected == true)
+                {
+                    // Envoyer via P2P direct
+                    var response = await SendApiRequest("p2p", "send_message", new
+                    {
+                        from = displayName,
+                        peer = peerName,
+                        message = jsonMessage
+                    });
+                    
+                    if (response?.Success == true)
+                    {
+                        await LogToFile($"🔄 [STATUS-SYNC] {statusType}={enabled} sent to {peerName} via P2P");
+                    }
+                }
+                else
+                {
+                    // Envoyer via RelayHub
+                    if (_relayClient != null && await _relayClient.SendPrivateMessageAsync(displayName, peerName, jsonMessage))
+                    {
+                        await LogToFile($"🔄 [STATUS-SYNC] {statusType}={enabled} sent to {peerName} via Relay");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error syncing status with {peerName}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Synchronise automatiquement tous les statuts avec un peer lors de l'établissement de la connexion P2P
+        /// </summary>
+        private async Task SyncAllStatusWithPeer(string peerName)
+        {
+            try
+            {
+                await LogToFile($"🔄 [AUTO-SYNC] Synchronizing all status with {peerName}");
+                
+                // Synchroniser le statut crypto P2P
+                var cryptoP2PEnabled = GetEncryptP2PSetting();
+                await SyncStatusWithPeer(peerName, "CRYPTO_P2P", cryptoP2PEnabled);
+                
+                // Synchroniser le statut crypto Relay
+                var cryptoRelayEnabled = chkEncryptRelay?.IsChecked == true;
+                await SyncStatusWithPeer(peerName, "CRYPTO_RELAY", cryptoRelayEnabled);
+                
+                // NOUVEAU: Synchroniser le statut Auth basé sur le système TOFU
+                var peer = await DatabaseService.Instance.GetPeer(peerName);
+                var isAuthTrusted = peer?.Trusted == true;
+                await SyncStatusWithPeer(peerName, "AUTH", isAuthTrusted);
+                await LogToFile($"🔐 [TOFU-AUTH] Peer {peerName} trust status: {isAuthTrusted} (verified: {peer?.Verified}, pinned: {peer?.Pinned})");
+                
+                await LogToFile($"✅ [AUTO-SYNC] All status synchronized with {peerName}");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [AUTO-SYNC] Error syncing all status with {peerName}: {ex.Message}");
+            }
+        }
+
+
+        /// <summary>
+        /// Traite les messages de synchronisation de status reçus des peers
+        /// </summary>
+        private async Task HandleStatusSyncMessage(string fromPeer, string jsonMessage)
+        {
+            try
+            {
+                var statusSync = System.Text.Json.JsonSerializer.Deserialize<JsonElement>(jsonMessage);
+                
+                if (statusSync.TryGetProperty("type", out var typeElement) && 
+                    typeElement.GetString() == "STATUS_SYNC" &&
+                    statusSync.TryGetProperty("statusType", out var statusTypeElement) &&
+                    statusSync.TryGetProperty("enabled", out var enabledElement))
+                {
+                    var statusType = statusTypeElement.GetString() ?? "";
+                    var enabled = enabledElement.GetBoolean();
+                    
+                    await LogToFile($"📥 [STATUS-SYNC] Received from {fromPeer}: {statusType}={enabled}");
+                    
+                    // Update peer's session based on received status
+                    var session = _chatSessions.FirstOrDefault(s => s.PeerName == fromPeer);
+                    if (session != null)
+                    {
+                        switch (statusType)
+                        {
+                            case "CRYPTO_P2P":
+                                session.IsCryptoActive = enabled;
+                                break;
+                            case "CRYPTO_RELAY":
+                                if (!session.IsP2PConnected)
+                                    session.IsCryptoActive = enabled;
+                                break;
+                            case "AUTH":
+                                session.IsAuthenticated = enabled;
+                                break;
+                            case "P2P_CONNECTED":
+                                session.IsP2PConnected = enabled;
+                                break;
+                        }
+                        
+                        // Update UI if this is the current chat
+                        if (_currentChatSession?.PeerName == fromPeer)
+                        {
+                            UpdateChatStatus(fromPeer, session.IsP2PConnected, session.IsCryptoActive, session.IsAuthenticated);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"Error handling status sync from {fromPeer}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Gère les messages de transfert de fichiers P2P en les redirigeant vers le serveur
+        /// </summary>
+        private async Task HandleFileTransferMessage(string fromPeer, string jsonMessage)
+        {
+            try
+            {
+                await LogToFile($"📁 [FILE-TRANSFER] Processing message from {fromPeer}", forceLog: true);
+
+                // Rediriger le message vers l'API serveur pour traitement par P2PService
+                var response = await SendApiRequest("p2p", "handle_file_message", new { fromPeer = fromPeer, message = jsonMessage });
+
+                if (response?.Success == true)
+                {
+                    await LogToFile($"✅ [FILE-TRANSFER] Message processed successfully by server API", forceLog: true);
+                }
+                else
+                {
+                    await LogToFile($"❌ [FILE-TRANSFER] Server API processing failed: {response?.Error ?? "Unknown error"}", forceLog: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [FILE-TRANSFER] Error handling file transfer message from {fromPeer}: {ex.Message}", forceLog: true);
+            }
         }
 
         public class ApiResponse
@@ -1097,5 +3792,256 @@ namespace ChatP2P.Client
             [JsonPropertyName("timestamp")]
             public DateTime Timestamp { get; set; }
         }
+
+        #region File Transfer Progress
+
+        private async Task CheckFileTransferProgress()
+        {
+            try
+            {
+                var response = await SendApiRequest("p2p", "get_transfer_progress", new { });
+                
+                if (response?.Success == true && response.Data != null)
+                {
+                    try
+                    {
+                        var dataElement = (JsonElement)response.Data;
+
+                        if (dataElement.TryGetProperty("activeTransfers", out var transfersElement) &&
+                            transfersElement.ValueKind == JsonValueKind.Array)
+                    {
+                        bool hasActiveTransfers = false;
+                        
+                        foreach (var transferElement in transfersElement.EnumerateArray())
+                        {
+                            hasActiveTransfers = true;
+                            
+                            if (transferElement.TryGetProperty("fileName", out var fileNameEl) &&
+                                transferElement.TryGetProperty("progress", out var progressEl) &&
+                                transferElement.TryGetProperty("receivedBytes", out var receivedEl) &&
+                                transferElement.TryGetProperty("totalBytes", out var totalEl) &&
+                                transferElement.TryGetProperty("fromPeer", out var fromPeerEl))
+                            {
+                                var fileName = fileNameEl.GetString() ?? "";
+                                var progress = progressEl.GetDouble();
+                                var receivedBytes = receivedEl.GetInt64();
+                                var totalBytes = totalEl.GetInt64();
+                                var fromPeer = fromPeerEl.GetString() ?? "";
+                                
+                                // Update UI on main thread
+                                Dispatcher.Invoke(() =>
+                                {
+                                    UpdateFileTransferProgress(fileName, fromPeer, progress, receivedBytes, totalBytes);
+                                });
+                                
+                                LogToFile($"📊 [TRANSFER-PROGRESS] {fileName}: {progress:F1}% ({receivedBytes}/{totalBytes} bytes)");
+                            }
+                        }
+                        
+                        // Hide progress if no active transfers
+                        if (!hasActiveTransfers)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                HideFileTransferProgress();
+                            });
+                        }
+                        }
+                    }
+                    catch (JsonException jsonEx)
+                    {
+                        // Ignore JSON parsing errors for activeTransfers to prevent log spam
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Don't spam logs with polling errors
+                if (ex.Message.Contains("No connection could be made") == false)
+                {
+                    LogToFile($"❌ [TRANSFER-PROGRESS] Error checking progress: {ex.Message}");
+                    LogToFile($"❌ [TRANSFER-PROGRESS] Stack trace: {ex.StackTrace}");
+                }
+            }
+        }
+
+        private void UpdateFileTransferProgress(string fileName, string fromPeer, double progress, long receivedBytes, long totalBytes)
+        {
+            try
+            {
+                // Show transfer progress UI
+                fileTransferBorder.Visibility = Visibility.Visible;
+                
+                // Update status text
+                lblFileTransferStatus.Text = $"Receiving {fileName} from {fromPeer}...";
+                
+                // Update progress bar
+                progressFileTransfer.Value = progress;
+                
+                // Update progress text if you want more detail
+                if (totalBytes > 0)
+                {
+                    string sizeText = $"{FormatFileSize(receivedBytes)} / {FormatFileSize(totalBytes)}";
+                    lblFileTransferStatus.Text = $"Receiving {fileName} from {fromPeer} ({sizeText})";
+                }
+                
+                LogToFile($"🔄 [UI-UPDATE] Progress updated: {fileName} {progress:F1}%");
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"❌ [UI-UPDATE] Error updating progress: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Configure les IPs réseau côté CLIENT pour éviter 127.0.0.1 dans SDP
+        /// </summary>
+        private void ConfigureClientNetworkIPs()
+        {
+            try
+            {
+                LogToFile("🔧 [CLIENT-NETWORK] Starting network IP detection - CLIENT VERSION 1.0", forceLog: true);
+
+                // Obtenir les vraies IPs réseau de ce client
+                var networkIps = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(ni => ni.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+                    .Where(ni => ni.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
+                    .SelectMany(ni => ni.GetIPProperties().UnicastAddresses)
+                    .Where(addr => addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    .Where(addr => !System.Net.IPAddress.IsLoopback(addr.Address))
+                    .Select(addr => addr.Address.ToString())
+                    .ToList();
+
+                if (networkIps.Any())
+                {
+                    var primaryIp = networkIps.First();
+                    LogToFile($"🌐 [CLIENT-NETWORK] Detected network IPs: {string.Join(", ", networkIps)}", forceLog: true);
+                    LogToFile($"🎯 [CLIENT-NETWORK] Primary IP detected: {primaryIp}", forceLog: true);
+
+                    // ✅ STOCKER l'IP pour utilisation dans les API calls
+                    _detectedClientIP = primaryIp;
+
+                    // ✅ CONFIGURE CLIENT-SIDE SIPSorcery Environment Variables
+                    Environment.SetEnvironmentVariable("SIPSORCERY_HOST_IP", primaryIp);
+                    Environment.SetEnvironmentVariable("SIPSORCERY_BIND_IP", primaryIp);
+                    Environment.SetEnvironmentVariable("RTC_HOST_IP", primaryIp);
+
+                    LogToFile($"✅ [CLIENT-NETWORK] Client SIPSorcery configuration applied:", forceLog: true);
+                    LogToFile($"   - SIPSORCERY_HOST_IP: {primaryIp}", forceLog: true);
+                    LogToFile($"   - SIPSORCERY_BIND_IP: {primaryIp}", forceLog: true);
+                    LogToFile($"   - RTC_HOST_IP: {primaryIp}", forceLog: true);
+                    LogToFile($"   - Stored for API calls: {_detectedClientIP}", forceLog: true);
+                }
+                else
+                {
+                    LogToFile("⚠️ [CLIENT-NETWORK] No valid network IPs found, client will use 127.0.0.1", forceLog: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"❌ [CLIENT-NETWORK] Error detecting client network IPs: {ex.Message}", forceLog: true);
+            }
+        }
+
+        #endregion
+
+        #region P2PManager VB.NET Event Handlers
+
+        /// <summary>Handler pour les messages texte reçus via P2P direct (VB.NET P2PManager)</summary>
+        private async void OnP2PTextReceived(string fromPeer, string text)
+        {
+            try
+            {
+                await LogToFile($"📨 [P2P-RX] Text message received from {fromPeer}: {text?.Substring(0, Math.Min(100, text?.Length ?? 0))}");
+                Console.WriteLine($"📨 [P2P-RX] Text message received from {fromPeer}: {text?.Substring(0, Math.Min(50, text?.Length ?? 0))}");
+
+                // Traiter le message comme un chat message
+                if (!string.IsNullOrEmpty(text))
+                {
+                    Dispatcher.Invoke(async () =>
+                    {
+                        // Créer un message de chat depuis le message P2P
+                        var chatMessage = new ChatMessage
+                        {
+                            Content = text,
+                            Timestamp = DateTime.Now,
+                            Sender = fromPeer,
+                            IsFromMe = false
+                        };
+
+                        // Ajouter à l'UI et l'historique
+                        AddMessageToHistory(fromPeer, chatMessage);
+
+                        // Si c'est la session de chat active, afficher immédiatement
+                        if (_currentChatSession != null && _currentChatSession.PeerName == fromPeer)
+                        {
+                            AddMessageToUI(chatMessage);
+                        }
+                        else
+                        {
+                            // Montrer notification pour nouveau message
+                            ShowChatNotification(fromPeer);
+                        }
+
+                        await LogToFile($"✅ [P2P-RX] Text message from {fromPeer} processed and added to UI");
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [P2P-RX] Error processing text message from {fromPeer}: {ex.Message}");
+                Console.WriteLine($"❌ [P2P-RX] Error processing text message: {ex.Message}");
+            }
+        }
+
+        /// <summary>Handler pour les messages binaires reçus via P2P direct (VB.NET P2PManager)</summary>
+        private async void OnP2PBinaryReceived(string fromPeer, byte[] data)
+        {
+            try
+            {
+                await LogToFile($"📨 [P2P-RX] Binary data received from {fromPeer}: {data?.Length ?? 0} bytes");
+                Console.WriteLine($"📨 [P2P-RX] Binary data received from {fromPeer}: {data?.Length ?? 0} bytes");
+
+                // TODO: Traiter les données binaires (fichiers, etc.)
+                // Pour l'instant, juste logger
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [P2P-RX] Error processing binary data from {fromPeer}: {ex.Message}");
+                Console.WriteLine($"❌ [P2P-RX] Error processing binary data: {ex.Message}");
+            }
+        }
+
+        /// <summary>Handler pour les changements d'état P2P (VB.NET P2PManager)</summary>
+        private async void OnP2PStateChanged(string peer, bool connected)
+        {
+            try
+            {
+                await LogToFile($"🔄 [P2P-STATE] Peer {peer} connection state: {connected}");
+                Console.WriteLine($"🔄 [P2P-STATE] Peer {peer} connection state: {connected}");
+
+                // TODO: Mettre à jour l'UI pour refléter l'état de connexion P2P
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [P2P-STATE] Error processing state change for {peer}: {ex.Message}");
+            }
+        }
+
+        /// <summary>Handler pour les logs du P2PManager VB.NET</summary>
+        private async void OnP2PLogReceived(string peer, string logMessage)
+        {
+            try
+            {
+                await LogToFile($"🔍 [P2P-LOG] {peer}: {logMessage}");
+                Console.WriteLine($"🔍 [P2P-LOG] {peer}: {logMessage}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [P2P-LOG] Error processing log message: {ex.Message}");
+            }
+        }
+
+        #endregion
     }
 }

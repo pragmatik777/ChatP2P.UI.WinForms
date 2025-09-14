@@ -13,7 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\ChatP2P.Core\ChatP2P.Core.vbproj" />
+    <!-- ✅ REMOVED: ChatP2P.Core reference - using C# ChatP2P.Server/Client instead -->
     <ProjectReference Include="..\ChatP2P.Crypto\ChatP2P.Crypto.vbproj" />
   </ItemGroup>
 
