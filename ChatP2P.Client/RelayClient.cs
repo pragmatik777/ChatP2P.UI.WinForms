@@ -71,7 +71,7 @@ namespace ChatP2P.Client
             }
             catch { /* Ignore log errors */ }
         }
-        public event Action<string, string>? FriendRequestAccepted; // from, to
+        public event Action<string, string, string?>? FriendRequestAccepted; // from, to, pqcPublicKey
         public event Action<string, string>? FriendRequestRejected; // from, to
         public event Action<string, string, string>? PrivateMessageReceived; // from, to, message
         public event Action<List<string>>? PeerListUpdated;
@@ -190,13 +190,16 @@ namespace ChatP2P.Client
             }
         }
         
-        public async Task<bool> AcceptFriendRequestAsync(string fromPeer, string toPeer)
+        public async Task<bool> AcceptFriendRequestAsync(string fromPeer, string toPeer, string? myPqcPublicKey = null)
         {
             if (!_isConnected || _friendRequestWriter == null) return false;
-            
+
             try
             {
-                var response = $"FRIEND_ACCEPT:{fromPeer}:{toPeer}";
+                // ✅ PQC: Include our PQC public key in the acceptance so the requester can encrypt messages to us
+                var response = string.IsNullOrEmpty(myPqcPublicKey)
+                    ? $"FRIEND_ACCEPT:{fromPeer}:{toPeer}"
+                    : $"FRIEND_ACCEPT:{fromPeer}:{toPeer}:{myPqcPublicKey}";
                 await _friendRequestWriter.WriteLineAsync(response);
                 Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer}");
                 return true;
@@ -476,15 +479,16 @@ namespace ChatP2P.Client
                 }
                 else if (message.StartsWith("FRIEND_ACCEPT:"))
                 {
-                    // Format: FRIEND_ACCEPT:fromPeer:toPeer
-                    var parts = message.Substring("FRIEND_ACCEPT:".Length).Split(':');
+                    // Format: FRIEND_ACCEPT:fromPeer:toPeer OR FRIEND_ACCEPT:fromPeer:toPeer:pqcPublicKey
+                    var parts = message.Substring("FRIEND_ACCEPT:".Length).Split(':', 3);
                     if (parts.Length >= 2)
                     {
                         var fromPeer = parts[0];
                         var toPeer = parts[1];
-                        
-                        Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer}");
-                        FriendRequestAccepted?.Invoke(fromPeer, toPeer);
+                        var pqcPublicKey = parts.Length >= 3 ? parts[2] : null; // ✅ PQC key optional
+
+                        Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer} (PQC: {!string.IsNullOrEmpty(pqcPublicKey)})");
+                        FriendRequestAccepted?.Invoke(fromPeer, toPeer, pqcPublicKey);
                     }
                 }
                 else if (message.StartsWith("FRIEND_REJECT:"))

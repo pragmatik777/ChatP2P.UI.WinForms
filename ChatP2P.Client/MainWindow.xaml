@@ -158,11 +158,14 @@
                     
                     <!-- Action Buttons -->
                     <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Name="btnSecurityCenter" Content="🛡 Security Center" Width="150" Height="35" 
-                                Margin="0,0,15,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent" 
+                        <Button Name="btnTestCrypto" Content="🔐 Test Crypto" Width="120" Height="35"
+                                Margin="0,0,15,0" Background="#FF9C27B0" Foreground="White" BorderBrush="Transparent"
+                                Click="BtnTestCrypto_Click"/>
+                        <Button Name="btnSecurityCenter" Content="🛡 Security Center" Width="150" Height="35"
+                                Margin="0,0,15,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
                                 Click="BtnSecurityCenter_Click"/>
-                        <Button Name="btnP2PAdvanced" Content="⚙ P2P Config" Width="120" Height="35" 
-                                Background="#FF666666" Foreground="White" BorderBrush="Transparent" 
+                        <Button Name="btnP2PAdvanced" Content="⚙ P2P Config" Width="120" Height="35"
+                                Background="#FF666666" Foreground="White" BorderBrush="Transparent"
                                 Click="BtnP2PAdvanced_Click"/>
                     </StackPanel>
                 </Grid>

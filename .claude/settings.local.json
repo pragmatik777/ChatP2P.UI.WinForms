@@ -14,7 +14,11 @@
       "Bash(find:*)",
       "Read(//c/Users/pragm/OneDrive/Bureau/ChatP2P_Logs/**)",
       "Bash(git restore:*)",
-      "Bash(dotnet clean:*)"
+      "Bash(dotnet clean:*)",
+      "Bash(dotnet list:*)",
+      "Bash(csc:*)",
+      "Bash(dotnet run:*)",
+      "Bash(del \"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\test_crypto.cs\")"
     ],
     "deny": [],
     "ask": []

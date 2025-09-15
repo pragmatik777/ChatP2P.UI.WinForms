@@ -233,6 +233,57 @@ namespace ChatP2P.Client
             }
         }
 
+        private async void BtnRequestPqcKeys_Click(object sender, RoutedEventArgs e)
+        {
+            var peer = GetSelectedPeer();
+            if (peer == null)
+            {
+                MessageBox.Show("Please select a peer first.", "No Selection",
+                              MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (peer.HasPqcKey)
+            {
+                var result = MessageBox.Show($"{peer.Name} already has PQC keys. Request new keys?",
+                                           "Keys Exist", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (result != MessageBoxResult.Yes) return;
+            }
+
+            try
+            {
+                var myPqcKey = await DatabaseService.Instance.GetMyPqcPublicKey();
+                if (myPqcKey == null)
+                {
+                    MessageBox.Show("No PQC key found for local identity. Generate keys first.",
+                                  "No Local Key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var myPqcKeyB64 = Convert.ToBase64String(myPqcKey);
+
+                var relayClient = ((MainWindow)Application.Current.MainWindow)?.GetRelayClient();
+                if (relayClient == null)
+                {
+                    MessageBox.Show("Relay client not available.", "Error",
+                                  MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                var myName = await DatabaseService.Instance.GetMyDisplayName();
+                await relayClient.SendFriendRequestAsync(myName, peer.Name, myPqcKeyB64);
+
+                MessageBox.Show($"PQC key exchange request sent to {peer.Name}.\n" +
+                              "They will receive your public key and can send theirs back.",
+                              "Request Sent", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error requesting PQC keys: {ex.Message}", "Error",
+                              MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         private void BtnClose_Click(object sender, RoutedEventArgs e)
         {
             this.Close();

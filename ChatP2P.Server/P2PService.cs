@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using ChatP2P.Crypto;
 
 namespace ChatP2P.Server
 {
@@ -492,14 +493,16 @@ namespace ChatP2P.Server
                     await Task.Delay(5000); // Attendre 5 secondes pour que les DataChannels s'ouvrent
                 }
 
-                // Préparer le message (chiffrement si demandé)
+                // ✅ SERVEUR = PURE RELAY: Le message arrive déjà chiffré du client
                 string finalMessage = message;
                 if (encrypted)
                 {
-                    Console.WriteLine($"🔐 [P2P-SEND] Chiffrement du message...");
-                    // TODO: Implémenter le chiffrement avec les clés échangées
-                    finalMessage = $"[ENCRYPTED]{message}"; // Placeholder pour l'instant
-                    Console.WriteLine($"🔐 [P2P-SEND] Message chiffré: {finalMessage}");
+                    Console.WriteLine($"🔐 [RELAY] Message marqué comme chiffré - relaying as-is");
+                    // Le serveur ne fait que relayer - pas de chiffrement/déchiffrement côté serveur
+                }
+                else
+                {
+                    Console.WriteLine($"📤 [RELAY] Message en clair - relaying as-is");
                 }
                 
                 // ✅ FIX: Server does NOT create P2P connections

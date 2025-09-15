@@ -266,18 +266,22 @@ namespace ChatP2P.Server
         {
             try
             {
-                // Pour l'instant, validation simplifiée
-                // TODO: Implémenter signature/vérification avec la clé publique
-                
-                // Validation temporaire: le response doit contenir le challenge + clé publique
-                var expectedResponse = Convert.ToBase64String(
-                    System.Text.Encoding.UTF8.GetBytes(originalChallenge + publicKey));
-                
-                return response == expectedResponse;
+                // ✅ NOUVEAU: Validation cryptographique avec Ed25519
+                // Le response doit être une signature Ed25519 du challenge avec la clé publique
+
+                var challengeBytes = Convert.FromBase64String(originalChallenge);
+                var signatureBytes = Convert.FromBase64String(response);
+                var publicKeyBytes = Convert.FromBase64String(publicKey);
+
+                // Vérifier la signature Ed25519
+                var isValid = Ed25519Util.Verify(challengeBytes, signatureBytes, publicKeyBytes);
+
+                Console.WriteLine($"🔐 [CRYPTO-AUTH] Challenge signature validation: {isValid} for peer with key: {publicKey[..20]}...");
+                return isValid;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Erreur validation challenge: {ex.Message}");
+                Console.WriteLine($"❌ [CRYPTO-AUTH] Erreur validation challenge: {ex.Message}");
                 return false;
             }
         }
@@ -286,15 +290,21 @@ namespace ChatP2P.Server
         {
             try
             {
-                // Validation que l'initiateur a bien reçu et validé la clé du responder
-                var expectedVerification = Convert.ToBase64String(
-                    System.Text.Encoding.UTF8.GetBytes(session.SessionId + session.ResponderPublicKey));
-                
-                return verification == expectedVerification;
+                // ✅ NOUVEAU: Validation cryptographique avec Ed25519
+                // L'initiateur doit signer (SessionId + ResponderPublicKey) avec sa clé privée
+
+                var dataToVerify = System.Text.Encoding.UTF8.GetBytes(session.SessionId + session.ResponderPublicKey);
+                var signatureBytes = Convert.FromBase64String(verification);
+                var initiatorPublicKeyBytes = Convert.FromBase64String(session.InitiatorPublicKey);
+
+                var isValid = Ed25519Util.Verify(dataToVerify, signatureBytes, initiatorPublicKeyBytes);
+
+                Console.WriteLine($"🔐 [CRYPTO-AUTH] Initiator verification: {isValid} for session {session.SessionId}");
+                return isValid;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Erreur validation initiateur: {ex.Message}");
+                Console.WriteLine($"❌ [CRYPTO-AUTH] Erreur validation initiateur: {ex.Message}");
                 return false;
             }
         }

@@ -16,7 +16,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
-using ChatP2P.Crypto;
+// ✅ REMOVED: VB.NET ChatP2P.Crypto - using C# CryptoService directly
 
 namespace ChatP2P.Client
 {
@@ -69,7 +69,7 @@ namespace ChatP2P.Client
         public MainWindow()
         {
             InitializeComponent();
-            
+
             // Initialize local contacts file path
             var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var appFolder = Path.Combine(appDataPath, "ChatP2P");
@@ -83,6 +83,11 @@ namespace ChatP2P.Client
             LoadLocalContacts(); // Load contacts from local file
             this.Loaded += MainWindow_Loaded;
             this.Closing += MainWindow_Closing;
+        }
+
+        public RelayClient? GetRelayClient()
+        {
+            return _relayClient;
         }
 
         private void InitializeCollections()
@@ -450,23 +455,25 @@ namespace ChatP2P.Client
                     _friendRequests.Add(friendRequest);
                     await LogToFile($"Friend request received: {fromPeer} → {toPeer}", forceLog: true);
                     
-                    // TOFU: Verify or store the peer's public key
-                    if (!string.IsNullOrEmpty(publicKey) && publicKey != "pending_key")
+                    // ✅ PQC: Store the peer's PQC public key for encryption
+                    if (!string.IsNullOrEmpty(publicKey) && publicKey != "no_pqc_key")
                     {
-                        var tofuResult = await VerifyTofuPublicKey(fromPeer, publicKey);
-                        if (!tofuResult)
+                        try
                         {
-                            // Key mismatch detected - could be a security issue
-                            MessageBox.Show($"⚠️ Security Warning: Public key mismatch detected for {fromPeer}!\n\n" +
-                                          "This could indicate a potential security issue. The peer's public key " +
-                                          "has changed since your last interaction. Please verify this is expected " +
-                                          "before accepting the friend request.", 
-                                          "TOFU Security Alert", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            var pqcPublicKeyBytes = Convert.FromBase64String(publicKey);
+                            await DatabaseService.Instance.AddPeerKey(fromPeer, "PQ", pqcPublicKeyBytes, "Friend request PQC key");
+                            await CryptoService.LogCrypto($"🔑 [FRIEND-REQ] Stored PQC public key for {fromPeer}: {publicKey.Substring(0, Math.Min(40, publicKey.Length))}...");
+                            await LogToFile($"✅ PQC key stored for {fromPeer} from friend request", forceLog: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            await CryptoService.LogCrypto($"❌ [FRIEND-REQ] Failed to store PQC key for {fromPeer}: {ex.Message}");
+                            await LogToFile($"❌ Failed to store PQC key for {fromPeer}: {ex.Message}", forceLog: true);
                         }
                     }
                     else
                     {
-                        await LogToFile($"TOFU: Skipping verification for {fromPeer} - no valid public key provided", forceLog: true);
+                        await LogToFile($"⚠️ No valid PQC key provided by {fromPeer} in friend request", forceLog: true);
                     }
                     
                     // NOTE: Server persistence is now handled by RelayHub event handler
@@ -479,16 +486,33 @@ namespace ChatP2P.Client
             });
         }
 
-        private void OnFriendRequestAccepted(string fromPeer, string toPeer)
+        private void OnFriendRequestAccepted(string fromPeer, string toPeer, string? pqcPublicKey)
         {
             Dispatcher.Invoke(async () =>
             {
                 // La demande a été acceptée - mettre à jour la DB locale et retirer de la liste
                 try
                 {
-                    await LogToFile($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}", forceLog: true);
-                    Console.WriteLine($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}");
+                    await LogToFile($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}, PQC={!string.IsNullOrEmpty(pqcPublicKey)}", forceLog: true);
+                    Console.WriteLine($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}, PQC={!string.IsNullOrEmpty(pqcPublicKey)}");
                     
+                    // ✅ PQC: Store the accepter's PQC public key if provided
+                    if (!string.IsNullOrEmpty(pqcPublicKey))
+                    {
+                        try
+                        {
+                            var pqcPublicKeyBytes = Convert.FromBase64String(pqcPublicKey);
+                            await DatabaseService.Instance.AddPeerKey(toPeer, "PQ", pqcPublicKeyBytes, "Friend acceptance PQC key");
+                            await CryptoService.LogCrypto($"🔑 [FRIEND-ACCEPT] Stored PQC public key for {toPeer}: {pqcPublicKey.Substring(0, Math.Min(40, pqcPublicKey.Length))}...");
+                            await LogToFile($"✅ PQC key stored for {toPeer} from friend acceptance", forceLog: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            await CryptoService.LogCrypto($"❌ [FRIEND-ACCEPT] Failed to store PQC key for {toPeer}: {ex.Message}");
+                            await LogToFile($"❌ Failed to store PQC key for {toPeer}: {ex.Message}", forceLog: true);
+                        }
+                    }
+
                     await DatabaseService.Instance.SetPeerTrusted(toPeer, true, $"Trusted by {toPeer} via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                     await DatabaseService.Instance.SetPeerVerified(toPeer, true); // Mark as verified contact
                     await DatabaseService.Instance.LogSecurityEvent(toPeer, "FRIEND_ACCEPT_SENDER", $"Our friend request was accepted by {toPeer}, marking them as trusted and verified");
@@ -634,6 +658,14 @@ namespace ChatP2P.Client
                 await LogToFile($"💬 [CHAT-RX] Message reçu de {fromPeer}: {content}", forceLog: true);
                 Console.WriteLine($"💬 [CHAT-RX] Message reçu de {fromPeer}: {content}");
 
+                // ✅ NOUVEAU: Déchiffrement des messages chiffrés
+                string decryptedContent = await DecryptMessageIfNeeded(content, fromPeer);
+                if (decryptedContent != content)
+                {
+                    await LogToFile($"🔓 [DECRYPT] Message déchiffré de {fromPeer}");
+                    content = decryptedContent; // Utiliser le contenu déchiffré
+                }
+
                 // ✅ ROBUSTE: Validation JSON complète pour STATUS_SYNC
                 if (IsStatusSyncMessage(content))
                 {
@@ -685,6 +717,114 @@ namespace ChatP2P.Client
                     await LogToFile($"🔔 [NOTIFICATION] Point rouge affiché sur onglet Chat pour {fromPeer}");
                 }
             });
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Déchiffre un message si nécessaire (détecte les préfixes de chiffrement)
+        /// </summary>
+        private async Task<string> DecryptMessageIfNeeded(string content, string fromPeer)
+        {
+            try
+            {
+                // Vérifier les différents préfixes de chiffrement
+                if (content.StartsWith("[PQC_ENCRYPTED]"))
+                {
+                    var encryptedBase64 = content.Substring("[PQC_ENCRYPTED]".Length);
+                    var encryptedBytes = Convert.FromBase64String(encryptedBase64);
+
+                    // Récupérer notre clé privée locale pour déchiffrer
+                    var ourPrivateKey = await GetOurPrivateDecryptionKey();
+                    if (ourPrivateKey == null)
+                    {
+                        await LogToFile($"❌ [DECRYPT] Pas de clé privée disponible pour déchiffrer le message de {fromPeer}");
+                        return "[DECRYPT_ERROR: No private key]";
+                    }
+
+                    // Déchiffrer avec PQC
+                    var decryptedText = await CryptoService.DecryptMessage(encryptedBytes, ourPrivateKey);
+                    await LogToFile($"🔓 [DECRYPT] Message PQC déchiffré de {fromPeer}");
+                    return decryptedText;
+                }
+                else if (content.StartsWith("[ENCRYPTED]"))
+                {
+                    // Ancien format placeholder - juste retirer le préfixe
+                    return content.Substring("[ENCRYPTED]".Length);
+                }
+                else if (content.StartsWith("[NO_KEY]"))
+                {
+                    // Message envoyé sans clé publique disponible
+                    return content.Substring("[NO_KEY]".Length) + " [⚠️ Sent unencrypted - no key]";
+                }
+                else if (content.StartsWith("[ENCRYPT_ERROR]"))
+                {
+                    // Erreur lors du chiffrement côté expéditeur
+                    return content.Substring("[ENCRYPT_ERROR]".Length) + " [⚠️ Encryption failed]";
+                }
+
+                // Pas de chiffrement détecté
+                return content;
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [DECRYPT] Erreur déchiffrement message de {fromPeer}: {ex.Message}");
+                return $"[DECRYPT_ERROR: {ex.Message}]";
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Chiffre un message pour un peer spécifique
+        /// </summary>
+        private async Task<string> EncryptMessageForPeer(string plainText, string peerName)
+        {
+            try
+            {
+                // Récupérer la clé publique PQC du destinataire depuis notre DB locale
+                var peerKeys = await DatabaseService.Instance.GetPeerKeys(peerName, "PQ");
+                var activePqKey = peerKeys.FirstOrDefault(k => !k.Revoked && k.Public != null);
+
+                if (activePqKey?.Public == null)
+                {
+                    await LogToFile($"❌ [CLIENT-ENCRYPT] Pas de clé PQC pour {peerName} - envoi en clair");
+                    return $"[NO_PQ_KEY]{plainText}";
+                }
+
+                // Chiffrer le message avec la crypto PQC
+                var encryptedBytes = await CryptoService.EncryptMessage(plainText, activePqKey.Public);
+                var encryptedBase64 = Convert.ToBase64String(encryptedBytes);
+
+                await LogToFile($"🔐 [CLIENT-ENCRYPT] Message chiffré avec clé PQC de {peerName}");
+                return $"[PQC_ENCRYPTED]{encryptedBase64}";
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [CLIENT-ENCRYPT] Erreur chiffrement pour {peerName}: {ex.Message}");
+                return $"[ENCRYPT_ERROR]{plainText}";
+            }
+        }
+
+        /// <summary>
+        /// Récupère notre clé privée locale pour le déchiffrement
+        /// </summary>
+        private async Task<byte[]?> GetOurPrivateDecryptionKey()
+        {
+            try
+            {
+                // ✅ NOUVEAU: Récupérer la clé privée PQC depuis la DB
+                var identity = await DatabaseService.Instance.GetIdentity();
+                if (identity?.PqPriv != null)
+                {
+                    await LogToFile($"🔑 [KEY-MGMT] Clé privée PQC récupérée depuis la DB");
+                    return identity.PqPriv;
+                }
+
+                await LogToFile($"❌ [KEY-MGMT] Pas de clé privée PQC disponible");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [KEY-MGMT] Erreur récupération clé privée: {ex.Message}");
+                return null;
+            }
         }
 
         /// <summary>
@@ -1827,14 +1967,16 @@ namespace ChatP2P.Client
                     {
                         var myDisplayName = txtDisplayName.Text.Trim();
                         
-                        // Get our public key from the server
-                        var myPublicKey = await GetMyPublicKey() ?? "no_public_key";
-                        await LogToFile($"Using public key for friend request: {myPublicKey}", forceLog: true);
+                        // ✅ PQC: Get our PQC public key for friend request
+                        await DatabaseService.Instance.EnsurePqIdentity(); // Ensure we have PQC keys
+                        var identity = await DatabaseService.Instance.GetIdentity();
+                        var myPqPublicKey = identity?.PqPub != null ? Convert.ToBase64String(identity.PqPub) : "no_pqc_key";
+                        await CryptoService.LogCrypto($"🔑 [FRIEND-REQ] Using PQC public key for friend request: {myPqPublicKey.Substring(0, Math.Min(40, myPqPublicKey.Length))}...");
                         
                         var success = await _relayClient.SendFriendRequestAsync(
-                            myDisplayName, 
-                            peerToAdd.Name, 
-                            myPublicKey, // Use actual public key
+                            myDisplayName,
+                            peerToAdd.Name,
+                            myPqPublicKey, // ✅ Use PQC public key
                             $"Friend request from {myDisplayName}"
                         );
                         
@@ -1920,10 +2062,16 @@ namespace ChatP2P.Client
                 {
                     var displayName = txtDisplayName.Text.Trim();
                     
-                    // Accept friend request via RelayClient
+                    // ✅ PQC: Accept friend request via RelayClient with our PQC key
                     if (_relayClient?.IsConnected == true)
                     {
-                        var success = await _relayClient.AcceptFriendRequestAsync(request.FromPeer, displayName);
+                        // Get our PQC public key to send back
+                        await DatabaseService.Instance.EnsurePqIdentity();
+                        var identity = await DatabaseService.Instance.GetIdentity();
+                        var myPqPublicKey = identity?.PqPub != null ? Convert.ToBase64String(identity.PqPub) : null;
+                        await CryptoService.LogCrypto($"🔑 [FRIEND-ACCEPT] Sending our PQC key to {request.FromPeer}: {myPqPublicKey?.Substring(0, Math.Min(40, myPqPublicKey.Length))}...");
+
+                        var success = await _relayClient.AcceptFriendRequestAsync(request.FromPeer, displayName, myPqPublicKey);
                         
                         if (success)
                         {
@@ -2032,6 +2180,48 @@ namespace ChatP2P.Client
             else
             {
                 MessageBox.Show("Please select a peer first", "No Peer Selected", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        }
+
+        private async void BtnTestCrypto_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                await LogToFile("🔐 [TEST-CRYPTO] Starting ECDH+AES-GCM test...");
+
+                // 1. Générer clés de test
+                var vm1Keys = await CryptoService.GenerateKeyPair();
+                var vm2Keys = await CryptoService.GenerateKeyPair();
+
+                await LogToFile($"✅ [TEST-CRYPTO] VM1 generated: {vm1Keys.Algorithm}");
+                await LogToFile($"✅ [TEST-CRYPTO] VM2 generated: {vm2Keys.Algorithm}");
+
+                // 2. Test chiffrement/déchiffrement
+                string testMessage = $"Test crypto message at {DateTime.Now:HH:mm:ss} 🚀";
+                await LogToFile($"📝 [TEST-CRYPTO] Original: {testMessage}");
+
+                var encrypted = await CryptoService.EncryptMessage(testMessage, vm2Keys.PublicKey);
+                await LogToFile($"🔐 [TEST-CRYPTO] Encrypted: {encrypted.Length} bytes");
+
+                var decrypted = await CryptoService.DecryptMessage(encrypted, vm2Keys.PrivateKey);
+                await LogToFile($"🔓 [TEST-CRYPTO] Decrypted: {decrypted}");
+
+                // 3. Vérification
+                if (testMessage == decrypted)
+                {
+                    await LogToFile("✅ [TEST-CRYPTO] SUCCESS: Crypto ECDH+AES-GCM works perfectly!");
+                    MessageBox.Show("✅ Crypto test SUCCESS!\nECDH+AES-GCM fonctionne parfaitement.\nVoir logs pour détails.", "Test Crypto", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    await LogToFile("❌ [TEST-CRYPTO] FAIL: Messages don't match");
+                    MessageBox.Show($"❌ Crypto test FAILED!\nOriginal: {testMessage}\nDecrypted: {decrypted}", "Test Crypto", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [TEST-CRYPTO] Error: {ex.Message}");
+                MessageBox.Show($"❌ Test crypto error:\n{ex.Message}", "Test Crypto", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -2291,10 +2481,20 @@ namespace ChatP2P.Client
             var messageText = txtMessage.Text.Trim();
             txtMessage.Text = "";
 
-            // Create message object
+            // ✅ NOUVEAU: Chiffrer le message AVANT envoi si nécessaire
+            var finalMessageToSend = messageText;
+            var isRelayEncrypted = chkEncryptRelay?.IsChecked == true;
+
+            if (isRelayEncrypted)
+            {
+                finalMessageToSend = await EncryptMessageForPeer(messageText, _currentChatSession.PeerName);
+                await LogToFile($"🔐 [CLIENT-ENCRYPT] Message chiffré pour {_currentChatSession.PeerName}");
+            }
+
+            // Create message object (pour UI - gardons le texte original non-chiffré)
             var message = new ChatMessage
             {
-                Content = messageText,
+                Content = messageText, // ⚠️ UI affiche toujours le texte clair
                 Sender = txtDisplayName.Text,
                 IsFromMe = true,
                 Timestamp = DateTime.Now,
@@ -2312,7 +2512,7 @@ namespace ChatP2P.Client
                 Console.WriteLine($"🚀 [P2P-WEBRTC] Attempting to send message to {_currentChatSession.PeerName} via DataChannel");
 
                 // ✅ FIX: Utiliser WebRTCDirectClient au lieu de hardcoded false
-                var success = _webrtcClient != null && await _webrtcClient.SendMessageAsync(_currentChatSession.PeerName, messageText);
+                var success = _webrtcClient != null && await _webrtcClient.SendMessageAsync(_currentChatSession.PeerName, finalMessageToSend);
 
                 if (success)
                 {
@@ -2328,7 +2528,8 @@ namespace ChatP2P.Client
                     var response = await SendApiRequest("p2p", "send_message", new {
                         from = Properties.Settings.Default.DisplayName,
                         peer = _currentChatSession.PeerName,
-                        message = messageText
+                        message = finalMessageToSend, // ✅ Envoyer le message (potentiellement chiffré)
+                        encrypted = isRelayEncrypted.ToString().ToLower()
                     });
 
                     if (response?.Success != true)
@@ -3255,13 +3456,19 @@ namespace ChatP2P.Client
         {
             try
             {
-                // Use the original VB.NET P2PMessageCrypto module
-                var keyPair = P2PMessageCrypto.GenerateKeyPair();
-                var publicKeyBase64 = Convert.ToBase64String(keyPair.PublicKey);
-                
-                await LogToFile($"Generated P2P public key: {keyPair.Algorithm} ({publicKeyBase64.Substring(0, Math.Min(16, publicKeyBase64.Length))}...)", forceLog: true);
-                
-                return publicKeyBase64;
+                // ✅ NOUVEAU: Utiliser clé persistante depuis la DB
+                await DatabaseService.Instance.EnsurePqIdentity();
+                var identity = await DatabaseService.Instance.GetIdentity();
+
+                if (identity?.PqPub != null)
+                {
+                    var publicKeyBase64 = Convert.ToBase64String(identity.PqPub);
+                    await LogToFile($"Using persistent PQ public key ({publicKeyBase64.Substring(0, Math.Min(16, publicKeyBase64.Length))}...)", forceLog: true);
+                    return publicKeyBase64;
+                }
+
+                await LogToFile($"No PQ public key available", forceLog: true);
+                return null;
             }
             catch (Exception ex)
             {
@@ -3675,7 +3882,8 @@ namespace ChatP2P.Client
                     {
                         from = displayName,
                         peer = peerName,
-                        message = jsonMessage
+                        message = jsonMessage,
+                        encrypted = "false" // Status sync messages are never encrypted
                     });
                     
                     if (response?.Success == true)

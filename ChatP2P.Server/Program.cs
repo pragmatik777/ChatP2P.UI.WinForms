@@ -39,9 +39,6 @@ namespace ChatP2P.Server
 
             try
             {
-                // Diagnostic STUN au démarrage
-                await DiagnoseStunConnectivity();
-
                 // ✅ NOUVEAU: Configuration réseau AVANT l'initialisation SIPSorcery
                 DetectAndLogNetworkIPs();
 

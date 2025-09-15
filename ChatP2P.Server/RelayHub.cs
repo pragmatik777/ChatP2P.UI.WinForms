@@ -507,12 +507,13 @@ namespace ChatP2P.Server
 
         private async Task HandleFriendAccept(ClientConnection client, string message)
         {
-            // Format: FRIEND_ACCEPT:fromPeer:toPeer
-            var parts = message.Substring(ProtocolTags.TAG_FRIEND_ACCEPT.Length).Split(':');
+            // Format: FRIEND_ACCEPT:fromPeer:toPeer OR FRIEND_ACCEPT:fromPeer:toPeer:pqcPublicKey
+            var parts = message.Substring(ProtocolTags.TAG_FRIEND_ACCEPT.Length).Split(':', 3);
             if (parts.Length < 2) return;
 
             var fromPeer = parts[0];
             var toPeer = parts[1];
+            var pqcPublicKey = parts.Length >= 3 ? parts[2] : null; // ✅ PQC key optional
 
             Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer}");
 
@@ -534,13 +535,16 @@ namespace ChatP2P.Server
                 Console.WriteLine($"❌ Erreur acceptation friend request: {ex.Message}");
             }
 
-            // Transmettre la réponse au demandeur original via le canal friend requests
+            // ✅ PQC: Transmettre la réponse au demandeur original avec clé PQC si fournie
             if (_friendRequestNameToId.TryGetValue(fromPeer, out var targetClientId) &&
                 _friendRequestClients.TryGetValue(targetClientId, out var targetClient))
             {
                 Console.WriteLine($"[DEBUG] Envoi FRIEND_ACCEPT à {fromPeer} via canal friend request (ID: {targetClientId})");
-                await targetClient.SendAsync($"{ProtocolTags.TAG_FRIEND_ACCEPT}{fromPeer}:{toPeer}");
-                Console.WriteLine($"[DEBUG] FRIEND_ACCEPT envoyé avec succès à {fromPeer}");
+                var acceptMessage = string.IsNullOrEmpty(pqcPublicKey)
+                    ? $"{ProtocolTags.TAG_FRIEND_ACCEPT}{fromPeer}:{toPeer}"
+                    : $"{ProtocolTags.TAG_FRIEND_ACCEPT}{fromPeer}:{toPeer}:{pqcPublicKey}";
+                await targetClient.SendAsync(acceptMessage);
+                Console.WriteLine($"[DEBUG] FRIEND_ACCEPT envoyé avec succès à {fromPeer} (PQC: {!string.IsNullOrEmpty(pqcPublicKey)})");
             }
             else
             {

@@ -55,6 +55,8 @@ namespace ChatP2P.Client
         public int Id { get; set; } = 1;
         public byte[]? Ed25519Pub { get; set; }
         public byte[]? Ed25519Priv { get; set; }
+        public byte[]? PqPub { get; set; }
+        public byte[]? PqPriv { get; set; }
     }
 
     public class SecurityEvent
@@ -80,6 +82,8 @@ namespace ChatP2P.Client
         private bool _trusted = false;
         private bool _authOk = false;
         private string _fingerprint = "";
+        private string _pqcFingerprint = "";
+        private bool _hasPqcKey = false;
         private string _createdUtc = "";
         private string _lastSeenUtc = "";
         private string _note = "";
@@ -106,6 +110,18 @@ namespace ChatP2P.Client
         {
             get => _fingerprint;
             set { _fingerprint = value; OnPropertyChanged(nameof(Fingerprint)); }
+        }
+
+        public string PqcFingerprint
+        {
+            get => _pqcFingerprint;
+            set { _pqcFingerprint = value; OnPropertyChanged(nameof(PqcFingerprint)); }
+        }
+
+        public bool HasPqcKey
+        {
+            get => _hasPqcKey;
+            set { _hasPqcKey = value; OnPropertyChanged(nameof(HasPqcKey)); }
         }
 
         public string CreatedUtc
@@ -212,8 +228,14 @@ namespace ChatP2P.Client
                 @"CREATE TABLE IF NOT EXISTS Identities(
                     Id INTEGER PRIMARY KEY CHECK (Id = 1),
                     Ed25519Pub BLOB NULL,
-                    Ed25519Priv BLOB NULL
+                    Ed25519Priv BLOB NULL,
+                    PqPub BLOB NULL,
+                    PqPriv BLOB NULL
                 );",
+
+                // ✅ NOUVEAU: Migration pour ajouter colonnes PQC si elles n'existent pas
+                @"ALTER TABLE Identities ADD COLUMN PqPub BLOB NULL;",
+                @"ALTER TABLE Identities ADD COLUMN PqPriv BLOB NULL;",
                 
                 @"INSERT OR IGNORE INTO Identities(Id) VALUES(1);",
 
@@ -257,8 +279,16 @@ namespace ChatP2P.Client
 
             foreach (var cmd in commands)
             {
-                using var command = new SQLiteCommand(cmd, connection);
-                command.ExecuteNonQuery();
+                try
+                {
+                    using var command = new SQLiteCommand(cmd, connection);
+                    command.ExecuteNonQuery();
+                }
+                catch (System.Data.SQLite.SQLiteException ex) when (ex.Message.Contains("duplicate column"))
+                {
+                    // Ignore duplicate column errors (migrations)
+                    Console.WriteLine($"Column already exists (ignored): {ex.Message}");
+                }
             }
 
             Console.WriteLine($"Database initialized at: {_dbPath}");
@@ -539,7 +569,9 @@ namespace ChatP2P.Client
                 {
                     Id = GetSafeInt(reader, "Id"),
                     Ed25519Pub = GetSafeBytesOrNull(reader, "Ed25519Pub"),
-                    Ed25519Priv = GetSafeBytesOrNull(reader, "Ed25519Priv")
+                    Ed25519Priv = GetSafeBytesOrNull(reader, "Ed25519Priv"),
+                    PqPub = GetSafeBytesOrNull(reader, "PqPub"),
+                    PqPriv = GetSafeBytesOrNull(reader, "PqPriv")
                 };
             }
             return null;
@@ -549,13 +581,28 @@ namespace ChatP2P.Client
         {
             using var connection = new SQLiteConnection(_connectionString);
             await connection.OpenAsync();
-            
+
             using var command = new SQLiteCommand(
-                @"UPDATE Identities SET Ed25519Pub = @pub, Ed25519Priv = @priv 
+                @"UPDATE Identities SET Ed25519Pub = @pub, Ed25519Priv = @priv
                   WHERE Id = 1", connection);
             command.Parameters.AddWithValue("@pub", publicKey);
             command.Parameters.AddWithValue("@priv", privateKey);
-            
+
+            var rowsAffected = await command.ExecuteNonQueryAsync();
+            return rowsAffected > 0;
+        }
+
+        public async Task<bool> SetIdentityPq(byte[] publicKey, byte[] privateKey)
+        {
+            using var connection = new SQLiteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var command = new SQLiteCommand(
+                @"UPDATE Identities SET PqPub = @pub, PqPriv = @priv
+                  WHERE Id = 1", connection);
+            command.Parameters.AddWithValue("@pub", publicKey);
+            command.Parameters.AddWithValue("@priv", privateKey);
+
             var rowsAffected = await command.ExecuteNonQueryAsync();
             return rowsAffected > 0;
         }
@@ -770,12 +817,29 @@ namespace ChatP2P.Client
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
+                var peerName = GetSafeString(reader, "Name");
+
+                // ✅ Récupérer clés PQC pour ce peer
+                var pqcKeys = await GetPeerKeys(peerName, "PQ");
+                var latestPqcKey = pqcKeys.Where(k => !k.Revoked).OrderByDescending(k => k.CreatedUtc).FirstOrDefault();
+                var pqcFingerprint = "";
+                var hasPqcKey = latestPqcKey?.Public != null;
+
+                if (hasPqcKey)
+                {
+                    // Générer fingerprint PQC (premiers 32 chars du SHA-256)
+                    var pqcFp = ComputeFingerprint(latestPqcKey!.Public);
+                    pqcFingerprint = $"{pqcFp[..8]}-{pqcFp[8..16]}-{pqcFp[16..24]}-{pqcFp[24..32]}";
+                }
+
                 peers.Add(new PeerSecurityInfo
                 {
-                    Name = GetSafeString(reader, "Name"),
+                    Name = peerName,
                     Trusted = GetSafeBool(reader, "Trusted"),
                     AuthOk = GetSafeBool(reader, "Verified"),
                     Fingerprint = GetSafeStringOrNull(reader, "Fingerprint") ?? "",
+                    PqcFingerprint = pqcFingerprint,
+                    HasPqcKey = hasPqcKey,
                     CreatedUtc = GetSafeDateTimeOrNull(reader, "CreatedUtc")?.ToString("yyyy-MM-dd HH:mm") ?? "",
                     LastSeenUtc = GetSafeDateTimeOrNull(reader, "LastSeenUtc")?.ToString("yyyy-MM-dd HH:mm") ?? "",
                     Note = GetSafeStringOrNull(reader, "Note") ?? ""
@@ -789,18 +853,47 @@ namespace ChatP2P.Client
             try
             {
                 var identity = await GetIdentity();
+                var result = new List<string>();
+
+                // Ed25519 Legacy fingerprint
                 if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
                 {
-                    return ComputeFingerprint(identity.Ed25519Pub);
+                    var ed25519Fp = ComputeFingerprint(identity.Ed25519Pub);
+                    result.Add($"Ed25519: {ed25519Fp}");
+                }
+                else
+                {
+                    // Générer une nouvelle identité Ed25519 si nécessaire
+                    await EnsureEd25519Identity();
+                    identity = await GetIdentity();
+                    if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                    {
+                        var ed25519Fp = ComputeFingerprint(identity.Ed25519Pub);
+                        result.Add($"Ed25519: {ed25519Fp}");
+                    }
                 }
 
-                // Générer une nouvelle identité si nécessaire
-                await EnsureEd25519Identity();
-                identity = await GetIdentity();
-                if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                // ✅ PQC fingerprint (ECDH P-384)
+                if (identity?.PqPub != null && identity.PqPub.Length > 0)
                 {
-                    return ComputeFingerprint(identity.Ed25519Pub);
+                    var pqcFp = ComputeFingerprint(identity.PqPub);
+                    var pqcFormatted = $"{pqcFp[..8]}-{pqcFp[8..16]}-{pqcFp[16..24]}-{pqcFp[24..32]}";
+                    result.Add($"PQC: {pqcFormatted}");
                 }
+                else
+                {
+                    // Générer une nouvelle identité PQC si nécessaire
+                    await EnsurePqIdentity();
+                    identity = await GetIdentity();
+                    if (identity?.PqPub != null && identity.PqPub.Length > 0)
+                    {
+                        var pqcFp = ComputeFingerprint(identity.PqPub);
+                        var pqcFormatted = $"{pqcFp[..8]}-{pqcFp[8..16]}-{pqcFp[16..24]}-{pqcFp[24..32]}";
+                        result.Add($"PQC: {pqcFormatted}");
+                    }
+                }
+
+                return result.Count > 0 ? string.Join(" | ", result) : "(unknown)";
             }
             catch (Exception ex)
             {
@@ -836,6 +929,34 @@ namespace ChatP2P.Client
                 Console.WriteLine($"Error exporting key: {ex.Message}");
             }
             return ("", "(unknown)");
+        }
+
+        public async Task<byte[]?> GetMyPqcPublicKey()
+        {
+            try
+            {
+                var identity = await GetIdentity();
+                if (identity?.PqPub != null && identity.PqPub.Length > 0)
+                {
+                    return identity.PqPub;
+                }
+
+                // Générer une nouvelle identité PQC si nécessaire
+                await EnsurePqIdentity();
+                identity = await GetIdentity();
+                return identity?.PqPub;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error getting PQC public key: {ex.Message}");
+                return null;
+            }
+        }
+
+        public async Task<string> GetMyDisplayName()
+        {
+            await Task.CompletedTask; // For async consistency
+            return Environment.MachineName; // Use machine name as display name
         }
 
         public async Task<bool> SetPeerNote(string peerName, string note)
@@ -950,6 +1071,28 @@ namespace ChatP2P.Client
             catch (Exception ex)
             {
                 Console.WriteLine($"Error ensuring Ed25519 identity: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> EnsurePqIdentity()
+        {
+            try
+            {
+                var identity = await GetIdentity();
+                if (identity?.PqPub != null && identity.PqPub.Length > 0)
+                    return true;
+
+                // Générer nouvelle paire PQC avec le module crypto C#
+                var keyPair = await CryptoService.GenerateKeyPair();
+                await SetIdentityPq(keyPair.PublicKey, keyPair.PrivateKey);
+
+                Console.WriteLine($"Generated new PQ identity: {keyPair.Algorithm}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error ensuring PQ identity: {ex.Message}");
                 return false;
             }
         }

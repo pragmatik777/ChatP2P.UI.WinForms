@@ -50,6 +50,8 @@
                     Background="#FF9C27B0" Foreground="White" Click="BtnImportKey_Click"/>
             <Button Name="btnExportFingerprint" Content="Export My FP" Width="120" Height="30" Margin="0,0,5,5"
                     Background="#FF00BCD4" Foreground="White" Click="BtnExportFingerprint_Click"/>
+            <Button Name="btnRequestPqcKeys" Content="🔑 Request PQC Keys" Width="140" Height="30" Margin="0,0,5,5"
+                    Background="#FFE91E63" Foreground="White" Click="BtnRequestPqcKeys_Click"/>
             <Button Name="btnClose" Content="Close" Width="80" Height="30" Margin="0,0,5,5"
                     Background="#FF757575" Foreground="White" Click="BtnClose_Click"/>
         </WrapPanel>
@@ -89,8 +91,8 @@
             </DataGrid.Resources>
 
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Peer" Binding="{Binding Name}" Width="150"/>
-                <DataGridCheckBoxColumn Header="Trusted" Binding="{Binding Trusted}" Width="80">
+                <DataGridTextColumn Header="Peer" Binding="{Binding Name}" Width="120"/>
+                <DataGridCheckBoxColumn Header="Trust" Binding="{Binding Trusted}" Width="60">
                     <DataGridCheckBoxColumn.ElementStyle>
                         <Style TargetType="CheckBox">
                             <Setter Property="IsEnabled" Value="False"/>
@@ -98,7 +100,7 @@
                         </Style>
                     </DataGridCheckBoxColumn.ElementStyle>
                 </DataGridCheckBoxColumn>
-                <DataGridCheckBoxColumn Header="Auth OK" Binding="{Binding AuthOk}" Width="80">
+                <DataGridCheckBoxColumn Header="Auth" Binding="{Binding AuthOk}" Width="60">
                     <DataGridCheckBoxColumn.ElementStyle>
                         <Style TargetType="CheckBox">
                             <Setter Property="IsEnabled" Value="False"/>
@@ -106,9 +108,18 @@
                         </Style>
                     </DataGridCheckBoxColumn.ElementStyle>
                 </DataGridCheckBoxColumn>
-                <DataGridTextColumn Header="Fingerprint" Binding="{Binding Fingerprint}" Width="300"/>
-                <DataGridTextColumn Header="Created" Binding="{Binding CreatedUtc}" Width="120"/>
-                <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenUtc}" Width="120"/>
+                <DataGridCheckBoxColumn Header="PQC" Binding="{Binding HasPqcKey}" Width="50">
+                    <DataGridCheckBoxColumn.ElementStyle>
+                        <Style TargetType="CheckBox">
+                            <Setter Property="IsEnabled" Value="False"/>
+                            <Setter Property="HorizontalAlignment" Value="Center"/>
+                        </Style>
+                    </DataGridCheckBoxColumn.ElementStyle>
+                </DataGridCheckBoxColumn>
+                <DataGridTextColumn Header="Ed25519 FP" Binding="{Binding Fingerprint}" Width="180"/>
+                <DataGridTextColumn Header="PQC Fingerprint" Binding="{Binding PqcFingerprint}" Width="180"/>
+                <DataGridTextColumn Header="Created" Binding="{Binding CreatedUtc}" Width="100"/>
+                <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenUtc}" Width="100"/>
                 <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*"/>
             </DataGrid.Columns>
         </DataGrid>
