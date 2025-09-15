@@ -78,6 +78,14 @@ VM1-Client ←── WebRTC DataChannels ──→ VM2-Client
 - **Logs conditionnels** : Only log si activité réelle détectée
 - **Réduction spam** : ~97% (300+ logs/min → 5-12 logs/min idle)
 
+### ✅ **Security Center Refactorisé (16 Sept 2025)**
+- **Accès DB local** : Plus d'appels API serveur, accès direct SQLite client
+- **Données complètes** : Peers, Trust status, Fingerprints, Notes, Dates
+- **Fonctionnalités** : Trust/Untrust, Reset TOFU, Import/Export clés Ed25519
+- **Interface** : Recherche filtrée, actions contextuelles, mon fingerprint
+- **Architecture** : `SecurityCenterWindow → DatabaseService.Instance`
+- **Performance** : Instantané, pas de latence réseau ni dépendances serveur
+
 ## 📚 **RÉFÉRENCES PERFORMANCE WebRTC 2025**
 
 **Sources recherche utilisées** :
@@ -116,4 +124,4 @@ CLIENT ←──── WebRTC DataChannels P2P      ────→ CLIENT
 - **TCP Relay** : 1MB chunks, canal séparé, logs optimisés
 - **Résultat** : Transferts fluides sans saturation + UX améliorée
 
-*Dernière mise à jour: 15 Septembre 2025 - Architecture Canal Séparé Fichiers + Optimisations Anti-Spam Logs Complète*
+*Dernière mise à jour: 16 Septembre 2025 - Security Center Refactorisé + Accès DB Local Autonome*

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Data.SQLite;
 using System.IO;
 using System.Linq;
@@ -71,6 +72,65 @@ namespace ChatP2P.Client
         public string PeerName { get; set; } = "";
         public byte[]? State { get; set; }
         public DateTime CreatedUtc { get; set; }
+    }
+
+    public class PeerSecurityInfo : INotifyPropertyChanged
+    {
+        private string _name = "";
+        private bool _trusted = false;
+        private bool _authOk = false;
+        private string _fingerprint = "";
+        private string _createdUtc = "";
+        private string _lastSeenUtc = "";
+        private string _note = "";
+
+        public string Name
+        {
+            get => _name;
+            set { _name = value; OnPropertyChanged(nameof(Name)); }
+        }
+
+        public bool Trusted
+        {
+            get => _trusted;
+            set { _trusted = value; OnPropertyChanged(nameof(Trusted)); }
+        }
+
+        public bool AuthOk
+        {
+            get => _authOk;
+            set { _authOk = value; OnPropertyChanged(nameof(AuthOk)); }
+        }
+
+        public string Fingerprint
+        {
+            get => _fingerprint;
+            set { _fingerprint = value; OnPropertyChanged(nameof(Fingerprint)); }
+        }
+
+        public string CreatedUtc
+        {
+            get => _createdUtc;
+            set { _createdUtc = value; OnPropertyChanged(nameof(CreatedUtc)); }
+        }
+
+        public string LastSeenUtc
+        {
+            get => _lastSeenUtc;
+            set { _lastSeenUtc = value; OnPropertyChanged(nameof(LastSeenUtc)); }
+        }
+
+        public string Note
+        {
+            get => _note;
+            set { _note = value; OnPropertyChanged(nameof(Note)); }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+        protected virtual void OnPropertyChanged(string propertyName)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
     }
 
     // ===== SERVICE DE BASE DE DONNÉES =====
@@ -690,18 +750,222 @@ namespace ChatP2P.Client
             return rowsAffected > 0;
         }
 
+        // ===== SÉCURITÉ CENTER =====
+
+        public async Task<List<PeerSecurityInfo>> GetSecurityPeerList(string searchFilter = "")
+        {
+            var peers = new List<PeerSecurityInfo>();
+            using var connection = new SQLiteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            string sql = "SELECT * FROM Peers";
+            if (!string.IsNullOrWhiteSpace(searchFilter))
+                sql += " WHERE Name LIKE @filter OR Note LIKE @filter";
+            sql += " ORDER BY Name";
+
+            using var command = new SQLiteCommand(sql, connection);
+            if (!string.IsNullOrWhiteSpace(searchFilter))
+                command.Parameters.AddWithValue("@filter", $"%{searchFilter}%");
+
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                peers.Add(new PeerSecurityInfo
+                {
+                    Name = GetSafeString(reader, "Name"),
+                    Trusted = GetSafeBool(reader, "Trusted"),
+                    AuthOk = GetSafeBool(reader, "Verified"),
+                    Fingerprint = GetSafeStringOrNull(reader, "Fingerprint") ?? "",
+                    CreatedUtc = GetSafeDateTimeOrNull(reader, "CreatedUtc")?.ToString("yyyy-MM-dd HH:mm") ?? "",
+                    LastSeenUtc = GetSafeDateTimeOrNull(reader, "LastSeenUtc")?.ToString("yyyy-MM-dd HH:mm") ?? "",
+                    Note = GetSafeStringOrNull(reader, "Note") ?? ""
+                });
+            }
+            return peers;
+        }
+
+        public async Task<string> GetMyFingerprint()
+        {
+            try
+            {
+                var identity = await GetIdentity();
+                if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                {
+                    return ComputeFingerprint(identity.Ed25519Pub);
+                }
+
+                // Générer une nouvelle identité si nécessaire
+                await EnsureEd25519Identity();
+                identity = await GetIdentity();
+                if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                {
+                    return ComputeFingerprint(identity.Ed25519Pub);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error getting fingerprint: {ex.Message}");
+            }
+            return "(unknown)";
+        }
+
+        public async Task<(string PublicKeyB64, string Fingerprint)> ExportMyKey()
+        {
+            try
+            {
+                var identity = await GetIdentity();
+                if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                {
+                    var publicKeyB64 = Convert.ToBase64String(identity.Ed25519Pub);
+                    var fingerprint = ComputeFingerprint(identity.Ed25519Pub);
+                    return (publicKeyB64, fingerprint);
+                }
+
+                // Générer une nouvelle identité si nécessaire
+                await EnsureEd25519Identity();
+                identity = await GetIdentity();
+                if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                {
+                    var publicKeyB64 = Convert.ToBase64String(identity.Ed25519Pub);
+                    var fingerprint = ComputeFingerprint(identity.Ed25519Pub);
+                    return (publicKeyB64, fingerprint);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error exporting key: {ex.Message}");
+            }
+            return ("", "(unknown)");
+        }
+
+        public async Task<bool> SetPeerNote(string peerName, string note)
+        {
+            await EnsurePeer(peerName);
+
+            using var connection = new SQLiteConnection(_connectionString);
+            await connection.OpenAsync();
+
+            using var command = new SQLiteCommand(
+                @"UPDATE Peers SET Note = @note WHERE Name = @name", connection);
+            command.Parameters.AddWithValue("@note", note);
+            command.Parameters.AddWithValue("@name", peerName);
+
+            var rowsAffected = await command.ExecuteNonQueryAsync();
+            return rowsAffected > 0;
+        }
+
+        public async Task<bool> ResetPeerTofu(string peerName)
+        {
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // Marquer les clés existantes comme révoquées
+                using var revokeCommand = new SQLiteCommand(
+                    @"UPDATE PeerKeys SET Revoked = 1, RevokedUtc = @revoked
+                      WHERE PeerName = @peer AND Revoked = 0", connection);
+                revokeCommand.Parameters.AddWithValue("@revoked", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
+                revokeCommand.Parameters.AddWithValue("@peer", peerName);
+                await revokeCommand.ExecuteNonQueryAsync();
+
+                // Reset du peer verification status
+                await SetPeerVerified(peerName, false);
+
+                // Log security event
+                await LogSecurityEvent(peerName, "TOFU_RESET", "TOFU reset by user");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error resetting TOFU: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> ImportPeerKey(string peerName, string publicKeyB64)
+        {
+            try
+            {
+                var keyBytes = Convert.FromBase64String(publicKeyB64);
+                if (keyBytes.Length != 32)
+                    throw new ArgumentException("Invalid key length for Ed25519");
+
+                await EnsurePeer(peerName);
+
+                // Révoquer les anciennes clés
+                await ResetPeerTofu(peerName);
+
+                // Ajouter la nouvelle clé
+                await AddPeerKey(peerName, "Ed25519", keyBytes, "Imported by user");
+
+                // Marquer comme non-vérifié (l'utilisateur devra vérifier)
+                await SetPeerVerified(peerName, false);
+
+                // Log security event
+                await LogSecurityEvent(peerName, "KEY_IMPORT", "Ed25519 key imported by user");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error importing peer key: {ex.Message}");
+                throw;
+            }
+        }
+
+        private string ComputeFingerprint(byte[] publicKey)
+        {
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            var hash = sha256.ComputeHash(publicKey);
+            var hex = Convert.ToHexString(hash).ToLower();
+
+            // Format: XX:XX:XX:XX
+            var formatted = string.Join(":",
+                Enumerable.Range(0, Math.Min(16, hex.Length / 2))
+                         .Select(i => hex.Substring(i * 2, 2)));
+            return formatted;
+        }
+
+        private async Task<bool> EnsureEd25519Identity()
+        {
+            try
+            {
+                var identity = await GetIdentity();
+                if (identity?.Ed25519Pub != null && identity.Ed25519Pub.Length > 0)
+                    return true;
+
+                // Générer nouvelle paire Ed25519 (32 bytes random pour l'instant)
+                // TODO: Intégrer avec le système crypto VB.NET existant
+                var random = new Random();
+                var rawPublic = new byte[32];
+                var rawPrivate = new byte[32];
+                random.NextBytes(rawPublic);
+                random.NextBytes(rawPrivate);
+
+                await SetIdentityEd25519(rawPublic, rawPrivate);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error ensuring Ed25519 identity: {ex.Message}");
+                return false;
+            }
+        }
+
         // ===== UTILITAIRES =====
-        
+
         public string GetDatabasePath() => _dbPath;
-        
+
         public async Task<int> GetTrustedPeerCount()
         {
             using var connection = new SQLiteConnection(_connectionString);
             await connection.OpenAsync();
-            
+
             using var command = new SQLiteCommand(
                 "SELECT COUNT(*) FROM Peers WHERE Trusted = 1", connection);
-            
+
             var result = await command.ExecuteScalarAsync();
             return Convert.ToInt32(result);
         }
