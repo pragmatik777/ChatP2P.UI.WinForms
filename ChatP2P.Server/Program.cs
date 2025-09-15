@@ -140,7 +140,11 @@ namespace ChatP2P.Server
                 var apiRequest = JsonSerializer.Deserialize<ApiRequest>(request);
                 if (apiRequest == null) return CreateErrorResponse("Format de requête invalide");
                 
-                Console.WriteLine($"API: {apiRequest.Command} - {apiRequest.Action}");
+                // Only log API calls that are not frequent polling requests
+                if (!(apiRequest.Command?.ToLower() == "contacts" && apiRequest.Action?.ToLower() == "get_friend_requests"))
+                {
+                    Console.WriteLine($"API: {apiRequest.Command} - {apiRequest.Action}");
+                }
                 
                 return apiRequest.Command.ToLower() switch
                 {
@@ -162,8 +166,11 @@ namespace ChatP2P.Server
         
         private static async Task<string> HandleP2PCommand(ApiRequest request)
         {
-            // ✅ DEBUG: Log all P2P API calls
-            Console.WriteLine($"🔍 [DEBUG-API] P2P Command: {request.Action}");
+            // ✅ DEBUG: Log P2P API calls (skip frequent polling)
+            if (request.Action?.ToLower() != "get_transfer_progress")
+            {
+                Console.WriteLine($"🔍 [DEBUG-API] P2P Command: {request.Action}");
+            }
 
             return request.Action?.ToLower() switch
             {
@@ -786,7 +793,11 @@ namespace ChatP2P.Server
                 // Obtenir tous les transferts actifs du FileTransferService local
                 var activeTransfers = FileTransferService.Instance.GetActiveTransfers();
                 
-                Console.WriteLine($"📊 [TRANSFER-API] Found {activeTransfers.Count} active file transfers");
+                // Only log if there are active transfers to avoid spam
+                if (activeTransfers.Count > 0)
+                {
+                    Console.WriteLine($"📊 [TRANSFER-API] Found {activeTransfers.Count} active file transfers");
+                }
                 
                 return CreateSuccessResponse(new
                 {
@@ -1869,7 +1880,11 @@ namespace ChatP2P.Server
                 // Get ALL friend requests received by this peer
                 var requests = ContactManager.GetAllReceivedRequests(peerName);
                 
-                Console.WriteLine($"Found {requests.Count} total friend requests for {peerName}");
+                // Only log if there are requests to avoid spam
+                if (requests.Count > 0)
+                {
+                    Console.WriteLine($"Found {requests.Count} total friend requests for {peerName}");
+                }
                 
                 return CreateSuccessResponse(requests);
             }

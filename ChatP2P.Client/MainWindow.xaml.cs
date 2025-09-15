@@ -37,6 +37,8 @@ namespace ChatP2P.Client
         private bool _hasNewMessages = false;
         private string? _lastMessageSender = null;
         private string? _currentTransferFileName = null; // Track current P2P file transfer filename
+        private bool _hasRecentTransfers = false; // Track if we have recent transfers to optimize polling
+        private DateTime _lastTransferActivity = DateTime.MinValue;
 
         // Collections for data binding
         private readonly ObservableCollection<PeerInfo> _peers = new();
@@ -98,7 +100,7 @@ namespace ChatP2P.Client
         private void InitializeRefreshTimer()
         {
             _refreshTimer = new DispatcherTimer();
-            _refreshTimer.Interval = TimeSpan.FromSeconds(5); // Refresh every 5 seconds
+            _refreshTimer.Interval = TimeSpan.FromSeconds(10); // Refresh every 10 seconds - reduced spam
             _refreshTimer.Tick += async (sender, e) =>
             {
                 if (_isConnectedToServer)
@@ -115,7 +117,7 @@ namespace ChatP2P.Client
         private void InitializeFileTransferTimer()
         {
             _fileTransferTimer = new DispatcherTimer();
-            _fileTransferTimer.Interval = TimeSpan.FromMilliseconds(500); // Check every 500ms for responsive UI
+            _fileTransferTimer.Interval = TimeSpan.FromSeconds(3); // Check every 3 seconds - reduced spam
             _fileTransferTimer.Tick += async (sender, e) =>
             {
                 if (_isConnectedToServer)
@@ -3830,6 +3832,16 @@ namespace ChatP2P.Client
         {
             try
             {
+                // Reset recent transfers flag if enough time has passed
+                if (_hasRecentTransfers && DateTime.Now.Subtract(_lastTransferActivity).TotalMinutes > 2)
+                {
+                    _hasRecentTransfers = false;
+                }
+
+                // Only check if we have active WebRTC connections or recent transfers
+                if (!HasActiveP2PConnections() && !_hasRecentTransfers)
+                    return;
+
                 var response = await SendApiRequest("p2p", "get_transfer_progress", new { });
                 
                 if (response?.Success == true && response.Data != null)
@@ -3846,6 +3858,8 @@ namespace ChatP2P.Client
                         foreach (var transferElement in transfersElement.EnumerateArray())
                         {
                             hasActiveTransfers = true;
+                            _hasRecentTransfers = true;
+                            _lastTransferActivity = DateTime.Now;
                             
                             if (transferElement.TryGetProperty("fileName", out var fileNameEl) &&
                                 transferElement.TryGetProperty("progress", out var progressEl) &&
@@ -3893,6 +3907,19 @@ namespace ChatP2P.Client
                     LogToFile($"❌ [TRANSFER-PROGRESS] Error checking progress: {ex.Message}");
                     LogToFile($"❌ [TRANSFER-PROGRESS] Stack trace: {ex.StackTrace}");
                 }
+            }
+        }
+
+        private bool HasActiveP2PConnections()
+        {
+            try
+            {
+                // Check if we have active WebRTC connections or file transfers
+                return _p2pDirectClient != null && !string.IsNullOrEmpty(_currentTransferFileName);
+            }
+            catch
+            {
+                return false;
             }
         }
 

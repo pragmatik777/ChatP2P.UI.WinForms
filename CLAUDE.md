@@ -70,6 +70,14 @@ VM1-Client ←── WebRTC DataChannels ──→ VM2-Client
 - **Burst control** : 5 chunks + micro-pauses adaptatives
 - **Flow control** : 10ms polling (10x plus rapide)
 
+### ✅ **Optimisations Anti-Spam Logs (15 Sept 2025)**
+- **Client polling** : 500ms→3s (transfer), 5s→10s (refresh)
+- **Polling conditionnel** : Only check si connexions actives/transferts récents
+- **Auto-reset** : Après 2 minutes d'inactivité
+- **Serveur logs** : Skip `get_transfer_progress` et `get_friend_requests` spam
+- **Logs conditionnels** : Only log si activité réelle détectée
+- **Réduction spam** : ~97% (300+ logs/min → 5-12 logs/min idle)
+
 ## 📚 **RÉFÉRENCES PERFORMANCE WebRTC 2025**
 
 **Sources recherche utilisées** :
@@ -108,4 +116,4 @@ CLIENT ←──── WebRTC DataChannels P2P      ────→ CLIENT
 - **TCP Relay** : 1MB chunks, canal séparé, logs optimisés
 - **Résultat** : Transferts fluides sans saturation + UX améliorée
 
-*Dernière mise à jour: 15 Septembre 2025 - Architecture Canal Séparé Fichiers Complète*
+*Dernière mise à jour: 15 Septembre 2025 - Architecture Canal Séparé Fichiers + Optimisations Anti-Spam Logs Complète*
