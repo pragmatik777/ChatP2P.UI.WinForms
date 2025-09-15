@@ -102,19 +102,26 @@ namespace ChatP2P.Server
     public class RelayHub
     {
         private readonly int _friendRequestPort;  // Canal ouvert (ex: 7777)
-        private readonly int _messagesPort;       // Canal restreint (ex: 8888)
-        // Messages clients (port 8888) 
+        private readonly int _messagesPort;       // Canal messages (ex: 8888)
+        private readonly int _filesPort;          // ✅ NOUVEAU: Canal fichiers (ex: 8891)
+
+        // Messages clients (port 8888)
         private readonly ConcurrentDictionary<string, ClientConnection> _clients = new();
         private readonly ConcurrentDictionary<string, string> _nameToId = new(StringComparer.OrdinalIgnoreCase);
-        
+
         // Friend Request clients (port 7777)
         private readonly ConcurrentDictionary<string, ClientConnection> _friendRequestClients = new();
         private readonly ConcurrentDictionary<string, string> _friendRequestNameToId = new(StringComparer.OrdinalIgnoreCase);
-        
+
+        // ✅ NOUVEAU: File Transfer clients (port 8891)
+        private readonly ConcurrentDictionary<string, ClientConnection> _fileClients = new();
+        private readonly ConcurrentDictionary<string, string> _fileNameToId = new(StringComparer.OrdinalIgnoreCase);
+
         private readonly ConcurrentDictionary<string, string> _fileRoutes = new(); // transferId -> destName
-        
+
         private TcpListener? _friendRequestListener;
         private TcpListener? _messagesListener;
+        private TcpListener? _filesListener;        // ✅ NOUVEAU: Listener fichiers
         private bool _isRunning = false;
 
         // Events pour notifier l'extérieur
@@ -125,10 +132,11 @@ namespace ChatP2P.Server
         public event Action<string>? IceSignal;
         public event Action<string, string, string, string>? FriendRequestReceived; // from, to, publicKey, message
 
-        public RelayHub(int friendRequestPort = 7777, int messagesPort = 8888)
+        public RelayHub(int friendRequestPort = 7777, int messagesPort = 8888, int filesPort = 8891)
         {
             _friendRequestPort = friendRequestPort;
             _messagesPort = messagesPort;
+            _filesPort = filesPort;
         }
 
         public async Task StartAsync()
@@ -137,18 +145,22 @@ namespace ChatP2P.Server
 
             _friendRequestListener = new TcpListener(IPAddress.Any, _friendRequestPort);
             _messagesListener = new TcpListener(IPAddress.Any, _messagesPort);
+            _filesListener = new TcpListener(IPAddress.Any, _filesPort);  // ✅ NOUVEAU
 
             _friendRequestListener.Start();
             _messagesListener.Start();
+            _filesListener.Start();  // ✅ NOUVEAU
             _isRunning = true;
 
             Console.WriteLine($"RelayHub started:");
             Console.WriteLine($"  - Friend Requests: *:{_friendRequestPort} (open access)");
             Console.WriteLine($"  - Messages/P2P: *:{_messagesPort} (trusted only)");
+            Console.WriteLine($"  - File Transfers: *:{_filesPort} (high bandwidth)");  // ✅ NOUVEAU
 
-            // Accepter les connexions en parallèle sur les deux canaux
+            // ✅ NOUVEAU: Accepter connexions sur les trois canaux
             _ = Task.Run(async () => await AcceptFriendRequestConnections());
             _ = Task.Run(async () => await AcceptMessageConnections());
+            _ = Task.Run(async () => await AcceptFileConnections());  // ✅ NOUVEAU
         }
 
         public async Task StopAsync()
@@ -165,6 +177,7 @@ namespace ChatP2P.Server
 
             _friendRequestListener?.Stop();
             _messagesListener?.Stop();
+            _filesListener?.Stop();  // ✅ NOUVEAU
         }
 
         // ===== CANAL FRIEND REQUESTS (PORT OUVERT) =====
@@ -229,6 +242,37 @@ namespace ChatP2P.Server
             }
         }
 
+        // ✅ NOUVEAU: CANAL FILE TRANSFERS (PORT HAUTE PERFORMANCE)
+        private async Task AcceptFileConnections()
+        {
+            if (_filesListener == null) return;
+
+            while (_isRunning)
+            {
+                try
+                {
+                    var tcpClient = await _filesListener.AcceptTcpClientAsync();
+                    var clientConn = new ClientConnection(tcpClient)
+                    {
+                        IsTrustedChannel = true // Canal haute performance
+                    };
+
+                    _fileClients[clientConn.Id] = clientConn;
+                    Console.WriteLine($"File transfer client connected: {clientConn.Id}");
+
+                    _ = Task.Run(async () => await HandleFileClient(clientConn));
+                }
+                catch (ObjectDisposedException)
+                {
+                    break; // Arrêt normal
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error accepting file connection: {ex.Message}");
+                }
+            }
+        }
+
         // ===== GESTION CLIENT FRIEND REQUESTS =====
         private async Task HandleFriendRequestClient(ClientConnection client)
         {
@@ -274,6 +318,31 @@ namespace ChatP2P.Server
             finally
             {
                 DisconnectClient(client);
+            }
+        }
+
+        // ✅ NOUVEAU: GESTION CLIENT FILE TRANSFERS
+        private async Task HandleFileClient(ClientConnection client)
+        {
+            try
+            {
+                while (_isRunning && !client.CancellationToken.Token.IsCancellationRequested)
+                {
+                    var message = await client.Reader.ReadLineAsync();
+                    if (message == null) break;
+
+                    client.LastActivity = DateTime.Now;
+                    // ✅ OPTIMISÉ: Traitement fichiers sans logs excessifs
+                    await ProcessFileMessage(client, message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error handling file client {client.Id}: {ex.Message}");
+            }
+            finally
+            {
+                DisconnectFileClient(client);
             }
         }
 
@@ -810,6 +879,52 @@ namespace ChatP2P.Server
             }
         }
 
+        // ✅ NOUVEAU: TRAITEMENT MESSAGES FICHIERS
+        private async Task ProcessFileMessage(ClientConnection client, string message)
+        {
+            // ✅ OPTIMISÉ: Seuls messages fichiers autorisés sur ce canal
+            if (message.StartsWith(ProtocolTags.TAG_NAME))
+            {
+                await HandleFileNameRegistration(client, message);
+            }
+            else if (message.StartsWith("PRIV:") && message.Contains("FILE_METADATA_RELAY"))
+            {
+                // Relay metadata directement aux autres clients fichiers
+                await RelayFileMessage(client, message);
+            }
+            else if (message.StartsWith("PRIV:") && message.Contains("FILE_CHUNK_RELAY"))
+            {
+                // ✅ HAUTE PERFORMANCE: Relay chunks sans logs pour éviter spam
+                await RelayFileChunk(client, message);
+            }
+            else
+            {
+                // Message non autorisé sur canal fichiers
+                Console.WriteLine($"Unauthorized message on file channel from {client.Name}: {message.Substring(0, Math.Min(50, message.Length))}");
+            }
+        }
+
+        // ✅ NOUVEAU: DÉCONNEXION CLIENT FICHIERS
+        private void DisconnectFileClient(ClientConnection client)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(client.Name))
+                {
+                    _fileNameToId.TryRemove(client.Name, out _);
+                }
+
+                _fileClients.TryRemove(client.Id, out _);
+                client.Dispose();
+
+                Console.WriteLine($"File client disconnected: {client.Name ?? client.Id}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error disconnecting file client: {ex.Message}");
+            }
+        }
+
         private void DisconnectClient(ClientConnection client)
         {
             try
@@ -920,6 +1035,76 @@ namespace ChatP2P.Server
         public bool IsClientConnected(string clientName)
         {
             return _nameToId.ContainsKey(clientName);
+        }
+
+        // ✅ NOUVEAU: MÉTHODES CANAL FICHIERS
+
+        private async Task HandleFileNameRegistration(ClientConnection client, string message)
+        {
+            try
+            {
+                var name = message.Substring(ProtocolTags.TAG_NAME.Length);
+                client.Name = name;
+                _fileNameToId[name] = client.Id;
+                Console.WriteLine($"File client registered: {name}");
+                await client.Writer.WriteLineAsync("NAME_OK");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in file name registration: {ex.Message}");
+            }
+        }
+
+        private async Task RelayFileMessage(ClientConnection sender, string message)
+        {
+            try
+            {
+                // Format: PRIV:fromName:destName:message
+                var parts = message.Substring("PRIV:".Length).Split(':', 3);
+                if (parts.Length >= 3)
+                {
+                    var fromName = parts[0];
+                    var destName = parts[1];
+                    var content = parts[2];
+
+                    if (_fileNameToId.TryGetValue(destName, out var destId) &&
+                        _fileClients.TryGetValue(destId, out var destClient))
+                    {
+                        await destClient.Writer.WriteLineAsync(message);
+                        // Pas de logs pour éviter spam
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error relaying file message: {ex.Message}");
+            }
+        }
+
+        private async Task RelayFileChunk(ClientConnection sender, string message)
+        {
+            try
+            {
+                // ✅ HAUTE PERFORMANCE: Relay chunks sans logs pour éviter spam de GB
+                var parts = message.Substring("PRIV:".Length).Split(':', 3);
+                if (parts.Length >= 3)
+                {
+                    var fromName = parts[0];
+                    var destName = parts[1];
+                    var content = parts[2];
+
+                    if (_fileNameToId.TryGetValue(destName, out var destId) &&
+                        _fileClients.TryGetValue(destId, out var destClient))
+                    {
+                        await destClient.Writer.WriteLineAsync(message);
+                        // ✅ AUCUN LOG: Évite 5GB de logs pour 1.68GB de fichier
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error relaying file chunk: {ex.Message}");
+            }
         }
     }
 }

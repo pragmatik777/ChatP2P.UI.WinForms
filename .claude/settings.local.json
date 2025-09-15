@@ -7,7 +7,14 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(dir:*)",
+      "Read(//c/VM1/Users/User/Desktop/**)",
+      "Bash(find:*)",
+      "Read(//c/Users/pragm/OneDrive/Bureau/ChatP2P_Logs/**)",
+      "Bash(git restore:*)",
+      "Bash(dotnet clean:*)"
     ],
     "deny": [],
     "ask": []

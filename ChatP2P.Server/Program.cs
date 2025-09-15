@@ -288,7 +288,7 @@ namespace ChatP2P.Server
         {
             try 
             {
-                _relayHub = new RelayHub(7777, 8888); // Friend requests: 7777, Messages: 8888
+                _relayHub = new RelayHub(7777, 8888, 8891); // Friend requests: 7777, Messages: 8888, Files: 8891
                 
                 // Subscribe to events
                 _relayHub.FriendRequestReceived += async (from, to, publicKey, message) =>

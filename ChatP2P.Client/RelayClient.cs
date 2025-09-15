@@ -13,16 +13,22 @@ namespace ChatP2P.Client
         private readonly string _serverAddress;
         private readonly int _friendRequestPort;
         private readonly int _messagesPort;
-        
+        private readonly int _filesPort;
+
         private TcpClient? _friendRequestClient;
         private NetworkStream? _friendRequestStream;
         private StreamWriter? _friendRequestWriter;
         private StreamReader? _friendRequestReader;
-        
+
         private TcpClient? _messagesClient;
         private NetworkStream? _messagesStream;
         private StreamWriter? _messagesWriter;
         private StreamReader? _messagesReader;
+
+        private TcpClient? _filesClient;
+        private NetworkStream? _filesStream;
+        private StreamWriter? _filesWriter;
+        private StreamReader? _filesReader;
         
         private bool _isConnected = false;
         private CancellationTokenSource? _cancellationToken;
@@ -78,11 +84,12 @@ namespace ChatP2P.Client
         public event Action<string, string, long, string>? FileMetadataRelayReceived; // transferId, fileName, fileSize, fromPeer
         public event Action<string, int, int, byte[]>? FileChunkRelayReceived; // transferId, chunkIndex, totalChunks, chunkData
         
-        public RelayClient(string serverAddress, int friendRequestPort = 7777, int messagesPort = 8888)
+        public RelayClient(string serverAddress, int friendRequestPort = 7777, int messagesPort = 8888, int filesPort = 8891)
         {
             _serverAddress = serverAddress;
             _friendRequestPort = friendRequestPort;
             _messagesPort = messagesPort;
+            _filesPort = filesPort;
         }
         
         public async Task<bool> ConnectAsync(string displayName)
@@ -97,23 +104,32 @@ namespace ChatP2P.Client
                 _friendRequestStream = _friendRequestClient.GetStream();
                 _friendRequestWriter = new StreamWriter(_friendRequestStream, Encoding.UTF8) { AutoFlush = true };
                 _friendRequestReader = new StreamReader(_friendRequestStream, Encoding.UTF8);
-                
+
                 // Connexion au canal messages (port 8888)
                 _messagesClient = new TcpClient();
                 await _messagesClient.ConnectAsync(_serverAddress, _messagesPort);
                 _messagesStream = _messagesClient.GetStream();
                 _messagesWriter = new StreamWriter(_messagesStream, Encoding.UTF8) { AutoFlush = true };
                 _messagesReader = new StreamReader(_messagesStream, Encoding.UTF8);
-                
-                // Enregistrer notre nom sur les deux canaux
+
+                // ✅ NOUVEAU: Connexion au canal fichiers (port 8891)
+                _filesClient = new TcpClient();
+                await _filesClient.ConnectAsync(_serverAddress, _filesPort);
+                _filesStream = _filesClient.GetStream();
+                _filesWriter = new StreamWriter(_filesStream, Encoding.UTF8) { AutoFlush = true };
+                _filesReader = new StreamReader(_filesStream, Encoding.UTF8);
+
+                // Enregistrer notre nom sur les trois canaux
                 await _friendRequestWriter.WriteLineAsync($"NAME:{displayName}");
                 await _messagesWriter.WriteLineAsync($"NAME:{displayName}");
-                
+                await _filesWriter.WriteLineAsync($"NAME:{displayName}");
+
                 _isConnected = true;
-                
-                // Démarrer l'écoute sur les deux canaux
+
+                // Démarrer l'écoute sur les trois canaux
                 _ = Task.Run(async () => await ListenFriendRequestChannel());
                 _ = Task.Run(async () => await ListenMessagesChannel());
+                _ = Task.Run(async () => await ListenFilesChannel());
                 
                 Console.WriteLine($"RelayClient connected as {displayName}");
                 return true;
@@ -142,6 +158,12 @@ namespace ChatP2P.Client
                 _messagesReader?.Dispose();
                 _messagesStream?.Dispose();
                 _messagesClient?.Dispose();
+
+                // ✅ NOUVEAU: Fermeture canal files
+                _filesWriter?.Dispose();
+                _filesReader?.Dispose();
+                _filesStream?.Dispose();
+                _filesClient?.Dispose();
             }
             catch { }
             
@@ -223,7 +245,55 @@ namespace ChatP2P.Client
                 return false;
             }
         }
-        
+
+        // ===== FICHIERS =====
+
+        // ✅ NOUVEAU: Envoi métadonnées fichier via canal 8891 avec format PRIV
+        public async Task<bool> SendFileMetadataAsync(string transferId, string fileName, long fileSize, string fromPeer, string toPeer)
+        {
+            if (!_isConnected || _filesWriter == null) return false;
+
+            try
+            {
+                var metadataContent = $"FILE_METADATA_RELAY:{transferId}:{fileName}:{fileSize}";
+                var metadataMessage = $"PRIV:{fromPeer}:{toPeer}:{metadataContent}";
+                await _filesWriter.WriteLineAsync(metadataMessage);
+                Console.WriteLine($"📁 [FILES-CHANNEL-8891] Metadata sent: {fileName} ({fileSize} bytes) {fromPeer} → {toPeer}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending file metadata: {ex.Message}");
+                return false;
+            }
+        }
+
+        // ✅ NOUVEAU: Envoi chunk fichier via canal 8891 avec format PRIV (optimisé sans logs)
+        public async Task<bool> SendFileChunkAsync(string transferId, int chunkIndex, int totalChunks, byte[] chunkData, string fromPeer, string toPeer)
+        {
+            if (!_isConnected || _filesWriter == null) return false;
+
+            try
+            {
+                var base64Chunk = Convert.ToBase64String(chunkData);
+                var chunkContent = $"FILE_CHUNK_RELAY:{transferId}:{chunkIndex}:{totalChunks}:{base64Chunk}";
+                var chunkMessage = $"PRIV:{fromPeer}:{toPeer}:{chunkContent}";
+                await _filesWriter.WriteLineAsync(chunkMessage);
+
+                // ✅ OPTIMISÉ: Log seulement tous les 100 chunks pour éviter spam logs
+                if (chunkIndex % 100 == 0)
+                {
+                    Console.WriteLine($"📦 [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} sent ({chunkData.Length} bytes)");
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending file chunk: {ex.Message}");
+                return false;
+            }
+        }
+
         // ===== LISTENING =====
         
         private async Task ListenFriendRequestChannel()
@@ -287,7 +357,87 @@ namespace ChatP2P.Client
                 Console.WriteLine($"Error listening message channel: {ex.Message}");
             }
         }
-        
+
+        // ✅ NOUVEAU: Canal files (port 8891) pour transferts fichiers optimisés
+        private async Task ListenFilesChannel()
+        {
+            if (_filesReader == null) return;
+
+            try
+            {
+                while (_isConnected && !_cancellationToken!.Token.IsCancellationRequested)
+                {
+                    var message = await _filesReader.ReadLineAsync();
+                    if (message == null) break;
+
+                    // ✅ OPTIMISÉ: Pas de logging détaillé pour les chunks pour éviter les 5GB logs
+                    await ProcessFilesChannelMessage(message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error listening files channel: {ex.Message}");
+            }
+        }
+
+        private async Task ProcessFilesChannelMessage(string message)
+        {
+            try
+            {
+                // ✅ FIX: Le serveur relaie au format PRIV:fromPeer:toPeer:content
+                if (message.StartsWith("PRIV:"))
+                {
+                    // Format: PRIV:fromPeer:toPeer:FILE_METADATA_RELAY:... ou PRIV:fromPeer:toPeer:FILE_CHUNK_RELAY:...
+                    var parts = message.Substring("PRIV:".Length).Split(':', 3);
+                    if (parts.Length >= 3)
+                    {
+                        var fromPeer = parts[0];
+                        var toPeer = parts[1];
+                        var content = parts[2];
+
+                        if (content.StartsWith("FILE_METADATA_RELAY:"))
+                        {
+                            // Format: FILE_METADATA_RELAY:transferId:fileName:fileSize
+                            var metaParts = content.Substring("FILE_METADATA_RELAY:".Length).Split(':', 3);
+                            if (metaParts.Length >= 3)
+                            {
+                                var transferId = metaParts[0];
+                                var fileName = metaParts[1];
+                                var fileSize = long.Parse(metaParts[2]);
+
+                                Console.WriteLine($"📁 [FILES-CHANNEL-8891] Metadata: {fileName} ({fileSize} bytes) from {fromPeer}");
+                                FileMetadataRelayReceived?.Invoke(transferId, fileName, fileSize, fromPeer);
+                            }
+                        }
+                        else if (content.StartsWith("FILE_CHUNK_RELAY:"))
+                        {
+                            // Format: FILE_CHUNK_RELAY:transferId:chunkIndex:totalChunks:base64ChunkData
+                            var chunkParts = content.Substring("FILE_CHUNK_RELAY:".Length).Split(':', 4);
+                            if (chunkParts.Length >= 4)
+                            {
+                                var transferId = chunkParts[0];
+                                var chunkIndex = int.Parse(chunkParts[1]);
+                                var totalChunks = int.Parse(chunkParts[2]);
+                                var chunkData = Convert.FromBase64String(chunkParts[3]);
+
+                                // ✅ OPTIMISÉ: Log seulement tous les 100 chunks pour éviter spam
+                                if (chunkIndex % 100 == 0)
+                                {
+                                    Console.WriteLine($"📦 [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
+                                }
+
+                                FileChunkRelayReceived?.Invoke(transferId, chunkIndex, totalChunks, chunkData);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing files channel message: {ex.Message}");
+            }
+        }
+
         private async Task ProcessFriendRequestMessage(string message)
         {
             await LogToFile($"🔄 [RelayClient] ProcessFriendRequestMessage: {message}");
@@ -362,8 +512,9 @@ namespace ChatP2P.Client
             try
             {
                 // ✅ DEBUG: Log tous les messages reçus pour diagnostiquer WEBRTC_INITIATE
-                Console.WriteLine($"📥 [RELAY-DEBUG] Received message: {message.Substring(0, Math.Min(100, message.Length))}...");
-                await LogToFile($"[RELAY-DEBUG] Received: {message}");
+                // ✅ FIX CRITIQUE: Plus de log debug pour éviter les 5GB de logs avec gros fichiers
+                // Console.WriteLine($"📥 [RELAY-DEBUG] Received message: {message.Substring(0, Math.Min(100, message.Length))}...");
+                // await LogToFile($"[RELAY-DEBUG] Received: {message}"); // SUPPRIMÉ - causait 5GB logs
                 if (message.StartsWith("PRIV:"))
                 {
                     // Format: PRIV:fromName:destName:message
@@ -405,8 +556,10 @@ namespace ChatP2P.Client
                                 var chunkDataBase64 = chunkData.GetProperty("chunkData").GetString() ?? "";
                                 
                                 var chunkBytes = Convert.FromBase64String(chunkDataBase64);
-                                
-                                Console.WriteLine($"📦 [RELAY-FILE] Chunk {chunkIndex}/{totalChunks} received ({chunkBytes.Length} bytes)");
+
+                                // ✅ NO LOGS: Complètement supprimé pour éviter spam fichiers logs
+                                // Progress visible dans l'UI seulement, pas de logs chunks
+
                                 FileChunkRelayReceived?.Invoke(transferId, chunkIndex, totalChunks, chunkBytes);
                             }
                             catch (Exception ex)

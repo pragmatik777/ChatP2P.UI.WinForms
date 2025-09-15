@@ -1159,11 +1159,12 @@ namespace ChatP2P.Client
                         transfer.Chunks[chunkIndex] = chunkData;
                         transfer.ReceivedChunks++;
                         
-                        // Update progress
+                        // ✅ TCP RELAY: Update progress UI temps réel
                         var progress = (transfer.ReceivedChunks / (double)transfer.TotalChunks) * 100;
                         UpdateFileTransferProgress(progress);
-                        
-                        await LogToFile($"📦 [RELAY-FILE] Chunk {chunkIndex + 1}/{totalChunks} received ({progress:F1}%)");
+
+                        // ✅ NO LOGS: Supprimé complètement pour éviter spam
+                        // Progress visible dans l'UI progress bar seulement
                         
                         // Check if transfer is complete
                         if (transfer.ReceivedChunks == transfer.TotalChunks)
@@ -1222,8 +1223,8 @@ namespace ChatP2P.Client
                 
                 await LogToFile($"✅ [RELAY-FILE] File saved: {outputPath}");
                 
-                // Hide progress and show completion
-                fileTransferBorder.Visibility = Visibility.Collapsed;
+                // ✅ FIX: Ne pas cacher automatiquement - laisser l'utilisateur voir 100%
+                // La barre sera cachée manuellement ou au prochain transfert
                 
                 // Update chat with completion message
                 var message = new ChatMessage
@@ -1243,8 +1244,9 @@ namespace ChatP2P.Client
                 
                 // Clean up transfer state
                 _relayTransfers.Remove(transfer.TransferId);
-                
-                MessageBox.Show($"File received successfully!\n\nSaved to: {outputPath}", "File Transfer Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                // ✅ FIX: Supprimé MessageBox confirmation - l'info est déjà dans le chat UI
+                await LogToFile($"✅ [RELAY-FILE] File received successfully: {outputPath}");
             }
             catch (Exception ex)
             {
@@ -2439,16 +2441,15 @@ namespace ChatP2P.Client
                     // ✅ FIXED: Progress bar will be shown by the actual transfer method
                     // ShowFileTransferProgress will be called within SendFileViaWebRTCDirectNew
 
-                    // Ask user to choose transfer method
-                    // ✅ FIX: Force P2P WebRTC Direct par défaut (plus de choix manuel)
-                    // Le WebRTC fonctionne maintenant correctement, plus besoin du fallback Relay
-                    var useP2P = true;
-                    var method = useP2P ? "P2P" : "Relay";
+                    // ✅ FIX FALLBACK: Détection automatique P2P vs Relay selon l'état de connexion
+                    var useP2P = true; // Préférer P2P si disponible
+                    string method = "Auto"; // Sera déterminé selon disponibilité
 
-                    await LogToFile($"📁 [FILE-TRANSFER] Using {method} transfer method");
+                    await LogToFile($"📁 [FILE-TRANSFER] Auto-detecting best transfer method for {peerName}");
 
                     ApiResponse? response = null;
 
+                    // ✅ FIX FALLBACK: Vérifier d'abord si P2P est disponible, sinon direct relay
                     if (useP2P && _webrtcClient != null)
                     {
                         // ✅ FIX CRITIQUE: Log l'état de connexion pour debug
@@ -2459,34 +2460,23 @@ namespace ChatP2P.Client
                         if (isFullyConnected)
                         {
                             // ✅ NOUVEAU: WebRTC Direct avec dual-channel et flow control
-                            await LogToFile($"✅ [FILE-TRANSFER] Using NEW dual-channel method for {peerName}");
+                            method = "P2P WebRTC";
+                            await LogToFile($"✅ [FILE-TRANSFER] Using P2P WebRTC dual-channel method for {peerName}");
                             response = await SendFileViaWebRTCDirectNew(peerName, dialog.FileName, fileInfo);
                         }
                         else
                         {
-                            // ✅ FIX: Essayer la nouvelle méthode même avec un seul canal
-                            await LogToFile($"⚠️ [FILE-TRANSFER] Dual-channel not ready, attempting NEW method anyway for {peerName}");
-                            try
-                            {
-                                response = await SendFileViaWebRTCDirectNew(peerName, dialog.FileName, fileInfo);
-                            }
-                            catch (Exception ex)
-                            {
-                                await LogToFile($"❌ [FILE-TRANSFER] NEW method failed: {ex.Message}, falling back to OLD method");
-                                // Fallback: WebRTC via serveur relay (ancien code)
-                                response = await SendFileViaWebRTCDirect(peerName, dialog.FileName, fileInfo);
-                            }
+                            // ✅ FIX CRITIQUE: Si pas de P2P, passer directement au relay TCP
+                            method = "TCP Relay";
+                            await LogToFile($"❌ [FILE-TRANSFER] No P2P connection available for {peerName}, using TCP relay fallback");
+                            response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo);
                         }
-                    }
-                    else if (useP2P)
-                    {
-                        // Fallback: WebRTC via serveur relay (ancien code)
-                        await LogToFile($"❌ [FILE-TRANSFER] WebRTC client not available, using OLD relay method");
-                        response = await SendFileViaWebRTCDirect(peerName, dialog.FileName, fileInfo);
                     }
                     else
                     {
-                        // Relay: Envoyer le fichier directement depuis le client
+                        // ✅ FIX: Si WebRTC client pas disponible, utiliser directement relay TCP
+                        method = "TCP Relay";
+                        await LogToFile($"❌ [FILE-TRANSFER] WebRTC client not available, using TCP relay method");
                         response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo);
                     }
 
@@ -2557,19 +2547,11 @@ namespace ChatP2P.Client
 
                 await LogToFile($"📁 [RELAY-FILE] Starting direct relay transfer: {fileInfo.Name} → {peerName}");
 
-                // 1. Envoyer les métadonnées
-                var metadata = new
-                {
-                    type = "FILE_METADATA_RELAY",
-                    transferId = transferId,
-                    fileName = fileInfo.Name,
-                    fileSize = fileInfo.Length,
-                    fromPeer = displayName,
-                    toPeer = peerName
-                };
+                // ✅ FIX: Afficher progress bar pour relay transfer
+                ShowFileTransferProgress(fileInfo.Name, fileInfo.Length, false);
 
-                var metadataMessage = $"FILE_META_RELAY:{System.Text.Json.JsonSerializer.Serialize(metadata)}";
-                var metadataSent = await _relayClient.SendPrivateMessageAsync(displayName, peerName, metadataMessage);
+                // ✅ NOUVEAU: Envoyer métadonnées via canal files (port 8891)
+                var metadataSent = await _relayClient.SendFileMetadataAsync(transferId, fileInfo.Name, fileInfo.Length, displayName, peerName);
 
                 if (!metadataSent)
                 {
@@ -2579,60 +2561,54 @@ namespace ChatP2P.Client
 
                 await LogToFile($"📁 [RELAY-FILE] Metadata sent successfully");
 
-                // 2. Envoyer le fichier en chunks
-                const int chunkSize = 32768; // 32KB pour relay
+                // 2. ✅ TCP RELAY OPTIMISÉ: Gros chunks pour TCP direct (pas UDP)
+                const int TCP_CHUNK_SIZE = 1048576; // 1MB chunks pour TCP (vs 64KB P2P)
+                const int TCP_BURST_SIZE = 20; // 20MB bursts pour TCP
+
                 using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
-                var buffer = new byte[chunkSize];
+                var buffer = new byte[TCP_CHUNK_SIZE];
                 var chunkIndex = 0;
-                var totalChunks = (int)Math.Ceiling(fileInfo.Length / (double)chunkSize);
+                var totalChunks = (int)Math.Ceiling(fileInfo.Length / (double)TCP_CHUNK_SIZE);
+                var lastProgressUpdate = DateTime.Now;
+
+                await LogToFile($"📦 [TCP-RELAY] Optimized for {FormatFileSize(fileInfo.Length)}: {totalChunks} chunks of {FormatFileSize(TCP_CHUNK_SIZE)} each");
 
                 while (true)
                 {
-                    var bytesRead = await fileStream.ReadAsync(buffer, 0, chunkSize);
+                    var bytesRead = await fileStream.ReadAsync(buffer, 0, TCP_CHUNK_SIZE);
                     if (bytesRead == 0) break;
 
-                    // Créer chunk data
-                    var chunkData = new byte[bytesRead];
-                    Array.Copy(buffer, chunkData, bytesRead);
+                    // ✅ TCP: Chunk data optimal sans copy inutile
+                    var chunkData = bytesRead == TCP_CHUNK_SIZE ? buffer : buffer.Take(bytesRead).ToArray();
 
-                    var chunkMessage = new
-                    {
-                        type = "FILE_CHUNK_RELAY",
-                        transferId = transferId,
-                        chunkIndex = chunkIndex,
-                        totalChunks = totalChunks,
-                        chunkData = Convert.ToBase64String(chunkData)
-                    };
-
-                    var chunkMessageJson = $"FILE_CHUNK_RELAY:{System.Text.Json.JsonSerializer.Serialize(chunkMessage)}";
-                    
-                    var chunkSent = await _relayClient.SendPrivateMessageAsync(displayName, peerName, chunkMessageJson);
+                    // ✅ NOUVEAU: Envoyer chunk via canal files (port 8891)
+                    var chunkSent = await _relayClient.SendFileChunkAsync(transferId, chunkIndex, totalChunks, chunkData, displayName, peerName);
                     if (!chunkSent)
                     {
-                        await LogToFile($"❌ [RELAY-FILE] Failed to send chunk {chunkIndex}");
+                        await LogToFile($"❌ [TCP-RELAY] Failed to send chunk {chunkIndex}/{totalChunks}");
                         return new ApiResponse { Success = false, Error = $"Failed to send chunk {chunkIndex}" };
                     }
 
                     chunkIndex++;
                     var progress = (chunkIndex / (double)totalChunks) * 100;
-                    
-                    // Update progress UI
-                    UpdateFileTransferProgress(progress);
-                    
-                    if (chunkIndex % 10 == 0) // Log every 10 chunks
-                    {
-                        await LogToFile($"📦 [RELAY-FILE] Progress: {progress:F1}% ({chunkIndex}/{totalChunks} chunks)");
-                    }
 
-                    // Small delay to prevent overwhelming the relay
-                    await Task.Delay(10);
+                    // ✅ TCP: Update progress UI plus souvent (temps réel)
+                    UpdateFileTransferProgress(progress);
+
+                    // ✅ NO LOGS: Supprimé complètement pour éviter spam côté sender
+                    // Progress visible dans l'UI progress bar seulement
+
+                    // ✅ TCP: Burst control au lieu de délai fixe (TCP peut gérer)
+                    if (chunkIndex % TCP_BURST_SIZE == 0)
+                    {
+                        await Task.Delay(50); // 50ms pause tous les 20MB (vs 10ms chaque 32KB)
+                    }
                 }
 
                 await LogToFile($"✅ [RELAY-FILE] File {fileInfo.Name} sent successfully ({chunkIndex} chunks)");
-                
-                // Hide progress after completion
-                await Task.Delay(1000);
-                fileTransferBorder.Visibility = Visibility.Collapsed;
+
+                // ✅ FIX: Ne pas cacher automatiquement - laisser l'utilisateur voir 100%
+                // La barre sera cachée manuellement ou au prochain transfert
 
                 return new ApiResponse { Success = true, Data = "File transfer initiated successfully" };
             }
@@ -3143,6 +3119,8 @@ namespace ChatP2P.Client
         {
             Dispatcher.Invoke(() =>
             {
+                // ✅ FIX: S'assurer que la barre reste visible pendant le transfert
+                fileTransferBorder.Visibility = Visibility.Visible;
                 progressFileTransfer.Value = progress;
             });
         }
