@@ -272,27 +272,50 @@ namespace ChatP2P.Client
         }
 
         // ✅ NOUVEAU: Envoi chunk fichier via canal 8891 avec format PRIV (optimisé sans logs)
-        public async Task<bool> SendFileChunkAsync(string transferId, int chunkIndex, int totalChunks, byte[] chunkData, string fromPeer, string toPeer)
+        public async Task<bool> SendFileChunkAsync(string transferId, int chunkIndex, int totalChunks, byte[] chunkData, string fromPeer, string toPeer, bool useEncryption = false)
         {
             if (!_isConnected || _filesWriter == null) return false;
 
             try
             {
-                var base64Chunk = Convert.ToBase64String(chunkData);
-                var chunkContent = $"FILE_CHUNK_RELAY:{transferId}:{chunkIndex}:{totalChunks}:{base64Chunk}";
+                byte[] finalChunkData = chunkData;
+
+                // 🔐 NOUVEAU: Chiffrement PQC des chunks de fichiers (relay seulement, P2P reste clair)
+                if (useEncryption)
+                {
+                    var peerKeys = await DatabaseService.Instance.GetPeerKeys(toPeer, "PQ");
+                    var activePqKey = peerKeys.FirstOrDefault(k => !k.Revoked && k.Public != null);
+
+                    if (activePqKey?.Public != null)
+                    {
+                        finalChunkData = await CryptoService.EncryptMessage(chunkData, activePqKey.Public);
+                        await CryptoService.LogCrypto($"🔒 [FILE-ENCRYPT] Chunk {chunkIndex}/{totalChunks} encrypted for {toPeer} ({chunkData.Length} → {finalChunkData.Length} bytes)");
+                    }
+                    else
+                    {
+                        await CryptoService.LogCrypto($"⚠️ [FILE-ENCRYPT] No PQC key for {toPeer}, sending chunk {chunkIndex} unencrypted");
+                        Console.WriteLine($"⚠️ [FILE-ENCRYPT] No PQC key for {toPeer}, sending chunk unencrypted");
+                    }
+                }
+
+                var base64Chunk = Convert.ToBase64String(finalChunkData);
+                var encryptionFlag = useEncryption ? "ENC" : "CLR";
+                var chunkContent = $"FILE_CHUNK_RELAY:{transferId}:{chunkIndex}:{totalChunks}:{encryptionFlag}:{base64Chunk}";
                 var chunkMessage = $"PRIV:{fromPeer}:{toPeer}:{chunkContent}";
                 await _filesWriter.WriteLineAsync(chunkMessage);
 
                 // ✅ OPTIMISÉ: Log seulement tous les 100 chunks pour éviter spam logs
                 if (chunkIndex % 100 == 0)
                 {
-                    Console.WriteLine($"📦 [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} sent ({chunkData.Length} bytes)");
+                    var encStatus = useEncryption ? "🔒 encrypted" : "📦 clear";
+                    Console.WriteLine($"{encStatus} [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} sent ({finalChunkData.Length} bytes)");
                 }
                 return true;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error sending file chunk: {ex.Message}");
+                await CryptoService.LogCrypto($"❌ [FILE-ENCRYPT] Error sending chunk {chunkIndex}: {ex.Message}");
                 return false;
             }
         }
@@ -414,19 +437,65 @@ namespace ChatP2P.Client
                         }
                         else if (content.StartsWith("FILE_CHUNK_RELAY:"))
                         {
-                            // Format: FILE_CHUNK_RELAY:transferId:chunkIndex:totalChunks:base64ChunkData
-                            var chunkParts = content.Substring("FILE_CHUNK_RELAY:".Length).Split(':', 4);
-                            if (chunkParts.Length >= 4)
+                            // Format: FILE_CHUNK_RELAY:transferId:chunkIndex:totalChunks:ENC/CLR:base64ChunkData
+                            var chunkParts = content.Substring("FILE_CHUNK_RELAY:".Length).Split(':', 5);
+                            if (chunkParts.Length >= 5)
                             {
+                                var transferId = chunkParts[0];
+                                var chunkIndex = int.Parse(chunkParts[1]);
+                                var totalChunks = int.Parse(chunkParts[2]);
+                                var encryptionFlag = chunkParts[3]; // "ENC" ou "CLR"
+                                var base64ChunkData = chunkParts[4];
+
+                                var chunkData = Convert.FromBase64String(base64ChunkData);
+
+                                // 🔓 NOUVEAU: Déchiffrement PQC des chunks de fichiers si nécessaire
+                                if (encryptionFlag == "ENC")
+                                {
+                                    try
+                                    {
+                                        // Récupérer notre clé privée PQC
+                                        var identity = await DatabaseService.Instance.GetIdentity();
+                                        if (identity?.PqPriv != null)
+                                        {
+                                            chunkData = await CryptoService.DecryptMessageBytes(chunkData, identity.PqPriv);
+                                            await CryptoService.LogCrypto($"🔓 [FILE-DECRYPT] Chunk {chunkIndex}/{totalChunks} decrypted from {fromPeer} ({base64ChunkData.Length} → {chunkData.Length} bytes)");
+                                        }
+                                        else
+                                        {
+                                            await CryptoService.LogCrypto($"❌ [FILE-DECRYPT] No PQC private key to decrypt chunk {chunkIndex} from {fromPeer}");
+                                            Console.WriteLine($"❌ [FILE-DECRYPT] No PQC private key to decrypt chunk {chunkIndex} from {fromPeer}");
+                                            return; // Skip ce chunk si pas de clé
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        await CryptoService.LogCrypto($"❌ [FILE-DECRYPT] Failed to decrypt chunk {chunkIndex}: {ex.Message}");
+                                        Console.WriteLine($"❌ [FILE-DECRYPT] Failed to decrypt chunk {chunkIndex}: {ex.Message}");
+                                        return; // Skip ce chunk si décryption échoue
+                                    }
+                                }
+
+                                // ✅ OPTIMISÉ: Log seulement tous les 100 chunks pour éviter spam
+                                if (chunkIndex % 100 == 0)
+                                {
+                                    var encStatus = encryptionFlag == "ENC" ? "🔓 decrypted" : "📦 clear";
+                                    Console.WriteLine($"{encStatus} [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
+                                }
+
+                                FileChunkRelayReceived?.Invoke(transferId, chunkIndex, totalChunks, chunkData);
+                            }
+                            else if (chunkParts.Length >= 4)
+                            {
+                                // ✅ RÉTROCOMPATIBILITÉ: Format ancien sans flag encryption
                                 var transferId = chunkParts[0];
                                 var chunkIndex = int.Parse(chunkParts[1]);
                                 var totalChunks = int.Parse(chunkParts[2]);
                                 var chunkData = Convert.FromBase64String(chunkParts[3]);
 
-                                // ✅ OPTIMISÉ: Log seulement tous les 100 chunks pour éviter spam
                                 if (chunkIndex % 100 == 0)
                                 {
-                                    Console.WriteLine($"📦 [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
+                                    Console.WriteLine($"📦 [FILES-CHANNEL-8891-LEGACY] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
                                 }
 
                                 FileChunkRelayReceived?.Invoke(transferId, chunkIndex, totalChunks, chunkData);

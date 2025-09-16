@@ -148,11 +148,7 @@
                                     </GridView>
                                 </ListView.View>
                             </ListView>
-                            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
-                                <Button Name="btnSendFile" Content="📎 Send File" Width="120" Height="35" 
-                                        Background="#FF0D7377" Foreground="White" BorderBrush="Transparent" 
-                                        Click="BtnSendFile_Click"/>
-                            </StackPanel>
+                            <!-- Removed btnSendFile - using btnSendFileChat in chat tab instead -->
                         </Grid>
                     </GroupBox>
                     

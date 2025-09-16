@@ -238,5 +238,103 @@ namespace ChatP2P.Client
 
             return plaintext;
         }
+
+        /// <summary>
+        /// Surcharge pour chiffrer des bytes directement (pour chunks de fichiers)
+        /// </summary>
+        public static async Task<byte[]> EncryptMessage(byte[] plaintextBytes, byte[] recipientPublicKey)
+        {
+            try
+            {
+                await LogCrypto($"🔐 [ENCRYPT-BYTES] Starting ECDH P-384 encryption for binary data: {plaintextBytes.Length} bytes");
+
+                // 1. Reconstruire la clé publique ECDH depuis les bytes
+                using var recipientEcdh = ECDiffieHellman.Create();
+                recipientEcdh.ImportSubjectPublicKeyInfo(recipientPublicKey, out _);
+
+                // 2. Générer clé éphémère P-384 pour ce chunk (Perfect Forward Secrecy)
+                using var ephemeralEcdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP384);
+
+                // 3. Calculer secret partagé ECDH (384-bit strength)
+                var sharedSecret = ephemeralEcdh.DeriveKeyMaterial(recipientEcdh.PublicKey);
+
+                // 4. Utiliser SHA-256 pour dériver clé AES 256-bit robuste
+                using var sha256 = SHA256.Create();
+                var aesKey = sha256.ComputeHash(sharedSecret);
+
+                // 5. Chiffrer les bytes avec AES-GCM authentifié
+                var encryptedMessage = EncryptWithAesGcm(plaintextBytes, aesKey);
+
+                // 6. Combiner: clé publique éphémère + message chiffré
+                var ephemeralPublicKey = ephemeralEcdh.PublicKey.ExportSubjectPublicKeyInfo();
+                var result = new byte[ephemeralPublicKey.Length + encryptedMessage.Length + 4]; // +4 pour taille
+
+                // Format: [taille_clé_éphémère:4][clé_éphémère][message_chiffré]
+                var keyLengthBytes = BitConverter.GetBytes(ephemeralPublicKey.Length);
+                Array.Copy(keyLengthBytes, 0, result, 0, 4);
+                Array.Copy(ephemeralPublicKey, 0, result, 4, ephemeralPublicKey.Length);
+                Array.Copy(encryptedMessage, 0, result, 4 + ephemeralPublicKey.Length, encryptedMessage.Length);
+
+                await LogCrypto($"🔐 [ENCRYPT-BYTES] Binary encryption completed: {plaintextBytes.Length} → {result.Length} bytes");
+                return result;
+            }
+            catch (Exception ex)
+            {
+                await LogCrypto($"❌ [ENCRYPT-BYTES] Failed to encrypt binary data: {ex.Message}");
+                throw new InvalidOperationException($"Failed to encrypt binary data with ECDH P-384+AES-GCM: {ex.Message}", ex);
+            }
+        }
+
+        /// <summary>
+        /// Surcharge pour déchiffrer des bytes directement (pour chunks de fichiers)
+        /// </summary>
+        public static async Task<byte[]> DecryptMessageBytes(byte[] ciphertext, byte[] ownerPrivateKey)
+        {
+            try
+            {
+                await LogCrypto($"🔓 [DECRYPT-BYTES] Starting ECDH P-384 binary decryption for ciphertext: {ciphertext.Length} bytes");
+
+                // 1. Reconstruire notre clé privée ECDH
+                using var ownerEcdh = ECDiffieHellman.Create();
+                ownerEcdh.ImportECPrivateKey(ownerPrivateKey, out _);
+
+                // 2. Extraire la taille de la clé éphémère (4 premiers bytes)
+                if (ciphertext.Length < 4)
+                    throw new ArgumentException("Ciphertext trop court pour binary decryption");
+
+                var ephemeralKeyLength = BitConverter.ToInt32(ciphertext, 0);
+                if (ciphertext.Length < 4 + ephemeralKeyLength)
+                    throw new ArgumentException("Ciphertext ECDH binary malformé");
+
+                // 3. Extraire clé publique éphémère et message chiffré
+                var ephemeralPublicKey = new byte[ephemeralKeyLength];
+                var encryptedMessage = new byte[ciphertext.Length - 4 - ephemeralKeyLength];
+
+                Array.Copy(ciphertext, 4, ephemeralPublicKey, 0, ephemeralKeyLength);
+                Array.Copy(ciphertext, 4 + ephemeralKeyLength, encryptedMessage, 0, encryptedMessage.Length);
+
+                // 4. Reconstruire la clé publique éphémère
+                using var ephemeralEcdh = ECDiffieHellman.Create();
+                ephemeralEcdh.ImportSubjectPublicKeyInfo(ephemeralPublicKey, out _);
+
+                // 5. Calculer le même secret partagé ECDH
+                var sharedSecret = ownerEcdh.DeriveKeyMaterial(ephemeralEcdh.PublicKey);
+
+                // 6. Dériver la même clé AES
+                using var sha256 = SHA256.Create();
+                var aesKey = sha256.ComputeHash(sharedSecret);
+
+                // 7. Déchiffrer avec AES-GCM
+                var plaintextBytes = DecryptWithAesGcm(encryptedMessage, aesKey);
+
+                await LogCrypto($"🔓 [DECRYPT-BYTES] Binary decryption completed: {ciphertext.Length} → {plaintextBytes.Length} bytes");
+                return plaintextBytes;
+            }
+            catch (Exception ex)
+            {
+                await LogCrypto($"❌ [DECRYPT-BYTES] Failed to decrypt binary data: {ex.Message}");
+                throw new InvalidOperationException($"Failed to decrypt binary data with ECDH P-384+AES-GCM: {ex.Message}", ex);
+            }
+        }
     }
 }

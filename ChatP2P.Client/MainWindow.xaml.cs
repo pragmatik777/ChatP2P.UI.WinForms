@@ -2671,16 +2671,20 @@ namespace ChatP2P.Client
                         {
                             // ✅ FIX CRITIQUE: Si pas de P2P, passer directement au relay TCP
                             method = "TCP Relay";
-                            await LogToFile($"❌ [FILE-TRANSFER] No P2P connection available for {peerName}, using TCP relay fallback");
-                            response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo);
+                            var useEncryption = chkEncryptRelay?.IsChecked == true;
+                            var encStatus = useEncryption ? " (encrypted)" : " (clear)";
+                            await LogToFile($"❌ [FILE-TRANSFER] No P2P connection available for {peerName}, using TCP relay fallback{encStatus}");
+                            response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo, useEncryption);
                         }
                     }
                     else
                     {
                         // ✅ FIX: Si WebRTC client pas disponible, utiliser directement relay TCP
                         method = "TCP Relay";
-                        await LogToFile($"❌ [FILE-TRANSFER] WebRTC client not available, using TCP relay method");
-                        response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo);
+                        var useEncryption = chkEncryptRelay?.IsChecked == true;
+                        var encStatus = useEncryption ? " (encrypted)" : " (clear)";
+                        await LogToFile($"❌ [FILE-TRANSFER] WebRTC client not available, using TCP relay method{encStatus}");
+                        response = await SendFileViaRelay(peerName, dialog.FileName, fileInfo, useEncryption);
                     }
 
                     if (response?.Success == true)
@@ -2736,7 +2740,7 @@ namespace ChatP2P.Client
         /// <summary>
         /// Envoie un fichier via le RelayClient directement (sans passer par le serveur)
         /// </summary>
-        private async Task<ApiResponse> SendFileViaRelay(string peerName, string filePath, FileInfo fileInfo)
+        private async Task<ApiResponse> SendFileViaRelay(string peerName, string filePath, FileInfo fileInfo, bool useEncryption = false)
         {
             try
             {
@@ -2747,8 +2751,13 @@ namespace ChatP2P.Client
 
                 var displayName = txtDisplayName.Text.Trim();
                 var transferId = Guid.NewGuid().ToString();
+                var encryptionStatus = useEncryption ? "🔒 encrypted" : "📦 clear";
 
-                await LogToFile($"📁 [RELAY-FILE] Starting direct relay transfer: {fileInfo.Name} → {peerName}");
+                await LogToFile($"📁 [RELAY-FILE] Starting direct relay transfer: {fileInfo.Name} → {peerName} ({encryptionStatus})");
+                if (useEncryption)
+                {
+                    await CryptoService.LogCrypto($"🔒 [FILE-RELAY] Starting encrypted file transfer: {fileInfo.Name} → {peerName}");
+                }
 
                 // ✅ FIX: Afficher progress bar pour relay transfer
                 ShowFileTransferProgress(fileInfo.Name, fileInfo.Length, false);
@@ -2784,8 +2793,8 @@ namespace ChatP2P.Client
                     // ✅ TCP: Chunk data optimal sans copy inutile
                     var chunkData = bytesRead == TCP_CHUNK_SIZE ? buffer : buffer.Take(bytesRead).ToArray();
 
-                    // ✅ NOUVEAU: Envoyer chunk via canal files (port 8891)
-                    var chunkSent = await _relayClient.SendFileChunkAsync(transferId, chunkIndex, totalChunks, chunkData, displayName, peerName);
+                    // ✅ NOUVEAU: Envoyer chunk via canal files (port 8891) avec encryption optionnelle
+                    var chunkSent = await _relayClient.SendFileChunkAsync(transferId, chunkIndex, totalChunks, chunkData, displayName, peerName, useEncryption);
                     if (!chunkSent)
                     {
                         await LogToFile($"❌ [TCP-RELAY] Failed to send chunk {chunkIndex}/{totalChunks}");
@@ -4307,6 +4316,7 @@ namespace ChatP2P.Client
                 Console.WriteLine($"❌ [P2P-LOG] Error processing log message: {ex.Message}");
             }
         }
+
 
         #endregion
     }
