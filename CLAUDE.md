@@ -85,6 +85,16 @@ VM1-Client ←── WebRTC DataChannels ──→ VM2-Client
 - **Architecture** : `SecurityCenterWindow → DatabaseService.Instance`
 - **Performance** : Instantané, pas de latence réseau ni dépendances serveur
 
+### ✅ **Secure Tunnel PQC - Loop Infini Résolu (16 Sept 2025)**
+- **Problème** : Boucle infinie échange clés VM1↔VM2 via SecureRelayTunnel
+- **Cause** : Chaque peer répondait à TOUTE réception clé sans vérifier contenu
+- **Fix critique** : Comparaison `SequenceEqual()` clés exactes avant réponse
+- **Code SecureRelayTunnel.cs** : `hadSameKey = existingKey.SequenceEqual(publicKey)`
+- **Condition envoi** : `if (_tunnelPublicKey != null && !hadSameKey)`
+- **Résultat** : Échange clés unique au lieu de spam infini serveur
+- **Friend Request UI** : Fix événement `SecureFriendRequestReceived` connecté via RelayClient
+- **Visibilité** : Friend requests apparaissent et restent visibles jusqu'à acceptation
+
 ### ✅ **CRYPTO SYSTEM REFONTE COMPLÈTE (16 Sept 2025)**
 **⚠️ SECTION CRITIQUE - NE PAS SUPPRIMER LORS DE COMPACTAGE ⚠️**
 
@@ -139,7 +149,7 @@ CLIENT ←──── WebRTC DataChannels P2P      ────→ CLIENT
 - **TCP Relay** : 1MB chunks, canal séparé, logs optimisés
 - **Résultat** : Transferts fluides sans saturation + UX améliorée
 
-*Dernière mise à jour: 16 Septembre 2025 - CRYPTO HYBRIDE + ENCRYPTION FICHIERS RELAY OPÉRATIONNELS*
+*Dernière mise à jour: 16 Septembre 2025 - Secure Tunnel Loop Infini Résolu + Friend Request UI Fix*
 
 ## 🔐 **MODULE CRYPTOGRAPHIQUE C# PUR - ARCHITECTURE PQC**
 **⚠️ SECTION CRITIQUE - NE PAS SUPPRIMER LORS DE COMPACTAGE ⚠️**
@@ -328,3 +338,108 @@ public static async Task<byte[]> DecryptMessageBytes(byte[] ciphertext, byte[] o
 - Fichiers relay: ✅ Chiffrés avec même checkbox (nouvelle fonctionnalité)
 - Fichiers P2P: ✅ Restent en clair (préservé comme demandé)
 - UX unifiée: ✅ Un seul toggle pour tout l'encryption relay
+
+## 🔐 **IDENTIFICATION PERMANENTE PAR FINGERPRINT Ed25519 (16 Sept 2025)**
+**⚠️ SECTION CRITIQUE - NE PAS SUPPRIMER LORS DE COMPACTAGE ⚠️**
+
+### ✅ **Problème Résolu - Perte d'Identité Crypto**
+**Issue:** Peers identifiés par DisplayName (mutable) → Perte identité crypto lors changement nom
+**Solution:** Identification permanente par **Fingerprint Ed25519** (immutable)
+
+### 🔧 **Architecture Fingerprint Permanent**
+```csharp
+// Identification permanente = Fingerprint Ed25519
+string peerFingerprint = ComputeFingerprint(ed25519PublicKey); // SHA-256 formaté
+// Format: "aa:bb:cc:dd:ee:ff:11:22:33:44:55:66:77:88:99:00"
+
+// Résolution nom ↔ fingerprint
+string peerName = await GetPeerNameByFingerprint(fingerprint);
+bool trusted = await SetPeerTrustedByFingerprint(fingerprint, true);
+```
+
+### 🛡️ **Database Schema UUID → Fingerprint Migration**
+```sql
+-- SUPPRIMÉ: Colonnes UUID locales problématiques
+-- ALTER TABLE Peers ADD COLUMN PeerUUID TEXT UNIQUE; (causait erreur UNIQUE)
+
+-- SOLUTION: Utilisation Fingerprint Ed25519 comme ID permanent
+-- Calcul dynamique: SHA-256(Ed25519PublicKey) depuis table PeerKeys
+```
+
+### 🎯 **Security Center Extended**
+```
+┌─ ID (Ed25519) ─┬─ Peer ─┬─ Trust ─┬─ Auth ─┬─ Ed25519 FP ─┬─ PQC FP ────┐
+│ aa:bb:cc:dd:.. │ VM2    │   ✓     │   ✓    │ aa:bb:cc:..  │ c7:3d:c4:.. │
+│ e6:e7:c1:2d:.. │ VM1    │   ✓     │   ✓    │ e6:e7:c1:..  │ (self)      │
+└────────────────┴────────┴─────────┴────────┴──────────────┴─────────────┘
+```
+
+### 🔄 **Échange Automatique Clés Ed25519 + PQC**
+**NOUVEAU PROTOCOLE DUAL-KEY :**
+```
+// Envoi friend request avec TOUTES les clés
+FRIEND_REQ_DUAL:fromPeer:toPeer:ed25519KeyB64:pqcKeyB64:message
+
+// Acceptation avec TOUTES les clés
+FRIEND_ACCEPT_DUAL:fromPeer:toPeer:ed25519KeyB64:pqcKeyB64
+```
+
+**Client Side Changes:**
+```csharp
+// Génération automatique des deux types de clés
+await DatabaseService.Instance.EnsureEd25519Identity();
+await DatabaseService.Instance.EnsurePqIdentity();
+
+// Envoi friend request avec clés duales
+await _relayClient.SendFriendRequestWithBothKeysAsync(
+    myDisplayName, peerName, myEd25519Key, myPqcKey, message);
+```
+
+### 📊 **Méthodes Permanentes par Fingerprint**
+```csharp
+// Nouvelles méthodes permanentes (ChatP2P.Client/DatabaseService.cs)
+Task<string?> GetPeerNameByFingerprint(string fingerprint)
+Task<bool> SetPeerTrustedByFingerprint(string fingerprint, bool trusted)
+Task<bool> SetPeerNoteByFingerprint(string fingerprint, string note)
+Task<bool> ResetPeerTofuByFingerprint(string fingerprint)
+```
+
+### ✅ **Test Results - Identification Permanente**
+- **✅ Security Center** : Affiche fingerprints Ed25519 dans colonne "ID (Ed25519)"
+- **✅ Dual Key Exchange** : Ed25519 + PQC échangées automatiquement via friend requests
+- **✅ Persistent Identity** : Relations de confiance survivent aux changements DisplayName
+- **✅ Database Migration** : Erreur SQL UNIQUE résolue, migration propre
+- **✅ Backward Compatibility** : Méthodes existantes préservées
+- **✅ Build Success** : Compilation sans erreur, système production ready
+
+### 🚨 **VULNÉRABILITÉ CRITIQUE IDENTIFIÉE - CANAL NON SÉCURISÉ**
+**⚠️ PROBLÈME DE SÉCURITÉ MAJEUR ⚠️**
+
+**Issue:** Échange clés Ed25519 + PQC en **CLAIR** via relay TCP
+```
+FRIEND_REQ_DUAL:VM1:VM2:ed25519_KEY_CLEAR:pqc_KEY_CLEAR:message
+                            ↑                ↑
+                      VULNÉRABLE       VULNÉRABLE
+```
+
+**Attack Vector:**
+```
+VM1 → [ATTAQUANT MITM] → VM2
+L'attaquant substitue SES clés → Chiffrement PQC compromis dès le début
+```
+
+**Impact:**
+- ❌ **Zero sécurité** échange initial Ed25519 + PQC
+- ❌ **Post-Quantum security inexistante** contre MITM
+- ❌ **TOFU compromis** si premier échange intercepté
+
+**SOLUTION REQUISE:**
+- 🔐 **Canal sécurisé Post-Quantum** pour échange initial
+- 🛡️ **TLS hybride PQC** ou **vérification hors-bande**
+- 🎯 **Priorité absolue** avant déploiement production
+
+### 🎯 **NEXT STEPS - CANAL SÉCURISÉ PQC**
+1. **Analyser TLS hybride** : ML-KEM-768 + X25519 pour relay server
+2. **Implémenter certificats PQC** : Protection canal échange initial
+3. **Alternative hors-bande** : QR codes fingerprints pour vérification manuelle
+4. **Migration progressive** : Compatibility ancien + nouveau canal sécurisé

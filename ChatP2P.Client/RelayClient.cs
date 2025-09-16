@@ -35,6 +35,10 @@ namespace ChatP2P.Client
         
         // Events pour les notifications
         public event Action<string, string, string, string>? FriendRequestReceived; // from, to, publicKey, message
+
+        // ===== TUNNEL SÉCURISÉ PQC =====
+        private SecureRelayTunnel? _secureTunnel;
+        private bool _useSecureTunnel = true; // PQC tunnel enabled
         
         // Logging helper
         private async Task LogToFile(string message)
@@ -124,6 +128,50 @@ namespace ChatP2P.Client
                 await _messagesWriter.WriteLineAsync($"NAME:{displayName}");
                 await _filesWriter.WriteLineAsync($"NAME:{displayName}");
 
+                // NOUVEAU: Initialiser le tunnel sécurisé P2P pour ce client
+                if (_useSecureTunnel)
+                {
+                    _secureTunnel = new SecureRelayTunnel(displayName);
+
+                    // Connecter l'événement de friend request sécurisée à notre événement principal
+                    _secureTunnel.SecureFriendRequestReceived += (fromPeer, toPeer, publicKey, message) =>
+                    {
+                        FriendRequestReceived?.Invoke(fromPeer, toPeer, publicKey, message);
+                    };
+
+                    // Configurer le callback pour envoyer des messages
+                    _secureTunnel.SetSendMessageCallback(async (message) =>
+                    {
+                        using var writer = new StreamWriter(_friendRequestStream, Encoding.UTF8, leaveOpen: true);
+                        await writer.WriteLineAsync(message);
+                        await writer.FlushAsync();
+                    });
+
+                    await LogToFile($"🔐 [TUNNEL-INIT] P2P tunnel initialized for {displayName}");
+                    Console.WriteLine($"🔐 [TUNNEL-INIT] P2P tunnel initialized for {displayName}");
+
+                    // Générer nos clés P2P (pas de handshake serveur)
+                    try
+                    {
+                        var established = await _secureTunnel.EstablishSecureChannelAsync(_friendRequestStream);
+                        if (established)
+                        {
+                            await LogToFile($"✅ [TUNNEL-INIT] P2P tunnel ready for {displayName}");
+                            Console.WriteLine($"✅ [TUNNEL-INIT] P2P tunnel ready for {displayName}");
+                        }
+                        else
+                        {
+                            await LogToFile($"❌ [TUNNEL-INIT] Failed to initialize P2P tunnel for {displayName}");
+                            Console.WriteLine($"❌ [TUNNEL-INIT] Failed to initialize P2P tunnel for {displayName}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        await LogToFile($"❌ [TUNNEL-INIT] Error initializing P2P tunnel: {ex.Message}");
+                        Console.WriteLine($"❌ [TUNNEL-INIT] Error initializing P2P tunnel: {ex.Message}");
+                    }
+                }
+
                 _isConnected = true;
 
                 // Démarrer l'écoute sur les trois canaux
@@ -175,7 +223,7 @@ namespace ChatP2P.Client
         public async Task<bool> SendFriendRequestAsync(string fromPeer, string toPeer, string publicKey, string message = "")
         {
             if (!_isConnected || _friendRequestWriter == null) return false;
-            
+
             try
             {
                 var friendRequest = $"FRIEND_REQ:{fromPeer}:{toPeer}:{publicKey}:{message}";
@@ -186,6 +234,91 @@ namespace ChatP2P.Client
             catch (Exception ex)
             {
                 Console.WriteLine($"Error sending friend request: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Nouvelle méthode : Envoie friend request avec clés Ed25519 ET PQC via tunnel sécurisé
+        /// </summary>
+        public async Task<bool> SendFriendRequestWithBothKeysAsync(string fromPeer, string toPeer, string ed25519Key, string pqcKey, string message = "")
+        {
+            if (!_isConnected) return false;
+
+            try
+            {
+                // Utiliser tunnel sécurisé si disponible
+                if (_useSecureTunnel && _friendRequestStream != null)
+                {
+                    // Initialiser tunnel si pas encore fait
+                    if (_secureTunnel == null)
+                    {
+                        _secureTunnel = new SecureRelayTunnel(fromPeer);
+
+                        // Connecter l'événement de friend request sécurisée à notre événement principal
+                        _secureTunnel.SecureFriendRequestReceived += (fromPeer, toPeer, publicKey, message) =>
+                        {
+                            FriendRequestReceived?.Invoke(fromPeer, toPeer, publicKey, message);
+                        };
+
+                        // Configurer le callback pour envoyer des messages
+                        _secureTunnel.SetSendMessageCallback(async (message) =>
+                        {
+                            using var writer = new StreamWriter(_friendRequestStream, Encoding.UTF8, leaveOpen: true);
+                            await writer.WriteLineAsync(message);
+                            await writer.FlushAsync();
+                        });
+                    }
+
+                    // Établir canal sécurisé si nécessaire
+                    if (!_secureTunnel.IsSecureChannelEstablished)
+                    {
+                        var established = await _secureTunnel.EstablishSecureChannelAsync(_friendRequestStream);
+                        if (!established)
+                        {
+                            Console.WriteLine("❌ Failed to establish secure tunnel, falling back to legacy mode");
+                            return await SendLegacyFriendRequest(fromPeer, toPeer, ed25519Key, pqcKey, message);
+                        }
+                    }
+
+                    // Envoyer via tunnel sécurisé
+                    var success = await _secureTunnel.SendSecureFriendRequestAsync(_friendRequestStream, toPeer, ed25519Key, pqcKey, message);
+                    if (success)
+                    {
+                        Console.WriteLine($"🔐 Secure dual key friend request sent: {fromPeer} → {toPeer}");
+                        return true;
+                    }
+                }
+
+                // Fallback vers ancien protocole si tunnel échoue
+                Console.WriteLine("⚠️ Secure tunnel failed, using legacy friend request");
+                return await SendLegacyFriendRequest(fromPeer, toPeer, ed25519Key, pqcKey, message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending secure friend request: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Ancien protocole friend request pour compatibilité
+        /// </summary>
+        private async Task<bool> SendLegacyFriendRequest(string fromPeer, string toPeer, string ed25519Key, string pqcKey, string message)
+        {
+            if (_friendRequestWriter == null) return false;
+
+            try
+            {
+                // Format legacy: FRIEND_REQ_DUAL:fromPeer:toPeer:ed25519Key:pqcKey:message
+                var friendRequest = $"FRIEND_REQ_DUAL:{fromPeer}:{toPeer}:{ed25519Key}:{pqcKey}:{message}";
+                await _friendRequestWriter.WriteLineAsync(friendRequest);
+                Console.WriteLine($"⚠️ Legacy dual key friend request sent: {fromPeer} → {toPeer}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending legacy friend request: {ex.Message}");
                 return false;
             }
         }
@@ -207,6 +340,28 @@ namespace ChatP2P.Client
             catch (Exception ex)
             {
                 Console.WriteLine($"Error accepting friend request: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Nouvelle méthode : Accepte friend request en renvoyant clés Ed25519 ET PQC
+        /// </summary>
+        public async Task<bool> AcceptFriendRequestWithBothKeysAsync(string fromPeer, string toPeer, string myEd25519Key, string myPqcKey)
+        {
+            if (!_isConnected || _friendRequestWriter == null) return false;
+
+            try
+            {
+                // Format: FRIEND_ACCEPT_DUAL:fromPeer:toPeer:ed25519Key:pqcKey
+                var response = $"FRIEND_ACCEPT_DUAL:{fromPeer}:{toPeer}:{myEd25519Key}:{myPqcKey}";
+                await _friendRequestWriter.WriteLineAsync(response);
+                Console.WriteLine($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error accepting dual key friend request: {ex.Message}");
                 return false;
             }
         }
@@ -568,15 +723,46 @@ namespace ChatP2P.Client
                     {
                         var fromPeer = parts[0];
                         var toPeer = parts[1];
-                        
+
                         Console.WriteLine($"Friend request rejected: {fromPeer} ← {toPeer}");
                         FriendRequestRejected?.Invoke(fromPeer, toPeer);
                     }
+                }
+                else if (message.StartsWith("{") && (message.Contains("\"type\":\"SECURE_TUNNEL_MESSAGE\"") || message.Contains("\"type\":\"TUNNEL_KEY_EXCHANGE\"")))
+                {
+                    // Nouveau: Messages JSON du tunnel sécurisé en provenance du serveur
+                    await HandleRelayedTunnelMessage(message);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing friend request message: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gestion des messages de tunnel sécurisé relayés par le serveur
+        /// </summary>
+        private async Task HandleRelayedTunnelMessage(string jsonMessage)
+        {
+            try
+            {
+                await LogToFile($"🔐 [TUNNEL-RELAY] Received relayed tunnel message from server");
+                Console.WriteLine($"🔐 [TUNNEL-RELAY] Received relayed tunnel message from server");
+
+                // Transférer le message au SecureRelayTunnel pour déchiffrement
+                if (_secureTunnel != null)
+                {
+                    await _secureTunnel.HandleRelayedTunnelMessage(jsonMessage);
+                }
+                else
+                {
+                    Console.WriteLine($"❌ [TUNNEL-RELAY] No secure tunnel available to handle relayed message");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [TUNNEL-RELAY] Error handling relayed tunnel message: {ex.Message}");
             }
         }
         
@@ -826,5 +1012,27 @@ namespace ChatP2P.Client
         }
         
         public bool IsConnected => _isConnected;
+
+        /// <summary>
+        /// Active/désactive le tunnel sécurisé PQC
+        /// </summary>
+        public void SetSecureTunnelEnabled(bool enabled)
+        {
+            _useSecureTunnel = enabled;
+            if (!enabled && _secureTunnel != null)
+            {
+                _secureTunnel.ResetTunnel();
+                Console.WriteLine("🔓 Secure tunnel disabled, using legacy protocol");
+            }
+            else if (enabled)
+            {
+                Console.WriteLine("🔐 Secure tunnel enabled for friend requests");
+            }
+        }
+
+        /// <summary>
+        /// Vérifie si le tunnel sécurisé est établi
+        /// </summary>
+        public bool IsSecureTunnelEstablished => _secureTunnel?.IsSecureChannelEstablished ?? false;
     }
 }

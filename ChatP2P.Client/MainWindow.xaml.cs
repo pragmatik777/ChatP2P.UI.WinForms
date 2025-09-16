@@ -441,6 +441,16 @@ namespace ChatP2P.Client
             {
                 try
                 {
+                    await LogToFile($"🔔 [DEBUG] OnFriendRequestReceived called: {fromPeer} → {toPeer} | PublicKey: {publicKey?.Substring(0, Math.Min(20, publicKey?.Length ?? 0))}...", forceLog: true);
+
+                    // Vérifier si on a déjà cette request (éviter doublons)
+                    var existingRequest = _friendRequests.FirstOrDefault(r => r.FromPeer == fromPeer && r.ToPeer == toPeer);
+                    if (existingRequest != null)
+                    {
+                        await LogToFile($"⚠️ [DEBUG] Duplicate friend request detected from {fromPeer}, ignoring", forceLog: true);
+                        return;
+                    }
+
                     // Ajouter la friend request à la liste UI
                     var friendRequest = new FriendRequest
                     {
@@ -453,7 +463,19 @@ namespace ChatP2P.Client
                     };
 
                     _friendRequests.Add(friendRequest);
-                    await LogToFile($"Friend request received: {fromPeer} → {toPeer}", forceLog: true);
+                    await LogToFile($"✅ [DEBUG] Friend request added to UI list: {fromPeer} → {toPeer} | Total requests: {_friendRequests.Count}", forceLog: true);
+
+                    // Debug: Vérifier le contenu de la liste
+                    await LogToFile($"🔍 [DEBUG] Friend requests list content:", forceLog: true);
+                    for (int i = 0; i < _friendRequests.Count; i++)
+                    {
+                        var req = _friendRequests[i];
+                        await LogToFile($"🔍 [DEBUG] [{i}] {req.FromPeer} → {req.ToPeer} | Status: {req.Status} | Date: {req.RequestDate}", forceLog: true);
+                    }
+
+                    // Debug: Force UI refresh
+                    await LogToFile($"🔄 [DEBUG] Forcing UI refresh...", forceLog: true);
+                    lstFriendRequests.Items.Refresh();
                     
                     // ✅ PQC: Store the peer's PQC public key for encryption
                     if (!string.IsNullOrEmpty(publicKey) && publicKey != "no_pqc_key")
@@ -1967,16 +1989,22 @@ namespace ChatP2P.Client
                     {
                         var myDisplayName = txtDisplayName.Text.Trim();
                         
-                        // ✅ PQC: Get our PQC public key for friend request
-                        await DatabaseService.Instance.EnsurePqIdentity(); // Ensure we have PQC keys
+                        // ✅ NOUVEAU: Get both Ed25519 AND PQC public keys for friend request
+                        await DatabaseService.Instance.EnsureEd25519Identity(); // Ensure Ed25519 keys
+                        await DatabaseService.Instance.EnsurePqIdentity(); // Ensure PQC keys
                         var identity = await DatabaseService.Instance.GetIdentity();
+
+                        var myEd25519PublicKey = identity?.Ed25519Pub != null ? Convert.ToBase64String(identity.Ed25519Pub) : "no_ed25519_key";
                         var myPqPublicKey = identity?.PqPub != null ? Convert.ToBase64String(identity.PqPub) : "no_pqc_key";
-                        await CryptoService.LogCrypto($"🔑 [FRIEND-REQ] Using PQC public key for friend request: {myPqPublicKey.Substring(0, Math.Min(40, myPqPublicKey.Length))}...");
-                        
-                        var success = await _relayClient.SendFriendRequestAsync(
+
+                        await CryptoService.LogCrypto($"🔑 [FRIEND-REQ] Using Ed25519 key: {myEd25519PublicKey.Substring(0, Math.Min(40, myEd25519PublicKey.Length))}...");
+                        await CryptoService.LogCrypto($"🔑 [FRIEND-REQ] Using PQC key: {myPqPublicKey.Substring(0, Math.Min(40, myPqPublicKey.Length))}...");
+
+                        var success = await _relayClient.SendFriendRequestWithBothKeysAsync(
                             myDisplayName,
                             peerToAdd.Name,
-                            myPqPublicKey, // ✅ Use PQC public key
+                            myEd25519PublicKey, // ✅ Ed25519 key
+                            myPqPublicKey,      // ✅ PQC key
                             $"Friend request from {myDisplayName}"
                         );
                         
@@ -2091,6 +2119,7 @@ namespace ChatP2P.Client
                                           MessageBoxButton.OK, MessageBoxImage.Information);
                             
                             // Remove from pending requests UI immediately
+                            await LogToFile($"🗑️ [DEBUG] Removing friend request from UI: {request.FromPeer} → {request.ToPeer}", forceLog: true);
                             _friendRequests.Remove(request);
                             
                             // Refresh contacts list
@@ -2138,6 +2167,7 @@ namespace ChatP2P.Client
                                           MessageBoxButton.OK, MessageBoxImage.Information);
                             
                             // Remove from pending requests UI immediately
+                            await LogToFile($"🗑️ [DEBUG] Removing friend request from UI: {request.FromPeer} → {request.ToPeer}", forceLog: true);
                             _friendRequests.Remove(request);
                             
                             await LogToFile($"Friend request rejected via RelayClient: {request.FromPeer} <- {displayName}", forceLog: true);
