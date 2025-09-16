@@ -134,9 +134,32 @@ namespace ChatP2P.Client
                     _secureTunnel = new SecureRelayTunnel(displayName);
 
                     // Connecter l'événement de friend request sécurisée à notre événement principal
-                    _secureTunnel.SecureFriendRequestReceived += (fromPeer, toPeer, publicKey, message) =>
+                    _secureTunnel.SecureFriendRequestReceived += async (fromPeer, toPeer, ed25519Key, pqcKey, message) =>
                     {
-                        FriendRequestReceived?.Invoke(fromPeer, toPeer, publicKey, message);
+                        // Stocker directement les deux clés
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(ed25519Key) && ed25519Key != "no_ed25519_key")
+                            {
+                                var ed25519Bytes = Convert.FromBase64String(ed25519Key);
+                                await DatabaseService.Instance.AddPeerKey(fromPeer, "Ed25519", ed25519Bytes, "Secure tunnel Ed25519 key");
+                                await LogToFile($"✅ Ed25519 key stored for {fromPeer} from secure tunnel");
+                            }
+
+                            if (!string.IsNullOrEmpty(pqcKey) && pqcKey != "no_pqc_key")
+                            {
+                                var pqcBytes = Convert.FromBase64String(pqcKey);
+                                await DatabaseService.Instance.AddPeerKey(fromPeer, "PQ", pqcBytes, "Secure tunnel PQC key");
+                                await LogToFile($"✅ PQC key stored for {fromPeer} from secure tunnel");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await LogToFile($"❌ Error storing keys for {fromPeer}: {ex.Message}");
+                        }
+
+                        // Pour compatibilité avec l'interface existante, on passe la clé PQC comme clé principale
+                        FriendRequestReceived?.Invoke(fromPeer, toPeer, pqcKey, message);
                     };
 
                     // Configurer le callback pour envoyer des messages
@@ -256,9 +279,32 @@ namespace ChatP2P.Client
                         _secureTunnel = new SecureRelayTunnel(fromPeer);
 
                         // Connecter l'événement de friend request sécurisée à notre événement principal
-                        _secureTunnel.SecureFriendRequestReceived += (fromPeer, toPeer, publicKey, message) =>
+                        _secureTunnel.SecureFriendRequestReceived += async (fromPeer, toPeer, ed25519Key, pqcKey, message) =>
                         {
-                            FriendRequestReceived?.Invoke(fromPeer, toPeer, publicKey, message);
+                            // Stocker directement les deux clés
+                            try
+                            {
+                                if (!string.IsNullOrEmpty(ed25519Key) && ed25519Key != "no_ed25519_key")
+                                {
+                                    var ed25519Bytes = Convert.FromBase64String(ed25519Key);
+                                    await DatabaseService.Instance.AddPeerKey(fromPeer, "Ed25519", ed25519Bytes, "Secure tunnel Ed25519 key");
+                                    await LogToFile($"✅ Ed25519 key stored for {fromPeer} from secure tunnel");
+                                }
+
+                                if (!string.IsNullOrEmpty(pqcKey) && pqcKey != "no_pqc_key")
+                                {
+                                    var pqcBytes = Convert.FromBase64String(pqcKey);
+                                    await DatabaseService.Instance.AddPeerKey(fromPeer, "PQ", pqcBytes, "Secure tunnel PQC key");
+                                    await LogToFile($"✅ PQC key stored for {fromPeer} from secure tunnel");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                await LogToFile($"❌ Error storing keys for {fromPeer}: {ex.Message}");
+                            }
+
+                            // Pour compatibilité avec l'interface existante, on passe la clé PQC comme clé principale
+                            FriendRequestReceived?.Invoke(fromPeer, toPeer, pqcKey, message);
                         };
 
                         // Configurer le callback pour envoyer des messages
@@ -439,7 +485,9 @@ namespace ChatP2P.Client
                 if (useEncryption)
                 {
                     var peerKeys = await DatabaseService.Instance.GetPeerKeys(toPeer, "PQ");
-                    var activePqKey = peerKeys.FirstOrDefault(k => !k.Revoked && k.Public != null);
+                    var activePqKey = peerKeys.Where(k => !k.Revoked && k.Public != null)
+                                              .OrderByDescending(k => k.CreatedUtc)
+                                              .FirstOrDefault();
 
                     if (activePqKey?.Public != null)
                     {

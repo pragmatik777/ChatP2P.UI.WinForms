@@ -138,10 +138,12 @@ namespace ChatP2P.Client
             var peer = GetSelectedPeer();
             if (peer == null) return;
 
-            var details = $"Peer: {peer.Name}\n" +
+            var details = $"Permanent ID: {peer.PeerFingerprint}\n" +
+                         $"Peer: {peer.Name}\n" +
                          $"Trusted: {(peer.Trusted ? "Yes" : "No")}\n" +
                          $"Auth OK: {(peer.AuthOk ? "Yes" : "No")}\n" +
-                         $"Fingerprint: {peer.Fingerprint}\n" +
+                         $"Ed25519 FP: {peer.Fingerprint}\n" +
+                         $"PQC FP: {peer.PqcFingerprint}\n" +
                          $"Created: {peer.CreatedUtc}\n" +
                          $"Last Seen: {peer.LastSeenUtc}\n" +
                          $"Note: {peer.Note}";
@@ -270,8 +272,16 @@ namespace ChatP2P.Client
                     return;
                 }
 
+                // ✅ SECURE TUNNEL: Use both Ed25519 and PQC keys via secure tunnel
+                await DatabaseService.Instance.EnsureEd25519Identity();
+                await DatabaseService.Instance.EnsurePqIdentity();
+                var identity = await DatabaseService.Instance.GetIdentity();
                 var myName = await DatabaseService.Instance.GetMyDisplayName();
-                await relayClient.SendFriendRequestAsync(myName, peer.Name, myPqcKeyB64);
+
+                var myEd25519PublicKey = identity?.Ed25519Pub != null ? Convert.ToBase64String(identity.Ed25519Pub) : "no_ed25519_key";
+                var myPqPublicKey = identity?.PqPub != null ? Convert.ToBase64String(identity.PqPub) : "no_pqc_key";
+
+                await relayClient.SendFriendRequestWithBothKeysAsync(myName, peer.Name, myEd25519PublicKey, myPqPublicKey, $"PQC key exchange from {myName}");
 
                 MessageBox.Show($"PQC key exchange request sent to {peer.Name}.\n" +
                               "They will receive your public key and can send theirs back.",

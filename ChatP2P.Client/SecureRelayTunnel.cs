@@ -23,7 +23,8 @@ namespace ChatP2P.Client
         private Func<string, Task>? _sendMessageCallback;
 
         // Événement pour notifier l'interface d'une friend request sécurisée reçue
-        public event Action<string, string, string, string>? SecureFriendRequestReceived;
+        // Paramètres: fromPeer, toPeer, ed25519Key, pqcKey, message
+        public event Action<string, string, string, string, string>? SecureFriendRequestReceived;
 
         public SecureRelayTunnel(string localDisplayName)
         {
@@ -352,7 +353,7 @@ namespace ChatP2P.Client
                     Console.WriteLine($"💬 [TUNNEL-RELAY] Message: {message}");
 
                     // Déclencher l'événement pour notifier l'interface utilisateur
-                    SecureFriendRequestReceived?.Invoke(sender, _localDisplayName, ed25519Key, message);
+                    SecureFriendRequestReceived?.Invoke(sender, _localDisplayName, ed25519Key, pqcKey, message);
                     await LogTunnel($"📢 [TUNNEL-RELAY] UI notified of secure friend request from {sender}");
                 }
                 else

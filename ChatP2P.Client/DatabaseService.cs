@@ -76,8 +76,10 @@ namespace ChatP2P.Client
         public DateTime CreatedUtc { get; set; }
     }
 
+
     public class PeerSecurityInfo : INotifyPropertyChanged
     {
+        private string _peerFingerprint = "";
         private string _name = "";
         private bool _trusted = false;
         private bool _authOk = false;
@@ -87,6 +89,12 @@ namespace ChatP2P.Client
         private string _createdUtc = "";
         private string _lastSeenUtc = "";
         private string _note = "";
+
+        public string PeerFingerprint
+        {
+            get => _peerFingerprint;
+            set { _peerFingerprint = value; OnPropertyChanged(nameof(PeerFingerprint)); }
+        }
 
         public string Name
         {
@@ -221,8 +229,21 @@ namespace ChatP2P.Client
                     Direction TEXT NOT NULL,
                     CreatedUtc TEXT NOT NULL
                 );",
-                
+
                 @"CREATE INDEX IF NOT EXISTS IX_Messages_Peer_Created ON Messages(PeerName, CreatedUtc);",
+
+                // Table ChatSessions - Sessions de chat actives et historique
+                @"CREATE TABLE IF NOT EXISTS ChatSessions(
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    PeerName TEXT NOT NULL UNIQUE,
+                    LastMessage TEXT NULL,
+                    LastActivity TEXT NOT NULL,
+                    UnreadCount INTEGER NOT NULL DEFAULT 0,
+                    CreatedUtc TEXT NOT NULL,
+                    UpdatedUtc TEXT NOT NULL
+                );",
+
+                @"CREATE INDEX IF NOT EXISTS IX_ChatSessions_LastActivity ON ChatSessions(LastActivity DESC);",
 
                 // Table Identities - Clés cryptographiques locales
                 @"CREATE TABLE IF NOT EXISTS Identities(
@@ -331,6 +352,186 @@ namespace ChatP2P.Client
         {
             var value = reader[columnName];
             return value == DBNull.Value ? null : (byte[])value;
+        }
+
+        /// <summary>
+        /// Assure que tous les peers existants ont des UUIDs permanents
+        /// Migration automatique pour éviter perte d'identité lors de changement DisplayName
+        /// </summary>
+        private void EnsurePeerUUIDs()
+        {
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                connection.Open();
+
+                // 1. Générer UUIDs pour peers existants qui n'en ont pas
+                using var selectCmd = new SQLiteCommand("SELECT Id, Name FROM Peers WHERE PeerUUID IS NULL", connection);
+                using var reader = selectCmd.ExecuteReader();
+
+                var peersToUpdate = new List<(int Id, string Name)>();
+                while (reader.Read())
+                {
+                    var id = GetSafeInt(reader, "Id");
+                    var name = GetSafeString(reader, "Name");
+                    peersToUpdate.Add((id, name));
+                }
+                reader.Close();
+
+                foreach (var (id, name) in peersToUpdate)
+                {
+                    var uuid = Guid.NewGuid().ToString();
+                    using var updateCmd = new SQLiteCommand("UPDATE Peers SET PeerUUID = ? WHERE Id = ?", connection);
+                    updateCmd.Parameters.AddWithValue("@uuid", uuid);
+                    updateCmd.Parameters.AddWithValue("@id", id);
+                    updateCmd.ExecuteNonQuery();
+
+                    Console.WriteLine($"✅ [UUID-MIGRATION] Generated UUID for peer '{name}': {uuid}");
+                }
+
+                // 2. Migrer les références existantes Messages.PeerName → Messages.PeerUUID
+                var migrateMessagesCmd = @"
+                    UPDATE Messages
+                    SET PeerUUID = (SELECT PeerUUID FROM Peers WHERE Peers.Name = Messages.PeerName)
+                    WHERE PeerUUID IS NULL AND PeerName IS NOT NULL";
+
+                using var msgCmd = new SQLiteCommand(migrateMessagesCmd, connection);
+                var msgUpdated = msgCmd.ExecuteNonQuery();
+
+                // 3. Migrer les références existantes PeerKeys.PeerName → PeerKeys.PeerUUID
+                var migrateKeysCmd = @"
+                    UPDATE PeerKeys
+                    SET PeerUUID = (SELECT PeerUUID FROM Peers WHERE Peers.Name = PeerKeys.PeerName)
+                    WHERE PeerUUID IS NULL AND PeerName IS NOT NULL";
+
+                using var keysCmd = new SQLiteCommand(migrateKeysCmd, connection);
+                var keysUpdated = keysCmd.ExecuteNonQuery();
+
+                if (peersToUpdate.Count > 0 || msgUpdated > 0 || keysUpdated > 0)
+                {
+                    Console.WriteLine($"✅ [UUID-MIGRATION] Migration completed: {peersToUpdate.Count} peers, {msgUpdated} messages, {keysUpdated} keys");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [UUID-MIGRATION] Error during UUID migration: {ex.Message}");
+                // Ne pas planter l'app si migration échoue
+            }
+        }
+
+        // ===== GESTION CHAT SESSIONS =====
+
+        public async Task<List<ChatSession>> GetActiveChatSessions()
+        {
+            var sessions = new List<ChatSession>();
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                using var command = new SQLiteCommand(@"
+                    SELECT cs.PeerName, cs.LastMessage, cs.LastActivity, cs.UnreadCount,
+                           p.Name as PeerDisplayName
+                    FROM ChatSessions cs
+                    LEFT JOIN Peers p ON cs.PeerName = p.Name
+                    ORDER BY cs.LastActivity DESC", connection);
+
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var session = new ChatSession
+                    {
+                        PeerName = reader.GetString(0),
+                        LastMessage = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        LastActivity = DateTime.Parse(reader.GetString(2)),
+                        UnreadCount = reader.GetInt32(3),
+                        IsOnline = false // Will be updated by connection status
+                    };
+                    sessions.Add(session);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [DB-CHAT] Error getting chat sessions: {ex.Message}");
+            }
+            return sessions;
+        }
+
+        public async Task<bool> UpdateChatSession(string peerName, string lastMessage, int unreadCount = 0)
+        {
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+
+                // Upsert: update si existe, insert sinon
+                using var command = new SQLiteCommand(@"
+                    INSERT INTO ChatSessions (PeerName, LastMessage, LastActivity, UnreadCount, CreatedUtc, UpdatedUtc)
+                    VALUES (@peerName, @lastMessage, @lastActivity, @unreadCount, @now, @now)
+                    ON CONFLICT(PeerName) DO UPDATE SET
+                        LastMessage = @lastMessage,
+                        LastActivity = @lastActivity,
+                        UnreadCount = UnreadCount + @unreadCount,
+                        UpdatedUtc = @now", connection);
+
+                command.Parameters.AddWithValue("@peerName", peerName);
+                command.Parameters.AddWithValue("@lastMessage", lastMessage);
+                command.Parameters.AddWithValue("@lastActivity", now);
+                command.Parameters.AddWithValue("@unreadCount", unreadCount);
+                command.Parameters.AddWithValue("@now", now);
+
+                await command.ExecuteNonQueryAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [DB-CHAT] Error updating chat session for {peerName}: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> MarkChatAsRead(string peerName)
+        {
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                using var command = new SQLiteCommand(
+                    "UPDATE ChatSessions SET UnreadCount = 0 WHERE PeerName = @peerName", connection);
+                command.Parameters.AddWithValue("@peerName", peerName);
+
+                await command.ExecuteNonQueryAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [DB-CHAT] Error marking chat as read for {peerName}: {ex.Message}");
+                return false;
+            }
+        }
+
+        public async Task<bool> DeleteChatSession(string peerName)
+        {
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                using var command = new SQLiteCommand(
+                    "DELETE FROM ChatSessions WHERE PeerName = @peerName", connection);
+                command.Parameters.AddWithValue("@peerName", peerName);
+
+                var deletedCount = await command.ExecuteNonQueryAsync();
+                return deletedCount > 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [DB-CHAT] Error deleting chat session for {peerName}: {ex.Message}");
+                return false;
+            }
         }
 
         // ===== GESTION PEERS =====
@@ -807,7 +1008,7 @@ namespace ChatP2P.Client
 
             string sql = "SELECT * FROM Peers";
             if (!string.IsNullOrWhiteSpace(searchFilter))
-                sql += " WHERE Name LIKE @filter OR Note LIKE @filter";
+                sql += " WHERE Name LIKE @filter OR Note LIKE @filter OR Fingerprint LIKE @filter";
             sql += " ORDER BY Name";
 
             using var command = new SQLiteCommand(sql, connection);
@@ -818,6 +1019,19 @@ namespace ChatP2P.Client
             while (await reader.ReadAsync())
             {
                 var peerName = GetSafeString(reader, "Name");
+
+                // ✅ Récupérer clé Ed25519 pour ce peer (identifiant permanent réel)
+                var ed25519Keys = await GetPeerKeys(peerName, "Ed25519");
+                var latestEd25519Key = ed25519Keys.Where(k => !k.Revoked).OrderByDescending(k => k.CreatedUtc).FirstOrDefault();
+                var peerFingerprint = "";
+                var ed25519Fingerprint = "";
+
+                if (latestEd25519Key?.Public != null)
+                {
+                    // Calculer le fingerprint Ed25519 réel (identifiant permanent)
+                    peerFingerprint = ComputeFingerprint(latestEd25519Key.Public);
+                    ed25519Fingerprint = peerFingerprint;
+                }
 
                 // ✅ Récupérer clés PQC pour ce peer
                 var pqcKeys = await GetPeerKeys(peerName, "PQ");
@@ -834,10 +1048,11 @@ namespace ChatP2P.Client
 
                 peers.Add(new PeerSecurityInfo
                 {
+                    PeerFingerprint = peerFingerprint,
                     Name = peerName,
                     Trusted = GetSafeBool(reader, "Trusted"),
                     AuthOk = GetSafeBool(reader, "Verified"),
-                    Fingerprint = GetSafeStringOrNull(reader, "Fingerprint") ?? "",
+                    Fingerprint = ed25519Fingerprint,
                     PqcFingerprint = pqcFingerprint,
                     HasPqcKey = hasPqcKey,
                     CreatedUtc = GetSafeDateTimeOrNull(reader, "CreatedUtc")?.ToString("yyyy-MM-dd HH:mm") ?? "",
@@ -1049,7 +1264,7 @@ namespace ChatP2P.Client
             return formatted;
         }
 
-        private async Task<bool> EnsureEd25519Identity()
+        public async Task<bool> EnsureEd25519Identity()
         {
             try
             {
@@ -1111,6 +1326,193 @@ namespace ChatP2P.Client
 
             var result = await command.ExecuteScalarAsync();
             return Convert.ToInt32(result);
+        }
+
+        // ===== IDENTIFICATION PERMANENTE PAR FINGERPRINT ED25519 =====
+
+        /// <summary>
+        /// Trouve le nom d'un peer par son fingerprint Ed25519
+        /// </summary>
+        public async Task<string?> GetPeerNameByFingerprint(string fingerprint)
+        {
+            try
+            {
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                // Chercher dans toutes les clés Ed25519 stockées
+                using var command = new SQLiteCommand(
+                    @"SELECT DISTINCT pk.PeerName
+                      FROM PeerKeys pk
+                      WHERE pk.Kind = 'Ed25519' AND pk.Revoked = 0", connection);
+
+                using var reader = await command.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    var peerName = GetSafeString(reader, "PeerName");
+
+                    // Récupérer la clé et calculer son fingerprint
+                    var keys = await GetPeerKeys(peerName, "Ed25519");
+                    var latestKey = keys.Where(k => !k.Revoked).OrderByDescending(k => k.CreatedUtc).FirstOrDefault();
+
+                    if (latestKey?.Public != null)
+                    {
+                        var computedFingerprint = ComputeFingerprint(latestKey.Public);
+                        if (computedFingerprint.Equals(fingerprint, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return peerName;
+                        }
+                    }
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error getting peer name by fingerprint: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Met à jour la confiance d'un peer par son fingerprint Ed25519 (identifiant permanent)
+        /// </summary>
+        public async Task<bool> SetPeerTrustedByFingerprint(string fingerprint, bool trusted, string? trustNote = null)
+        {
+            var peerName = await GetPeerNameByFingerprint(fingerprint);
+            if (peerName == null)
+            {
+                Console.WriteLine($"No peer found with fingerprint: {fingerprint}");
+                return false;
+            }
+
+            return await SetPeerTrusted(peerName, trusted, trustNote);
+        }
+
+        /// <summary>
+        /// Met à jour la note d'un peer par son fingerprint Ed25519 (identifiant permanent)
+        /// </summary>
+        public async Task<bool> SetPeerNoteByFingerprint(string fingerprint, string note)
+        {
+            var peerName = await GetPeerNameByFingerprint(fingerprint);
+            if (peerName == null)
+            {
+                Console.WriteLine($"No peer found with fingerprint: {fingerprint}");
+                return false;
+            }
+
+            return await SetPeerNote(peerName, note);
+        }
+
+        /// <summary>
+        /// Reset TOFU d'un peer par son fingerprint Ed25519 (identifiant permanent)
+        /// </summary>
+        public async Task<bool> ResetPeerTofuByFingerprint(string fingerprint)
+        {
+            var peerName = await GetPeerNameByFingerprint(fingerprint);
+            if (peerName == null)
+            {
+                Console.WriteLine($"No peer found with fingerprint: {fingerprint}");
+                return false;
+            }
+
+            return await ResetPeerTofu(peerName);
+        }
+
+        // ===== FONCTIONS LAST SEEN POUR DÉTECTION MITM =====
+
+        /// <summary>
+        /// Met à jour la dernière vue d'un peer - ESSENTIEL pour détection changement réseau/MITM
+        /// </summary>
+        public async Task<bool> UpdatePeerLastSeen(string peerName)
+        {
+            try
+            {
+                await EnsurePeer(peerName);
+
+                using var connection = new SQLiteConnection(_connectionString);
+                await connection.OpenAsync();
+
+                using var command = new SQLiteCommand(
+                    @"UPDATE Peers SET LastSeenUtc = @lastSeen WHERE Name = @name", connection);
+                command.Parameters.AddWithValue("@lastSeen", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
+                command.Parameters.AddWithValue("@name", peerName);
+
+                var rowsAffected = await command.ExecuteNonQueryAsync();
+                return rowsAffected > 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating peer last seen: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Vérifie si les clés d'un peer ont changé depuis la dernière fois - Détection MITM/changement réseau
+        /// </summary>
+        public async Task<(bool changed, string? oldFingerprint, string? newFingerprint)> CheckPeerKeysChanged(string peerName, byte[] newEd25519Key)
+        {
+            try
+            {
+                var newFingerprint = ComputeFingerprint(newEd25519Key);
+
+                // Récupérer la clé Ed25519 actuelle stockée
+                var currentKeys = await GetPeerKeys(peerName, "Ed25519");
+                var currentKey = currentKeys.Where(k => !k.Revoked).OrderByDescending(k => k.CreatedUtc).FirstOrDefault();
+
+                if (currentKey?.Public == null)
+                {
+                    // Pas de clé stockée = premier contact
+                    return (false, null, newFingerprint);
+                }
+
+                var oldFingerprint = ComputeFingerprint(currentKey.Public);
+                bool changed = !oldFingerprint.Equals(newFingerprint, StringComparison.OrdinalIgnoreCase);
+
+                return (changed, oldFingerprint, newFingerprint);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error checking peer keys changed: {ex.Message}");
+                return (false, null, null);
+            }
+        }
+
+        /// <summary>
+        /// Alerte sécurité si les clés d'un peer connu ont changé - Protection contre MITM
+        /// </summary>
+        public async Task<bool> HandlePeerKeyChange(string peerName, byte[] newEd25519Key, string context = "")
+        {
+            try
+            {
+                var (changed, oldFp, newFp) = await CheckPeerKeysChanged(peerName, newEd25519Key);
+
+                if (changed && oldFp != null)
+                {
+                    // 🚨 ALERTE SÉCURITÉ - Les clés ont changé !
+                    await LogSecurityEvent(peerName, "KEY_CHANGE_DETECTED",
+                        $"SECURITY ALERT: {peerName} keys changed! Old: {oldFp} → New: {newFp} Context: {context}");
+
+                    Console.WriteLine($"🚨 [SECURITY] Peer {peerName} keys changed!");
+                    Console.WriteLine($"   Old FP: {oldFp}");
+                    Console.WriteLine($"   New FP: {newFp}");
+                    Console.WriteLine($"   Context: {context}");
+
+                    // Marquer comme non-vérifié jusqu'à validation manuelle
+                    await SetPeerVerified(peerName, false);
+
+                    return true; // Changement détecté
+                }
+
+                // Mettre à jour LastSeen si pas de changement suspect
+                await UpdatePeerLastSeen(peerName);
+                return false; // Pas de changement
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error handling peer key change: {ex.Message}");
+                return false;
+            }
         }
     }
 }

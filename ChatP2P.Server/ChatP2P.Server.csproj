@@ -1,8 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\ChatP2P.Crypto\ChatP2P.Crypto.vbproj" />
-    <!-- ✅ REMOVED: VB.NET ChatP2P.Core reference - using pure C# now -->
+    <!-- ✅ REMOVED: VB.NET ChatP2P.Crypto reference - using pure C# CryptoService now -->
     <PackageReference Include="SIPSorcery" Version="8.0.23" />
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.119" />
   </ItemGroup>

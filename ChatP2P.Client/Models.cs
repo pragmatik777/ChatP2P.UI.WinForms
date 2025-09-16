@@ -42,6 +42,8 @@ namespace ChatP2P.Client
             set { _authStatus = value; OnPropertyChanged(nameof(AuthStatus)); }
         }
 
+        public string StatusIcon => Status == "Online" ? "🟢" : "⚫";
+
         public event PropertyChangedEventHandler? PropertyChanged;
         protected virtual void OnPropertyChanged(string propertyName)
         {
@@ -115,6 +117,9 @@ namespace ChatP2P.Client
         private bool _isCryptoActive = false;
         private bool _isAuthenticated = false;
         private DateTime _lastActivity = DateTime.Now;
+        private string _lastMessage = "";
+        private int _unreadCount = 0;
+        private bool _isOnline = false;
 
         public string PeerName
         {
@@ -143,10 +148,33 @@ namespace ChatP2P.Client
         public DateTime LastActivity
         {
             get => _lastActivity;
-            set { _lastActivity = value; OnPropertyChanged(nameof(LastActivity)); }
+            set { _lastActivity = value; OnPropertyChanged(nameof(LastActivity)); OnPropertyChanged(nameof(LastActivityFormatted)); }
+        }
+
+        public string LastMessage
+        {
+            get => _lastMessage;
+            set { _lastMessage = value; OnPropertyChanged(nameof(LastMessage)); }
+        }
+
+        public int UnreadCount
+        {
+            get => _unreadCount;
+            set { _unreadCount = value; OnPropertyChanged(nameof(UnreadCount)); OnPropertyChanged(nameof(HasUnread)); OnPropertyChanged(nameof(UnreadDisplay)); }
+        }
+
+        public bool IsOnline
+        {
+            get => _isOnline;
+            set { _isOnline = value; OnPropertyChanged(nameof(IsOnline)); OnPropertyChanged(nameof(StatusIcon)); }
         }
 
         public string DisplayName => PeerName;
+        public string LastActivityFormatted => LastActivity.ToString("HH:mm");
+        public bool HasUnread => UnreadCount > 0;
+        public string UnreadDisplay => UnreadCount > 99 ? "99+" : UnreadCount.ToString();
+        public string StatusIcon => IsOnline ? "🟢" : "⚫";
+        public bool HasErrors => LastMessage != null && (LastMessage.Contains("[DECRYPT_ERROR") || LastMessage.Contains("[ENCRYPT_ERROR"));
 
         public string StatusIndicator
         {

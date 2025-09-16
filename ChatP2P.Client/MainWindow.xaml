@@ -10,10 +10,48 @@
         WindowStartupLocation="CenterScreen"
         Background="#FF2B2B2B">
 
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+    </Window.Resources>
+
     <Grid>
         <TabControl Name="mainTabControl" Background="#FF1E1E1E" BorderBrush="#FF333333" SelectionChanged="MainTabControl_SelectionChanged">
+            <TabControl.Resources>
+                <Style TargetType="TabItem">
+                    <Setter Property="Foreground" Value="White"/>
+                    <Setter Property="Background" Value="#FF1E1E1E"/>
+                    <Setter Property="BorderBrush" Value="#FF333333"/>
+                    <Setter Property="Padding" Value="12,8"/>
+                    <Setter Property="Margin" Value="0,0,2,0"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="TabItem">
+                                <Border Name="Border" Background="{TemplateBinding Background}"
+                                        BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1,1,1,0"
+                                        CornerRadius="4,4,0,0" Margin="0,0,2,0">
+                                    <ContentPresenter x:Name="ContentSite" VerticalAlignment="Center"
+                                                      HorizontalAlignment="Center" ContentSource="Header"
+                                                      Margin="{TemplateBinding Padding}"
+                                                      TextBlock.Foreground="{TemplateBinding Foreground}"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter Property="Panel.ZIndex" Value="100"/>
+                                        <Setter TargetName="Border" Property="Background" Value="#FF0D7377"/>
+                                        <Setter Property="Foreground" Value="White"/>
+                                    </Trigger>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Border" Property="Background" Value="#FF333333"/>
+                                        <Setter Property="Foreground" Value="White"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </TabControl.Resources>
             <!-- Connection Tab -->
-            <TabItem Header="Connection" Name="connectionTab" Foreground="White">
+            <TabItem Header="Connection" Name="connectionTab">
                 <Grid Margin="20" Background="#FF2B2B2B">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -168,66 +206,178 @@
             </TabItem>
             
             <!-- Chat Windows Tab -->
-            <TabItem Name="chatTab" Foreground="White">
+            <TabItem Name="chatTab">
                 <TabItem.Header>
                     <StackPanel Orientation="Horizontal">
-                        <TextBlock Name="chatTabHeader" Text="Chat" Foreground="White"/>
-                        <Ellipse Name="chatNotificationDot" Width="8" Height="8" 
-                                 Fill="#FFFF6B6B" Margin="5,0,0,0" 
+                        <TextBlock Name="chatTabHeader" Text="Chat"/>
+                        <Ellipse Name="chatNotificationDot" Width="8" Height="8"
+                                 Fill="#FFFF6B6B" Margin="5,0,0,0"
                                  Visibility="Collapsed"/>
                     </StackPanel>
                 </TabItem.Header>
                 <Grid Background="#FF2B2B2B">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="300"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    
-                    <!-- Chat List -->
-                    <Border Grid.Column="0" Background="#FF1E1E1E" BorderBrush="#FF333333" BorderThickness="0,0,1,0">
-                        <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="200"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- SECTION 1: Quick Start (Haut) -->
+                    <GroupBox Grid.Row="0" Header="🚀 Quick Start" Margin="20,20,20,10"
+                              Foreground="White" BorderBrush="#FF0D7377">
+                        <Grid Margin="15">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="60"/>
-                                <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
-                            
-                            <Border Grid.Row="0" Background="#FF0D7377" Padding="15">
-                                <TextBlock Text="Active Chats" FontSize="16" FontWeight="Bold" 
-                                           Foreground="White" VerticalAlignment="Center"/>
-                            </Border>
-                            
-                            <ListView Name="lstActiveChats" Grid.Row="1" Background="Transparent" 
-                                      BorderBrush="Transparent" Foreground="White"
-                                      SelectionChanged="LstActiveChats_SelectionChanged">
-                                <ListView.ItemContainerStyle>
-                                    <Style TargetType="ListViewItem">
-                                        <Setter Property="Background" Value="Transparent"/>
-                                        <Setter Property="BorderBrush" Value="Transparent"/>
-                                        <Setter Property="Padding" Value="15,10"/>
-                                        <Style.Triggers>
-                                            <Trigger Property="IsMouseOver" Value="True">
-                                                <Setter Property="Background" Value="#FF333333"/>
-                                            </Trigger>
-                                            <Trigger Property="IsSelected" Value="True">
-                                                <Setter Property="Background" Value="#FF0D7377"/>
-                                            </Trigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </ListView.ItemContainerStyle>
-                                <ListView.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding PeerName}" 
-                                                   Foreground="White" FontSize="14" FontWeight="SemiBold"/>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
+
+                            <TextBlock Grid.Row="0" Text="Connect to online peers:"
+                                       Foreground="#FFCCCCCC" FontSize="12" Margin="0,0,0,10"/>
+
+                            <ListView Name="lstQuickStart" Grid.Row="1" Background="#FF404040"
+                                      Foreground="White" BorderBrush="#FF666666"
+                                      MouseDoubleClick="LstQuickStart_MouseDoubleClick">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Peer" Width="120">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{Binding StatusIcon}" FontSize="10"
+                                                                   VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                                        <TextBlock Text="{Binding Name}" Foreground="White"/>
+                                                    </StackPanel>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Status" Width="80">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Status}" Foreground="White"/>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                        <GridViewColumn Header="Actions" Width="150">
+                                            <GridViewColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <Button Content="💬" Width="30" Height="25"
+                                                                Background="#FF0D7377" Foreground="White"
+                                                                BorderBrush="Transparent" Margin="0,0,5,0"
+                                                                ToolTip="Open Chat"
+                                                                Click="BtnQuickChat_Click" Tag="{Binding}"/>
+                                                        <Button Content="📎" Width="30" Height="25"
+                                                                Background="#FFFF8C42" Foreground="White"
+                                                                BorderBrush="Transparent"
+                                                                ToolTip="Send File"
+                                                                Click="BtnQuickFile_Click" Tag="{Binding}"/>
+                                                    </StackPanel>
+                                                </DataTemplate>
+                                            </GridViewColumn.CellTemplate>
+                                        </GridViewColumn>
+                                    </GridView>
+                                </ListView.View>
                             </ListView>
-                            
-                            <Button Name="btnNewChat" Grid.Row="2" Content="+ New Chat" Height="40" 
-                                    Margin="15" Background="#FF0D7377" Foreground="White" 
-                                    BorderBrush="Transparent" Click="BtnNewChat_Click"/>
                         </Grid>
-                    </Border>
+                    </GroupBox>
+
+                    <!-- SECTION 2: Chat History (Bas) -->
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="350"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Histoire des conversations -->
+                        <GroupBox Grid.Column="0" Header="📝 Chat History" Margin="20,0,10,20"
+                                  Foreground="White" BorderBrush="#FFFF8C42">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+
+                                <ListView Name="lstChatHistory" Grid.Row="0" Background="Transparent"
+                                          BorderBrush="Transparent" Foreground="White"
+                                          SelectionChanged="LstChatHistory_SelectionChanged">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="Background" Value="Transparent"/>
+                                            <Setter Property="BorderBrush" Value="Transparent"/>
+                                            <Setter Property="Padding" Value="12,8"/>
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                            <Style.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="#FF333333"/>
+                                                </Trigger>
+                                                <Trigger Property="IsSelected" Value="True">
+                                                    <Setter Property="Background" Value="#FFFF8C42"/>
+                                                </Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                </Grid.RowDefinitions>
+
+                                                <!-- Peer Name + Status -->
+                                                <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding StatusIcon}" FontSize="10"
+                                                               VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                                    <TextBlock Text="{Binding PeerName}"
+                                                               Foreground="White" FontSize="14" FontWeight="SemiBold"/>
+                                                </StackPanel>
+
+                                                <!-- Time -->
+                                                <TextBlock Grid.Row="0" Grid.Column="1"
+                                                           Text="{Binding LastActivityFormatted}"
+                                                           Foreground="#FFAAAAAA" FontSize="11"
+                                                           VerticalAlignment="Center" Margin="5,0,0,0"/>
+
+                                                <!-- Clear button for error messages -->
+                                                <Button Grid.Row="0" Grid.Column="2" Content="🗑"
+                                                        Width="20" Height="20" FontSize="10"
+                                                        Background="Transparent" Foreground="#FFFF6B6B"
+                                                        BorderBrush="Transparent" Margin="5,0,0,0"
+                                                        ToolTip="Clear this conversation"
+                                                        Click="BtnClearConversation_Click" Tag="{Binding}"
+                                                        Visibility="{Binding HasErrors, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
+                                                <!-- Unread Badge -->
+                                                <Border Grid.Row="0" Grid.Column="2"
+                                                        Background="#FFFF6B6B" CornerRadius="10"
+                                                        MinWidth="18" Height="18" Margin="5,0,0,0"
+                                                        Visibility="{Binding HasUnread, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                                    <TextBlock Text="{Binding UnreadDisplay}"
+                                                               Foreground="White" FontSize="10" FontWeight="Bold"
+                                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+
+                                                <!-- Last Message -->
+                                                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
+                                                           Text="{Binding LastMessage}"
+                                                           Foreground="#FFCCCCCC" FontSize="12"
+                                                           TextTrimming="CharacterEllipsis" Margin="15,2,0,0"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+
+                                <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="10">
+                                    <Button Name="btnClearAllHistory" Content="🗑 Clear All History" Height="30"
+                                            Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                            Click="BtnClearAllHistory_Click"/>
+                                </StackPanel>
+                            </Grid>
+                        </GroupBox>
                     
                     <!-- Chat Area -->
                     <Grid Grid.Column="1">
@@ -325,10 +475,11 @@
                         </Border>
                     </Grid>
                 </Grid>
+            </Grid>
             </TabItem>
             
             <!-- Contacts Tab -->
-            <TabItem Header="Contacts" Name="contactsTab" Foreground="White">
+            <TabItem Header="Contacts" Name="contactsTab">
                 <Grid Margin="20" Background="#FF2B2B2B">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>

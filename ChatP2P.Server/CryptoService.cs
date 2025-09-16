@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using System.Security.Cryptography;
 
-namespace ChatP2P.Client
+namespace ChatP2P.Server
 {
     /// <summary>
     /// ✅ Service cryptographique hybride ECDH P-384 + AES-GCM
@@ -20,7 +20,7 @@ namespace ChatP2P.Client
             {
                 var logDir = @"C:\Users\User\Desktop\ChatP2P_Logs";
                 Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "crypto.log");
+                var logFile = Path.Combine(logDir, "crypto_server.log");
                 var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
                 await File.AppendAllTextAsync(logFile, logEntry);
             }
@@ -88,10 +88,6 @@ namespace ChatP2P.Client
             try
             {
                 await LogCrypto($"🔐 [ENCRYPT] Starting ECDH P-384 enhanced encryption for message: {plaintext.Length} chars");
-
-                // ✅ NOUVEAU: Validation clé publique avant usage
-                await LogCrypto($"🔐 [ENCRYPT] Validating recipient public key: {recipientPublicKey.Length} bytes");
-                await LogCrypto($"🔐 [ENCRYPT] Key header: {Convert.ToHexString(recipientPublicKey.Take(20).ToArray())}...");
 
                 // 1. Reconstruire la clé publique ECDH depuis les bytes
                 using var recipientEcdh = ECDiffieHellman.Create();
@@ -224,21 +220,17 @@ namespace ChatP2P.Client
         /// </summary>
         private static byte[] DecryptWithAesGcm(byte[] encryptedData, byte[] key)
         {
-            const int nonceSize = 12;
             const int tagSize = 16;
-            const int minSize = nonceSize + tagSize; // 28 bytes minimum
+            if (encryptedData.Length < 28) // 12 (nonce) + 16 (tag) minimum
+                throw new ArgumentException("Encrypted data too short");
 
-            if (encryptedData.Length < minSize)
-                throw new ArgumentException($"Encrypted data too short: {encryptedData.Length} < {minSize}");
-
-            var nonce = new byte[nonceSize];
+            var nonce = new byte[12];
             var tag = new byte[tagSize];
-            var ciphertext = new byte[encryptedData.Length - minSize];
+            var ciphertext = new byte[encryptedData.Length - 28];
 
-            // Extract: [nonce:12][tag:16][ciphertext:remaining]
-            Array.Copy(encryptedData, 0, nonce, 0, nonceSize);
-            Array.Copy(encryptedData, nonceSize, tag, 0, tagSize);
-            Array.Copy(encryptedData, nonceSize + tagSize, ciphertext, 0, ciphertext.Length);
+            Array.Copy(encryptedData, 0, nonce, 0, 12);
+            Array.Copy(encryptedData, 12, tag, 0, tagSize);
+            Array.Copy(encryptedData, 28, ciphertext, 0, ciphertext.Length);
 
             using var aes = new AesGcm(key, tagSize);
             var plaintext = new byte[ciphertext.Length];

@@ -18,7 +18,10 @@
       "Bash(dotnet list:*)",
       "Bash(csc:*)",
       "Bash(dotnet run:*)",
-      "Bash(del \"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\test_crypto.cs\")"
+      "Bash(del \"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\test_crypto.cs\")",
+      "Bash(del \"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\test_uuid_system.cs\")",
+      "Read(//c/VM2/Users/User/Desktop/**)",
+      "Bash(del nul)"
     ],
     "deny": [],
     "ask": []

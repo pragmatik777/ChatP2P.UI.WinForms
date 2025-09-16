@@ -6,7 +6,6 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using ChatP2P.Crypto;
 
 namespace ChatP2P.Server
 {
@@ -1801,7 +1800,7 @@ namespace ChatP2P.Server
                 }
                 
                 // Generate a key pair for this request if needed
-                var keyPair = P2PMessageCrypto.GenerateKeyPair();
+                var keyPair = await CryptoService.GenerateKeyPair();
                 
                 // Create the friend request
                 var result = await ContactManager.CreateContactRequest(
@@ -2166,12 +2165,11 @@ namespace ChatP2P.Server
         private static async Task<string> GenerateKeyPair()
         {
             await Task.Delay(1);
-            var keyPair = P2PMessageCrypto.GenerateKeyPair();
+            var keyPair = await CryptoService.GenerateKeyPair();
             var result = new
             {
                 public_key = Convert.ToBase64String(keyPair.PublicKey),
-                algorithm = keyPair.Algorithm,
-                is_simulated = keyPair.IsSimulated
+                algorithm = keyPair.Algorithm
             };
             return CreateSuccessResponse(result);
         }
@@ -2181,7 +2179,7 @@ namespace ChatP2P.Server
             await Task.Delay(1);
             // For now, generate a new key each time
             // TODO: Store and reuse server's persistent key
-            var keyPair = P2PMessageCrypto.GenerateKeyPair();
+            var keyPair = await CryptoService.GenerateKeyPair();
             var result = new
             {
                 public_key = Convert.ToBase64String(keyPair.PublicKey),

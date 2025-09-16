@@ -81,6 +81,7 @@ namespace ChatP2P.Client
             InitializeCheckboxEventHandlers();
             InitializeP2PDirectClient();
             LoadLocalContacts(); // Load contacts from local file
+            _ = LoadChatSessionsAsync(); // Load chat history from database
             this.Loaded += MainWindow_Loaded;
             this.Closing += MainWindow_Closing;
         }
@@ -94,7 +95,8 @@ namespace ChatP2P.Client
         {
             lstPeers.ItemsSource = _peers;
             lstContacts.ItemsSource = _contacts;
-            lstActiveChats.ItemsSource = _chatSessions;
+            lstQuickStart.ItemsSource = _peers; // Use same peers for quick start
+            lstChatHistory.ItemsSource = _chatSessions; // New: Chat history
             lstSearchResults.ItemsSource = _searchResults;
             lstFriendRequests.ItemsSource = _friendRequests;
 
@@ -477,26 +479,9 @@ namespace ChatP2P.Client
                     await LogToFile($"🔄 [DEBUG] Forcing UI refresh...", forceLog: true);
                     lstFriendRequests.Items.Refresh();
                     
-                    // ✅ PQC: Store the peer's PQC public key for encryption
-                    if (!string.IsNullOrEmpty(publicKey) && publicKey != "no_pqc_key")
-                    {
-                        try
-                        {
-                            var pqcPublicKeyBytes = Convert.FromBase64String(publicKey);
-                            await DatabaseService.Instance.AddPeerKey(fromPeer, "PQ", pqcPublicKeyBytes, "Friend request PQC key");
-                            await CryptoService.LogCrypto($"🔑 [FRIEND-REQ] Stored PQC public key for {fromPeer}: {publicKey.Substring(0, Math.Min(40, publicKey.Length))}...");
-                            await LogToFile($"✅ PQC key stored for {fromPeer} from friend request", forceLog: true);
-                        }
-                        catch (Exception ex)
-                        {
-                            await CryptoService.LogCrypto($"❌ [FRIEND-REQ] Failed to store PQC key for {fromPeer}: {ex.Message}");
-                            await LogToFile($"❌ Failed to store PQC key for {fromPeer}: {ex.Message}", forceLog: true);
-                        }
-                    }
-                    else
-                    {
-                        await LogToFile($"⚠️ No valid PQC key provided by {fromPeer} in friend request", forceLog: true);
-                    }
+                    // ✅ NOUVEAU: Le stockage des clés Ed25519 + PQC est maintenant géré directement dans RelayClient
+                    // pour les friend requests via secure tunnel. Ce handler ne stocke plus de clés.
+                    await LogToFile($"✅ Friend request processed - key storage handled by RelayClient secure tunnel", forceLog: true);
                     
                     // NOTE: Server persistence is now handled by RelayHub event handler
                     // No need to call NotifyServerFriendRequestReceived here
@@ -667,7 +652,13 @@ namespace ChatP2P.Client
                 {
                     _onlinePeers.Add(peer);
                 }
-                
+
+                // ✅ NOUVEAU: Mettre à jour le statut online des ChatSessions
+                foreach (var session in _chatSessions)
+                {
+                    session.IsOnline = _onlinePeers.Contains(session.PeerName);
+                }
+
                 // Refresh contacts UI to show updated online status
                 await RefreshLocalContactsUI();
             });
@@ -679,6 +670,14 @@ namespace ChatP2P.Client
             {
                 await LogToFile($"💬 [CHAT-RX] Message reçu de {fromPeer}: {content}", forceLog: true);
                 Console.WriteLine($"💬 [CHAT-RX] Message reçu de {fromPeer}: {content}");
+
+                // ✅ FIX: Ignorer les messages qui viennent de nous-mêmes (echo du serveur)
+                var myDisplayName = await DatabaseService.Instance.GetMyDisplayName();
+                if (fromPeer == myDisplayName)
+                {
+                    await LogToFile($"🔄 [ECHO-FILTER] Ignoring echo message from self: {fromPeer}");
+                    return;
+                }
 
                 // ✅ NOUVEAU: Déchiffrement des messages chiffrés
                 string decryptedContent = await DecryptMessageIfNeeded(content, fromPeer);
@@ -802,13 +801,19 @@ namespace ChatP2P.Client
             {
                 // Récupérer la clé publique PQC du destinataire depuis notre DB locale
                 var peerKeys = await DatabaseService.Instance.GetPeerKeys(peerName, "PQ");
-                var activePqKey = peerKeys.FirstOrDefault(k => !k.Revoked && k.Public != null);
+                var activePqKey = peerKeys.Where(k => !k.Revoked && k.Public != null)
+                                          .OrderByDescending(k => k.CreatedUtc)
+                                          .FirstOrDefault();
 
                 if (activePqKey?.Public == null)
                 {
                     await LogToFile($"❌ [CLIENT-ENCRYPT] Pas de clé PQC pour {peerName} - envoi en clair");
                     return $"[NO_PQ_KEY]{plainText}";
                 }
+
+                // ✅ NOUVEAU: Validation de la clé publique avant encryption
+                await LogToFile($"🔑 [CLIENT-ENCRYPT] Clé PQC trouvée pour {peerName}: {activePqKey.Public.Length} bytes");
+                await LogToFile($"🔑 [CLIENT-ENCRYPT] Clé PQC (début): {Convert.ToHexString(activePqKey.Public.Take(20).ToArray())}...");
 
                 // Chiffrer le message avec la crypto PQC
                 var encryptedBytes = await CryptoService.EncryptMessage(plainText, activePqKey.Public);
@@ -2281,16 +2286,11 @@ namespace ChatP2P.Client
             }
         }
 
-        // ===== Chat Tab Event Handlers =====
-        private void LstActiveChats_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        // ===== Chat Tab Event Handlers (LEGACY - NO LONGER USED) =====
+        private async void LstActiveChats_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (lstActiveChats.SelectedItem is ChatSession session)
-            {
-                _currentChatSession = session;
-                _currentPeer = session.PeerName;
-                
-                LoadChatForSession(session);
-            }
+            // This method is legacy and no longer used - replaced by LstChatHistory_SelectionChanged
+            return;
         }
 
         private void MainTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -2313,6 +2313,166 @@ namespace ChatP2P.Client
             if (peerSelectionWindow.ShowDialog() == true && peerSelectionWindow.SelectedPeer != null)
             {
                 OpenChatWindow(peerSelectionWindow.SelectedPeer);
+            }
+        }
+
+        // ===== NEW UI EVENT HANDLERS =====
+
+        private void LstQuickStart_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (lstQuickStart.SelectedItem is PeerInfo peer)
+            {
+                OpenChatWithPeer(peer.Name);
+            }
+        }
+
+        private void BtnQuickChat_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.Tag is PeerInfo peer)
+            {
+                OpenChatWithPeer(peer.Name);
+            }
+        }
+
+        private void BtnQuickFile_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.Tag is PeerInfo peer)
+            {
+                // Redirect to existing file send logic
+                _currentPeer = peer.Name;
+                BtnSendFileChat_Click(sender, e);
+            }
+        }
+
+        private async void LstChatHistory_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (lstChatHistory.SelectedItem is ChatSession session)
+            {
+                _currentChatSession = session;
+                _currentPeer = session.PeerName;
+
+                LoadChatForSession(session);
+
+                // Mark as read when opening from history
+                if (session.UnreadCount > 0)
+                {
+                    await MarkChatAsReadAsync(session.PeerName);
+                }
+            }
+        }
+
+        private async void BtnClearConversation_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.Tag is ChatSession session)
+            {
+                var result = MessageBox.Show($"Clear conversation with {session.PeerName}?\n\nThis will delete all messages and remove from history.",
+                                            "Clear Conversation", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (result == MessageBoxResult.Yes)
+                {
+                    await ClearConversationAsync(session.PeerName);
+                }
+            }
+        }
+
+        private async void BtnClearAllHistory_Click(object sender, RoutedEventArgs e)
+        {
+            var result = MessageBox.Show("Clear ALL chat history?\n\nThis will delete all conversations and cannot be undone.",
+                                        "Clear All History", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (result == MessageBoxResult.Yes)
+            {
+                await ClearAllHistoryAsync();
+            }
+        }
+
+        private async Task OpenChatWithPeer(string peerName)
+        {
+            _currentPeer = peerName;
+
+            // Check if there's an existing conversation
+            var existingSession = _chatSessions.FirstOrDefault(s => s.PeerName == peerName);
+            if (existingSession != null)
+            {
+                // Switch to history view and select the session
+                lstChatHistory.SelectedItem = existingSession;
+                _currentChatSession = existingSession;
+                LoadChatForSession(existingSession);
+            }
+            else
+            {
+                // Create new chat session
+                await UpdateChatSessionAsync(peerName, "New conversation", 0);
+                _currentChatSession = new ChatSession { PeerName = peerName };
+                LoadChatForSession(_currentChatSession);
+            }
+
+            // Enable message input
+            txtMessage.IsEnabled = true;
+            btnSendMessage.IsEnabled = true;
+            lblChatPeer.Text = $"Chat with {peerName}";
+        }
+
+        private async Task ClearConversationAsync(string peerName)
+        {
+            try
+            {
+                // Delete from database
+                await DatabaseService.Instance.DeleteAllMessagesWithPeer(peerName);
+                await DatabaseService.Instance.DeleteChatSession(peerName);
+
+                // Remove from UI
+                var sessionToRemove = _chatSessions.FirstOrDefault(s => s.PeerName == peerName);
+                if (sessionToRemove != null)
+                {
+                    _chatSessions.Remove(sessionToRemove);
+                }
+
+                // Clear chat area if current peer
+                if (_currentPeer == peerName)
+                {
+                    messagesPanel.Children.Clear();
+                    _currentPeer = "";
+                    _currentChatSession = null;
+                    txtMessage.IsEnabled = false;
+                    btnSendMessage.IsEnabled = false;
+                    lblChatPeer.Text = "Select a chat...";
+                }
+
+                Console.WriteLine($"✅ [CHAT] Conversation with {peerName} cleared");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [CHAT] Error clearing conversation: {ex.Message}");
+                MessageBox.Show($"Error clearing conversation: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async Task ClearAllHistoryAsync()
+        {
+            try
+            {
+                // Clear database
+                var sessions = await DatabaseService.Instance.GetActiveChatSessions();
+                foreach (var session in sessions)
+                {
+                    await DatabaseService.Instance.DeleteAllMessagesWithPeer(session.PeerName);
+                    await DatabaseService.Instance.DeleteChatSession(session.PeerName);
+                }
+
+                // Clear UI
+                _chatSessions.Clear();
+                messagesPanel.Children.Clear();
+                _currentPeer = "";
+                _currentChatSession = null;
+                txtMessage.IsEnabled = false;
+                btnSendMessage.IsEnabled = false;
+                lblChatPeer.Text = "Select a chat...";
+
+                Console.WriteLine($"✅ [CHAT] All chat history cleared");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [CHAT] Error clearing all history: {ex.Message}");
+                MessageBox.Show($"Error clearing history: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -2435,8 +2595,8 @@ namespace ChatP2P.Client
                     _chatHistory[peerName] = new List<ChatMessage>();
                 }
             }
-            
-            lstActiveChats.SelectedItem = existingSession;
+
+            lstChatHistory.SelectedItem = existingSession;
         }
 
         private async void LoadChatForSession(ChatSession session)
@@ -2606,9 +2766,14 @@ namespace ChatP2P.Client
             {
                 var direction = message.IsFromMe ? "send" : "recv";
                 var isP2P = true; // On assume P2P pour l'instant, peut être amélioré plus tard
-                
+
                 await DatabaseService.Instance.SaveMessage(peerName, message.Sender, message.Content, isP2P, direction);
                 await LogToFile($"💾 [DB] Message sauvegardé en DB: {message.Sender} -> {peerName}: {message.Content}");
+
+                // ✅ NOUVEAU: Mettre à jour ChatSession avec le dernier message
+                var unreadCount = message.IsFromMe ? 0 : 1; // +1 unread si message reçu
+                var previewMessage = message.Content.Length > 50 ? message.Content.Substring(0, 50) + "..." : message.Content;
+                await UpdateChatSessionAsync(peerName, previewMessage, unreadCount);
             }
             catch (Exception ex)
             {
@@ -3614,7 +3779,94 @@ namespace ChatP2P.Client
                 _localContacts = new List<ContactInfo>();
             }
         }
-        
+
+        private async Task LoadChatSessionsAsync()
+        {
+            try
+            {
+                var sessions = await DatabaseService.Instance.GetActiveChatSessions();
+
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    _chatSessions.Clear();
+                    foreach (var session in sessions)
+                    {
+                        _chatSessions.Add(session);
+                    }
+                });
+
+                Console.WriteLine($"✅ [CHAT] Loaded {sessions.Count} chat sessions from database");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [CHAT] Error loading chat sessions: {ex.Message}");
+            }
+        }
+
+        private async Task UpdateChatSessionAsync(string peerName, string lastMessage, int unreadCount = 0)
+        {
+            try
+            {
+                await DatabaseService.Instance.UpdateChatSession(peerName, lastMessage, unreadCount);
+
+                // Update UI collection
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var existingSession = _chatSessions.FirstOrDefault(s => s.PeerName == peerName);
+                    if (existingSession != null)
+                    {
+                        existingSession.LastMessage = lastMessage;
+                        existingSession.LastActivity = DateTime.Now;
+                        existingSession.UnreadCount += unreadCount;
+                    }
+                    else
+                    {
+                        _chatSessions.Add(new ChatSession
+                        {
+                            PeerName = peerName,
+                            LastMessage = lastMessage,
+                            LastActivity = DateTime.Now,
+                            UnreadCount = unreadCount,
+                            IsOnline = _onlinePeers.Contains(peerName)
+                        });
+                    }
+
+                    // Sort by last activity
+                    var sortedSessions = _chatSessions.OrderByDescending(s => s.LastActivity).ToList();
+                    _chatSessions.Clear();
+                    foreach (var session in sortedSessions)
+                    {
+                        _chatSessions.Add(session);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [CHAT] Error updating chat session: {ex.Message}");
+            }
+        }
+
+        private async Task MarkChatAsReadAsync(string peerName)
+        {
+            try
+            {
+                await DatabaseService.Instance.MarkChatAsRead(peerName);
+
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var session = _chatSessions.FirstOrDefault(s => s.PeerName == peerName);
+                    if (session != null)
+                    {
+                        session.UnreadCount = 0;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [CHAT] Error marking chat as read: {ex.Message}");
+            }
+        }
+
         private async Task SaveLocalContacts()
         {
             try

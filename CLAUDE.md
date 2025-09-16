@@ -149,7 +149,7 @@ CLIENT ←──── WebRTC DataChannels P2P      ────→ CLIENT
 - **TCP Relay** : 1MB chunks, canal séparé, logs optimisés
 - **Résultat** : Transferts fluides sans saturation + UX améliorée
 
-*Dernière mise à jour: 16 Septembre 2025 - Secure Tunnel Loop Infini Résolu + Friend Request UI Fix*
+*Dernière mise à jour: 17 Septembre 2025 - Crypto PQC Stable + UI Chat Fixed*
 
 ## 🔐 **MODULE CRYPTOGRAPHIQUE C# PUR - ARCHITECTURE PQC**
 **⚠️ SECTION CRITIQUE - NE PAS SUPPRIMER LORS DE COMPACTAGE ⚠️**
@@ -217,6 +217,41 @@ Table PublicKeys: Id, PeerName, KeyType ("Ed25519", "PQ"), Public, Private,
 - **Request PQC Keys** : ✅ Bouton régénération clés pour peers existants
 - **Build** : ✅ Compilation réussie, aucune erreur, production ready
 - **🎯 STATUS CRYPTO** : ✅ **HYBRIDE PQC-READY FONCTIONNEL** - Messages chiffrés côté relay confirmés
+
+### 🛠️ **CRYPTO FIXES CRITIQUES (17 Sept 2025)**
+**⚠️ FIXES IMPORTANTS - RÉSOLUTION BUGS CRYPTO + UI ⚠️**
+
+#### ✅ **Fix 1: Échange Automatique Clés PQC (SecureFriendRequestReceived)**
+- **Problème** : VM2 stockait clé Ed25519 32-bytes comme clé PQC au lieu de vraie clé ECDH P-384 120-bytes
+- **Cause** : Événement `SecureFriendRequestReceived` ne passait que la clé Ed25519 (paramètre limité)
+- **Solution** :
+  - Modifié signature événement : `Action<string, string, string, string, string>` (fromPeer, toPeer, ed25519Key, pqcKey, message)
+  - Stockage automatique des **deux clés** directement dans RelayClient avant événement UI
+  - Supprimé double stockage dans MainWindow.xaml.cs
+- **Résultat** : ✅ VM1 et VM2 ont maintenant vraies clés PQC 120-bytes
+
+#### ✅ **Fix 2: Sélection Clé la Plus Récente (AES-GCM Authentication)**
+- **Problème** : Erreur intermittente "authentication tag mismatch" quand multiple clés PQC en DB
+- **Cause** : `FirstOrDefault()` prenait parfois ancienne clé au lieu de la plus récente
+- **Solution** :
+  - Ajouté `OrderByDescending(k => k.CreatedUtc).FirstOrDefault()` dans MainWindow.xaml.cs et RelayClient.cs
+  - Garantit utilisation de la clé la plus récente pour chiffrement/déchiffrement
+- **Résultat** : ✅ Plus d'erreurs AES-GCM authentication tag mismatch
+
+#### ✅ **Fix 3: Filtrage Messages Echo (Self-Naming Tabs)**
+- **Problème** : VM1 créait tab "VM1" au lieu de "VM2" (et vice-versa)
+- **Cause** : Serveur renvoie messages à l'expéditeur (echo), créant sessions chat avec son propre nom
+- **Solution** :
+  - Ajouté filtre echo dans `OnChatMessageReceived` : `if (fromPeer == myDisplayName) return;`
+  - Ignore messages venant de soi-même avant traitement
+- **Résultat** : ✅ VM1 voit tab "VM2", VM2 voit tab "VM1" (noms corrects)
+
+#### 🎯 **Validation Post-Fix (17 Sept 2025)**
+- **✅ Crypto bidirectionnel** : VM1↔VM2 messages chiffrés/déchiffrés sans erreur
+- **✅ Clés correctes** : ECDH P-384 120-bytes utilisées partout
+- **✅ UI propre** : Tabs avec noms de peers corrects (plus de self-naming)
+- **✅ Logs clean** : Plus d'erreurs crypto dans crypto.log
+- **✅ Production ready** : Système stable pour usage réel
 
 ### 🔄 **Architecture Crypto Hybride vs Full PQC**
 

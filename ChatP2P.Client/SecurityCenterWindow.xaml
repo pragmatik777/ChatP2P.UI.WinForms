@@ -91,6 +91,7 @@
             </DataGrid.Resources>
 
             <DataGrid.Columns>
+                <DataGridTextColumn Header="ID (Ed25519)" Binding="{Binding PeerFingerprint}" Width="140"/>
                 <DataGridTextColumn Header="Peer" Binding="{Binding Name}" Width="120"/>
                 <DataGridCheckBoxColumn Header="Trust" Binding="{Binding Trusted}" Width="60">
                     <DataGridCheckBoxColumn.ElementStyle>

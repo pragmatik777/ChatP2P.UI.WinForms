@@ -143,6 +143,9 @@ namespace ChatP2P.Server
         {
             if (_isRunning) return;
 
+            // NOUVEAU: Initialiser les clés tunnel persistantes du serveur
+            await InitializeServerTunnelKeys();
+
             _friendRequestListener = new TcpListener(IPAddress.Any, _friendRequestPort);
             _messagesListener = new TcpListener(IPAddress.Any, _messagesPort);
             _filesListener = new TcpListener(IPAddress.Any, _filesPort);  // ✅ NOUVEAU
@@ -366,10 +369,21 @@ namespace ChatP2P.Server
             {
                 await HandleFriendReject(client, message);
             }
+            else if (message.Contains("{\"type\":\"SECURE_HANDSHAKE_REQUEST\"") || message.Contains("{\"type\":\"SECURE_TUNNEL_MESSAGE\"") || message.Contains("{\"type\":\"TUNNEL_KEY_EXCHANGE\""))
+            {
+                // NOUVEAU: Messages JSON pour le tunnel sécurisé PQC (peut contenir multiples messages concaténés)
+                Console.WriteLine($"🔐 [SECURE-TUNNEL] Detected JSON message(s): {message.Substring(0, Math.Min(100, message.Length))}...");
+                await HandleConcatenatedSecureTunnelMessages(client, message);
+            }
             else
             {
-                // Message non autorisé sur canal ouvert
-                Console.WriteLine($"Unauthorized message on friend request channel from {client.Name}: {message}");
+                // DEBUG: Analyser les messages non reconnus
+                Console.WriteLine($"❌ [DEBUG] Unauthorized message from {client.Name}");
+                Console.WriteLine($"❌ [DEBUG] Message length: {message.Length}");
+                Console.WriteLine($"❌ [DEBUG] First 10 chars: '{message.Substring(0, Math.Min(10, message.Length))}'");
+                Console.WriteLine($"❌ [DEBUG] Starts with '?{{': {message.StartsWith("?{")}");
+                Console.WriteLine($"❌ [DEBUG] Starts with '{{': {message.StartsWith("{")}");
+                Console.WriteLine($"❌ [DEBUG] Full message: {message}");
             }
         }
 
@@ -592,6 +606,279 @@ namespace ChatP2P.Server
             else
             {
                 Console.WriteLine($"[ERROR] Impossible de trouver {fromPeer} sur canal friend request pour FRIEND_REJECT");
+            }
+        }
+
+        /// <summary>
+        /// NOUVEAU: Gestion des messages tunnel concaténés (plusieurs JSON dans un string)
+        /// </summary>
+        private async Task HandleConcatenatedSecureTunnelMessages(ClientConnection client, string concatenatedMessage)
+        {
+            try
+            {
+                Console.WriteLine($"🔐 [CONCAT-PARSER] Processing concatenated message: {concatenatedMessage.Length} chars");
+
+                // Diviser les messages JSON concaténés en cherchant les patterns ?{ et {
+                var messages = new List<string>();
+                var currentPos = 0;
+
+                while (currentPos < concatenatedMessage.Length)
+                {
+                    // Chercher le prochain début de JSON (? ou {)
+                    var nextJson = concatenatedMessage.IndexOfAny(new[] { '?', '{' }, currentPos);
+                    if (nextJson == -1) break;
+
+                    // Si c'est un ?, passer au { (peut y avoir plusieurs ?)
+                    if (concatenatedMessage[nextJson] == '?')
+                    {
+                        // Ignorer tous les ? consécutifs
+                        while (nextJson < concatenatedMessage.Length && concatenatedMessage[nextJson] == '?')
+                        {
+                            nextJson++;
+                        }
+
+                        if (nextJson >= concatenatedMessage.Length || concatenatedMessage[nextJson] != '{')
+                            break;
+                    }
+
+                    // Trouver la fin du JSON en comptant les {}
+                    var braceCount = 0;
+                    var jsonStart = nextJson;
+                    var jsonEnd = nextJson;
+
+                    for (int i = nextJson; i < concatenatedMessage.Length; i++)
+                    {
+                        if (concatenatedMessage[i] == '{') braceCount++;
+                        else if (concatenatedMessage[i] == '}') braceCount--;
+
+                        if (braceCount == 0)
+                        {
+                            jsonEnd = i;
+                            break;
+                        }
+                    }
+
+                    if (braceCount == 0)
+                    {
+                        var singleMessage = concatenatedMessage.Substring(jsonStart, jsonEnd - jsonStart + 1);
+                        messages.Add(singleMessage);
+                        Console.WriteLine($"🔐 [CONCAT-PARSER] Extracted JSON: {singleMessage.Substring(0, Math.Min(50, singleMessage.Length))}...");
+                    }
+
+                    currentPos = jsonEnd + 1;
+                }
+
+                Console.WriteLine($"🔐 [CONCAT-PARSER] Found {messages.Count} JSON messages");
+
+                // Traiter chaque message individuellement
+                foreach (var singleMessage in messages)
+                {
+                    await HandleSecureTunnelMessage(client, singleMessage);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [CONCAT-PARSER] Error parsing concatenated messages: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// NOUVEAU: Gestion du tunnel sécurisé PQC pour friend requests
+        /// </summary>
+        private async Task HandleSecureTunnelMessage(ClientConnection client, string message)
+        {
+            try
+            {
+                // Nettoyer le message (supprimer les ? en début si présents)
+                var cleanMessage = message.TrimStart('?');
+
+                Console.WriteLine($"🔐 [SECURE-TUNNEL] Processing secure tunnel message from {client.Name}");
+                Console.WriteLine($"🔐 [SECURE-TUNNEL] Message: {cleanMessage.Substring(0, Math.Min(100, cleanMessage.Length))}...");
+
+                var jsonData = JsonSerializer.Deserialize<JsonElement>(cleanMessage);
+                var messageType = jsonData.GetProperty("type").GetString();
+
+                switch (messageType)
+                {
+                    case "SECURE_HANDSHAKE_REQUEST":
+                        await HandleSecureHandshakeRequest(client, jsonData);
+                        break;
+
+                    case "TUNNEL_KEY_EXCHANGE":
+                        await HandleTunnelKeyExchange(client, jsonData);
+                        break;
+
+                    case "SECURE_TUNNEL_MESSAGE":
+                        await HandleSecureTunneledMessage(client, jsonData);
+                        break;
+
+                    default:
+                        Console.WriteLine($"❌ [SECURE-TUNNEL] Unknown message type: {messageType}");
+                        break;
+                }
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine($"❌ [SECURE-TUNNEL] JSON parsing error: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [SECURE-TUNNEL] Error handling secure tunnel message: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gestion de l'échange de clés publiques P2P
+        /// </summary>
+        private async Task HandleTunnelKeyExchange(ClientConnection client, JsonElement keyData)
+        {
+            try
+            {
+                var fromPeer = keyData.GetProperty("fromPeer").GetString();
+                var toPeer = keyData.GetProperty("toPeer").GetString();
+                var publicKey = keyData.GetProperty("publicKey").GetString();
+
+                Console.WriteLine($"🔑 [KEY-EXCHANGE] Relaying public key from {fromPeer} to {toPeer}");
+
+                // Relayer l'échange de clés au destinataire via le canal friend request
+                if (!string.IsNullOrEmpty(toPeer))
+                {
+                    var relayMessage = new
+                    {
+                        type = "TUNNEL_KEY_EXCHANGE",
+                        fromPeer = fromPeer,
+                        toPeer = toPeer,
+                        publicKey = publicKey
+                    };
+
+                    var relayJson = JsonSerializer.Serialize(relayMessage);
+
+                    // Envoyer au destinataire spécifique
+                    if (_friendRequestNameToId.TryGetValue(toPeer, out var targetClientId) &&
+                        _friendRequestClients.TryGetValue(targetClientId, out var targetClient))
+                    {
+                        await targetClient.SendAsync(relayJson);
+                        Console.WriteLine($"✅ [KEY-EXCHANGE] Public key relayed to {toPeer}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"❌ [KEY-EXCHANGE] Target peer {toPeer} not found");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"❌ [KEY-EXCHANGE] No target peer specified");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [KEY-EXCHANGE] Error handling key exchange: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gestion de l'établissement du tunnel sécurisé (handshake)
+        /// </summary>
+        private async Task HandleSecureHandshakeRequest(ClientConnection client, JsonElement requestData)
+        {
+            try
+            {
+                var clientName = requestData.GetProperty("clientName").GetString();
+                var clientPublicKey = requestData.GetProperty("publicKey").GetString();
+
+                Console.WriteLine($"🤝 [SECURE-TUNNEL] Handshake request from {clientName}");
+                Console.WriteLine($"🔑 [SECURE-TUNNEL] Client public key: {clientPublicKey!.Substring(0, 40)}...");
+
+                // NOUVEAU: Utiliser la clé publique persistante du serveur
+                if (_serverTunnelPublicKey == null)
+                {
+                    await InitializeServerTunnelKeys();
+                }
+
+                // Envoyer la réponse avec notre clé publique persistante
+                var handshakeResponse = new
+                {
+                    type = "SECURE_HANDSHAKE_RESPONSE",
+                    publicKey = Convert.ToBase64String(_serverTunnelPublicKey!)
+                };
+
+                var responseJson = JsonSerializer.Serialize(handshakeResponse);
+
+                // CORRECTION: Utiliser le format texte pour compatibilité avec StreamReader client
+                await client.SendAsync(responseJson);
+
+                Console.WriteLine($"✅ [SECURE-TUNNEL] Handshake response sent to {clientName} (using persistent key)");
+
+                // Stocker le nom du client
+                if (!string.IsNullOrEmpty(clientName))
+                {
+                    client.Name = clientName;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [SECURE-TUNNEL] Error in handshake: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gestion des messages chiffrés via tunnel sécurisé
+        /// </summary>
+        private async Task HandleSecureTunneledMessage(ClientConnection client, JsonElement tunnelData)
+        {
+            try
+            {
+                var encryptedDataB64 = tunnelData.GetProperty("encryptedData").GetString();
+                // Le targetPeer n'est pas dans le message JSON du tunnel, on doit le déduire
+                // Pour l'instant, on utilise une approche simple : relayer à tous les autres clients connectés
+                var encryptedBytes = Convert.FromBase64String(encryptedDataB64!);
+
+                Console.WriteLine($"🔓 [SECURE-TUNNEL] Received encrypted message ({encryptedBytes.Length} bytes)");
+
+                // Pour simplifier l'implémentation, on va utiliser une approche relay opaque:
+                // Le serveur retransmet le message chiffré au destinataire qui le déchiffrera
+
+                // NOUVEAU: Transmettre le message chiffré à tous les autres clients connectés
+                // Le message est chiffré, donc seul le bon destinataire pourra le déchiffrer
+                var relayMessage = new
+                {
+                    type = "SECURE_TUNNEL_MESSAGE",
+                    encryptedData = encryptedDataB64,
+                    fromPeer = client.Name ?? "Unknown"
+                };
+
+                var relayJson = JsonSerializer.Serialize(relayMessage);
+
+                // Relayer à tous les clients friend request connectés (sauf l'expéditeur)
+                int relayedCount = 0;
+                foreach (var kvp in _friendRequestNameToId)
+                {
+                    var peerName = kvp.Key;
+                    var peerId = kvp.Value;
+
+                    // Ne pas relayer à soi-même
+                    if (peerName == client.Name) continue;
+
+                    if (_friendRequestClients.TryGetValue(peerId, out var targetClient))
+                    {
+                        await targetClient.SendAsync(relayJson);
+                        relayedCount++;
+                        Console.WriteLine($"✅ [SECURE-TUNNEL] Encrypted message relayed to {peerName}");
+                    }
+                }
+
+                if (relayedCount > 0)
+                {
+                    Console.WriteLine($"✅ [SECURE-TUNNEL] Encrypted message relayed to {relayedCount} peers");
+                }
+                else
+                {
+                    Console.WriteLine($"⚠️ [SECURE-TUNNEL] No peers available to relay encrypted message");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ [SECURE-TUNNEL] Error handling tunneled message: {ex.Message}");
             }
         }
 
@@ -839,6 +1126,21 @@ namespace ChatP2P.Server
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ [RELAY] Error broadcasting chat message: {ex.Message}");
+            }
+        }
+
+        // ===== TUNNEL SÉCURISÉ - CLÉ PERSISTANTE =====
+        private static byte[]? _serverTunnelPrivateKey;
+        private static byte[]? _serverTunnelPublicKey;
+
+        private static async Task InitializeServerTunnelKeys()
+        {
+            if (_serverTunnelPrivateKey == null || _serverTunnelPublicKey == null)
+            {
+                var keyPair = await CryptoService.GenerateKeyPair();
+                _serverTunnelPrivateKey = keyPair.PrivateKey;
+                _serverTunnelPublicKey = keyPair.PublicKey;
+                Console.WriteLine($"🔑 [SECURE-TUNNEL] Server tunnel keys initialized");
             }
         }
 
