@@ -149,7 +149,7 @@ CLIENT ←──── WebRTC DataChannels P2P      ────→ CLIENT
 - **TCP Relay** : 1MB chunks, canal séparé, logs optimisés
 - **Résultat** : Transferts fluides sans saturation + UX améliorée
 
-*Dernière mise à jour: 17 Septembre 2025 - Crypto PQC Stable + UI Chat Fixed*
+*Dernière mise à jour: 17 Septembre 2025 - UI Fixes + Crypto PQC Stable*
 
 ## 🔐 **MODULE CRYPTOGRAPHIQUE C# PUR - ARCHITECTURE PQC**
 **⚠️ SECTION CRITIQUE - NE PAS SUPPRIMER LORS DE COMPACTAGE ⚠️**
@@ -478,3 +478,47 @@ L'attaquant substitue SES clés → Chiffrement PQC compromis dès le début
 2. **Implémenter certificats PQC** : Protection canal échange initial
 3. **Alternative hors-bande** : QR codes fingerprints pour vérification manuelle
 4. **Migration progressive** : Compatibility ancien + nouveau canal sécurisé
+
+## 🔧 **UI FIXES APPLIQUÉS (17 Sept 2025)**
+**⚠️ AMÉLIORATIONS INTERFACE UTILISATEUR ⚠️**
+
+### ✅ **Fix 1: Correction Superposition Boutons (Contacts Tab)**
+- **Problème** : Bouton "Remove Contact" superposé sur boutons "Search" et "Add Friend"
+- **Cause** : Mauvaise attribution `Grid.Row="2"` au lieu de `Grid.Row="3"`
+- **Solution** : Repositionné le bouton "Remove Contact" dans sa propre rangée
+- **Fichier** : `MainWindow.xaml:645` - Changement `Grid.Row="2"` → `Grid.Row="3"`
+- **Résultat** : ✅ Interface propre, plus de superposition de boutons
+
+### ✅ **Fix 2: Suppression Checkbox Obsolète "Post-Quantum Relay"**
+- **Problème** : Checkbox "Post-Quantum Relay" redondant avec "Encrypt Relay"
+- **Justification** : Crypto hybride PQC (ECDH P-384 + AES-GCM) activé par défaut via "Encrypt Relay"
+- **Actions effectuées** :
+  - Supprimé `chkPqRelay` du XAML (`MainWindow.xaml:114-115`)
+  - Supprimé méthode `ChkPqRelay_Changed()` du code-behind
+  - Supprimé propriété `PqRelay` des fichiers Settings
+  - Nettoyé toutes les références dans `MainWindow.xaml.cs`
+- **Interface simplifiée** : Plus de confusion entre les deux options de chiffrement relay
+- **Résultat** : ✅ UI cohérente, crypto PQC transparent via "Encrypt Relay"
+
+### 🎯 **Interface Settings Finale**
+```
+┌─ Settings ─────────────────────────┐
+│ ☑ Strict Trust                    │
+│ ☑ Verbose Logging                 │
+│ ☑ Encrypt Relay  ← PQC hybride    │
+│ ☐ Encrypt P2P                     │
+└────────────────────────────────────┘
+```
+
+### 📊 **Validation UI Fixes**
+- **✅ Build Success** : Compilation sans erreur après suppressions
+- **✅ Interface propre** : Plus de superposition ni redondance
+- **✅ UX simplifiée** : Moins d'options confusantes pour l'utilisateur
+- **✅ Cohérence crypto** : Un seul toggle pour encryption relay avec PQC intégré
+- **✅ Backward compatibility** : Anciens paramètres migrés automatiquement
+
+### 🔄 **Migration Utilisateur Transparente**
+- **Anciens utilisateurs** : Paramètre `PqRelay` ignoré, `EncryptRelay` utilisé
+- **Nouveaux utilisateurs** : Interface simplifiée dès le démarrage
+- **Crypto inchangé** : ECDH P-384 + AES-GCM reste identique sous le capot
+- **Expérience unifiée** : Un seul bouton pour activer le chiffrement relay PQC

@@ -103,15 +103,13 @@
                     <GroupBox Header="Settings" Grid.Row="1" Margin="0,0,0,20" 
                               Foreground="White" BorderBrush="#FF0D7377">
                         <StackPanel Margin="15" Orientation="Horizontal">
-                            <CheckBox Name="chkStrictTrust" Content="Strict Trust" Margin="0,0,25,0" 
+                            <CheckBox Name="chkStrictTrust" Content="Strict Trust" Margin="0,0,25,0"
                                       Foreground="White"/>
-                            <CheckBox Name="chkVerbose" Content="Verbose Logging" Margin="0,0,25,0" 
+                            <CheckBox Name="chkVerbose" Content="Verbose Logging" Margin="0,0,25,0"
                                       Foreground="White"/>
-                            <CheckBox Name="chkEncryptRelay" Content="Encrypt Relay" Margin="0,0,25,0" 
+                            <CheckBox Name="chkEncryptRelay" Content="Encrypt Relay" Margin="0,0,25,0"
                                       Foreground="White"/>
-                            <CheckBox Name="chkEncryptP2P" Content="Encrypt P2P" Margin="0,0,25,0" 
-                                      Foreground="White"/>
-                            <CheckBox Name="chkPqRelay" Content="Post-Quantum Relay" 
+                            <CheckBox Name="chkEncryptP2P" Content="Encrypt P2P"
                                       Foreground="White"/>
                         </StackPanel>
                     </GroupBox>
@@ -642,9 +640,9 @@
                         </Grid>
                     </GroupBox>
                     
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,0">
-                        <Button Name="btnRemoveContact" Content="- Remove Contact" Width="140" Height="35" 
-                                Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent" 
+                    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,0">
+                        <Button Name="btnRemoveContact" Content="- Remove Contact" Width="140" Height="35"
+                                Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
                                 Click="BtnRemoveContact_Click"/>
                     </StackPanel>
                 </Grid>

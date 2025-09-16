@@ -23,9 +23,6 @@
     <Setting Name="EncryptRelay" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">True</Value>
     </Setting>
-    <Setting Name="PqRelay" Type="System.Boolean" Scope="User">
-      <Value Profile="(Default)">False</Value>
-    </Setting>
     <Setting Name="EncryptP2P" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">True</Value>
     </Setting>

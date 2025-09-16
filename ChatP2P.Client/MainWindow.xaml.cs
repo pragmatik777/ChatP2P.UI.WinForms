@@ -165,7 +165,6 @@ namespace ChatP2P.Client
                 chkVerbose.IsChecked = Properties.Settings.Default.VerboseLogging;
                 chkEncryptRelay.IsChecked = Properties.Settings.Default.EncryptRelay;
                 chkEncryptP2P.IsChecked = GetEncryptP2PSetting();
-                chkPqRelay.IsChecked = Properties.Settings.Default.PqRelay;
                 chkAutoConnect.IsChecked = Properties.Settings.Default.AutoConnect;
             }
             catch (Exception ex)
@@ -184,7 +183,6 @@ namespace ChatP2P.Client
                 Properties.Settings.Default.VerboseLogging = chkVerbose.IsChecked ?? false;
                 Properties.Settings.Default.EncryptRelay = chkEncryptRelay.IsChecked ?? false;
                 SetEncryptP2PSetting(chkEncryptP2P.IsChecked ?? false);
-                Properties.Settings.Default.PqRelay = chkPqRelay.IsChecked ?? false;
                 Properties.Settings.Default.AutoConnect = chkAutoConnect.IsChecked ?? false;
                 
                 Properties.Settings.Default.Save();
@@ -4076,8 +4074,6 @@ namespace ChatP2P.Client
             chkEncryptP2P.Unchecked += ChkEncryptP2P_Changed;
             chkEncryptRelay.Checked += ChkEncryptRelay_Changed;
             chkEncryptRelay.Unchecked += ChkEncryptRelay_Changed;
-            chkPqRelay.Checked += ChkPqRelay_Changed;
-            chkPqRelay.Unchecked += ChkPqRelay_Changed;
         }
 
         private async void ChkEncryptP2P_Changed(object sender, RoutedEventArgs e)
@@ -4126,16 +4122,6 @@ namespace ChatP2P.Client
             }
         }
 
-        private async void ChkPqRelay_Changed(object sender, RoutedEventArgs e)
-        {
-            var isEnabled = chkPqRelay?.IsChecked == true;
-            
-            // Persist setting
-            Properties.Settings.Default.PqRelay = isEnabled;
-            Properties.Settings.Default.Save();
-            
-            await LogToFile($"Post-Quantum Relay {(isEnabled ? "enabled" : "disabled")}", forceLog: true);
-        }
 
         /// <summary>
         /// Synchronise les paramètres de status (P2P/Auth/Crypto) avec un peer distant
