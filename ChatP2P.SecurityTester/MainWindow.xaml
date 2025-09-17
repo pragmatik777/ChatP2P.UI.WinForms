@@ -231,48 +231,6 @@
                 </Grid>
             </TabItem>
 
-            <!-- Attack Orchestration Tab -->
-            <TabItem Header="🎮 Attack Orchestration">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
-                    </Grid.RowDefinitions>
-
-                    <StackPanel Grid.Row="0" Margin="10">
-                        <StackPanel Orientation="Horizontal" Margin="5">
-                            <Button x:Name="btnStartFullAttack" Content="🚀 Start Full MITM Attack"
-                                    Click="BtnStartFullAttack_Click" Background="#dc3545" Foreground="White" Margin="5"/>
-                            <Button x:Name="btnStartCompleteScenario" Content="🎯 Complete Scenario"
-                                    Click="BtnStartCompleteScenario_Click" Background="#28a745" Foreground="White" Margin="5"/>
-                            <Button x:Name="btnStopAllAttacks" Content="⏹️ Stop All Attacks"
-                                    Click="BtnStopAllAttacks_Click" Background="#6c757d" Foreground="White" Margin="5"/>
-                            <TextBlock x:Name="txtOrchestrationStatus" Text="Status: Ready"
-                                       Foreground="White" VerticalAlignment="Center" Margin="10"/>
-                        </StackPanel>
-
-                        <GroupBox Header="🎯 Attack Options" Foreground="White" Margin="5">
-                            <StackPanel>
-                                <CheckBox x:Name="chkAutoKeySubstitution" Content="Auto-substitute keys in friend requests"
-                                          Foreground="White" Margin="5" IsChecked="True"/>
-                                <TextBlock Text="💡 Target IP and Relay Server are taken from Target Configuration above"
-                                           Foreground="Orange" Margin="5" FontStyle="Italic"/>
-                            </StackPanel>
-                        </GroupBox>
-                    </StackPanel>
-
-                    <DataGrid x:Name="dgAttackResults" Grid.Row="1" Margin="10"
-                              AutoGenerateColumns="False" IsReadOnly="True">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Time" Binding="{Binding Timestamp, StringFormat='HH:mm:ss'}" Width="80"/>
-                            <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="80"/>
-                            <DataGridTextColumn Header="Attack Type" Binding="{Binding AttackType}" Width="150"/>
-                            <DataGridTextColumn Header="Target" Binding="{Binding TargetPeer}" Width="100"/>
-                            <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*"/>
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </Grid>
-            </TabItem>
 
             <!-- Complete Scenario Tab -->
             <TabItem Header="🎯 Complete Scenario">

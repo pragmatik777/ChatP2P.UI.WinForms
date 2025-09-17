@@ -3,7 +3,15 @@ using System.Collections.Generic;
 namespace ChatP2P.SecurityTester.Core
 {
     /// <summary>
-    /// Configuration globale du Security Tester
+    /// 📋 Configuration GLOBALE du Security Tester (DEFAULTS & AUTO-POPULATE)
+    ///
+    /// Cette classe fournit les valeurs par défaut qui auto-remplissent l'interface utilisateur.
+    /// Les champs Target Configuration (en haut) et Port Forwarding sont synchronisés automatiquement.
+    ///
+    /// Usage:
+    /// 1. Modifier les defaults ici pour vos tests récurrents
+    /// 2. Cliquer "🎯 Update" synchronise tous les champs UI
+    /// 3. Plus besoin de re-taper les mêmes IPs à chaque fois
     /// </summary>
     public static class SecurityTesterConfig
     {
@@ -16,11 +24,11 @@ namespace ChatP2P.SecurityTester.Core
             8891  // File Transfers
         };
 
-        // 🌐 Network Configuration
-        public static string TargetClientIP { get; set; } = "192.168.1.100";
-        public static string RelayServerIP { get; set; } = "relay.chatp2p.com";
-        public static string Gateway_IP { get; set; } = "192.168.1.1";
-        public static string AttackerIP { get; set; } = "192.168.1.102";
+        // 🌐 Network Configuration (DEFAULTS - Auto-populate UI fields)
+        public static string TargetClientIP { get; set; } = "192.168.1.147";    // ← Victim to attack (VM)
+        public static string RelayServerIP { get; set; } = "192.168.1.152";     // ← Local ChatP2P relay server
+        public static string Gateway_IP { get; set; } = "192.168.1.1";          // ← Network gateway
+        public static string AttackerIP { get; set; } = "192.168.1.102";        // ← This machine IP
 
         // 🕷️ Attack Configuration
         public static bool EnableRealTimeCapture { get; set; } = true;

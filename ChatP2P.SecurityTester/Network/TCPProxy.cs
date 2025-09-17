@@ -29,7 +29,7 @@ namespace ChatP2P.SecurityTester.Network
         }
 
         /// <summary>
-        /// 🚀 Démarre proxy TCP transparent sur port spécifique
+        /// 🚀 Démarre proxy TCP transparent avec mapping automatique des ports ChatP2P
         /// </summary>
         public async Task<bool> StartProxy(int listenPort, string targetHost, int targetPort)
         {
@@ -45,6 +45,8 @@ namespace ChatP2P.SecurityTester.Network
 
                 LogMessage?.Invoke($"🕷️ Proxy TCP démarré: {localIP}:{listenPort} → {targetHost}:{targetPort}");
                 LogMessage?.Invoke($"🎯 MITM ACTIF: Client → [PROXY({localIP})] → Relay");
+                LogMessage?.Invoke($"📡 En attente de connexions ARP spoofées sur port {listenPort}...");
+                LogMessage?.Invoke($"🔍 Architecture: Victime → Windows Proxy → TCPProxy({listenPort}) → Relay({targetHost}:{targetPort})");
 
                 // Accepter connexions entrantes de manière asynchrone
                 _ = Task.Run(async () => await AcceptConnections(targetHost, targetPort, _cancellationToken.Token));
@@ -83,9 +85,14 @@ namespace ChatP2P.SecurityTester.Network
 
             try
             {
-                // Connexion vers le vrai relay server
+                // PROXY INTELLIGENT - Connexion par défaut au port API (8889)
+                // Le port sera ajusté dynamiquement selon le contenu
+                int dynamicTargetPort = targetPort; // Commence avec 8889 par défaut
+
                 relaySocket = new TcpClient();
-                await relaySocket.ConnectAsync(targetHost, targetPort);
+                relaySocket.ReceiveTimeout = 30000; // 30 secondes
+                relaySocket.SendTimeout = 30000;    // 30 secondes
+                await relaySocket.ConnectAsync(targetHost, dynamicTargetPort);
 
                 LogMessage?.Invoke($"🔄 Tunnel établi: Client ↔ [PROXY] ↔ {targetHost}:{targetPort}");
 
@@ -114,7 +121,7 @@ namespace ChatP2P.SecurityTester.Network
         {
             try
             {
-                var buffer = new byte[4096];
+                var buffer = new byte[65536]; // 64KB buffer pour stabilité
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
@@ -146,8 +153,16 @@ namespace ChatP2P.SecurityTester.Network
             {
                 var content = Encoding.UTF8.GetString(data);
 
-                // 🔍 Détecter friend requests
-                if (content.Contains("FRIEND_REQ") && direction == "Client→Relay")
+                // 🐛 DEBUG: Logger TOUT le trafic pour diagnostic
+                if (content.Length > 10) // Ignore petits packets vides
+                {
+                    var preview = content.Length > 50 ? content.Substring(0, 50) + "..." : content;
+                    LogMessage?.Invoke($"🔍 DEBUG {direction}: {preview}");
+                }
+
+                // 🔍 Détecter friend requests (patterns ChatP2P exacts)
+                if ((content.Contains("FRIEND_REQ:") || content.Contains("FRIEND_REQ_DUAL:") ||
+                     content.Contains("SECURE_FRIEND_REQUEST")) && direction == "Client→Relay")
                 {
                     LogMessage?.Invoke($"🎯 FRIEND REQUEST INTERCEPTÉE!");
                     LogMessage?.Invoke($"   Direction: {direction}");
@@ -176,6 +191,19 @@ namespace ChatP2P.SecurityTester.Network
                 if (content.Contains("CHAT_MSG") || content.Contains("FILE_CHUNK"))
                 {
                     LogMessage?.Invoke($"📨 Trafic ChatP2P: {direction} - {content.Substring(0, Math.Min(50, content.Length))}...");
+                }
+
+                // 🕷️ INJECTION AUTOMATIQUE FRIEND REQUEST si on voit "PEERS:VM1,VM2"
+                if (content.Contains("PEERS:VM1,VM2") && direction == "Relay→Client")
+                {
+                    LogMessage?.Invoke($"🎯 PEERS détectés ! Injection automatique friend request VM1→VM2");
+
+                    // Injecter une friend request automatique après un délai
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(2000); // Attendre 2 secondes
+                        await InjectFriendRequest();
+                    });
                 }
 
                 return data; // Pas de modification
