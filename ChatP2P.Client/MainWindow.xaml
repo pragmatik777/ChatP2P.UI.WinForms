@@ -79,11 +79,16 @@
                             </Grid.RowDefinitions>
                             
                             <Label Grid.Row="0" Grid.Column="0" Content="Display Name:" Foreground="White"/>
-                            <TextBox Grid.Row="0" Grid.Column="1" Name="txtDisplayName" Margin="5,0" 
+                            <TextBox Grid.Row="0" Grid.Column="1" Name="txtDisplayName" Margin="5,0"
                                      Background="#FF404040" Foreground="White" BorderBrush="#FF666666"/>
-                            
-                            <CheckBox Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="chkAutoConnect" 
-                                      Content="Auto-connect on startup" Margin="0,15,0,0" 
+
+                            <Label Grid.Row="0" Grid.Column="2" Content="Relay Server IP:" Foreground="White" Margin="15,0,0,0"/>
+                            <TextBox Grid.Row="0" Grid.Column="3" Name="txtRelayServerIP" Margin="5,0"
+                                     Background="#FF404040" Foreground="White" BorderBrush="#FF666666"
+                                     Text="192.168.1.145"/>
+
+                            <CheckBox Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="chkAutoConnect"
+                                      Content="Auto-connect on startup" Margin="0,15,0,0"
                                       Foreground="White"/>
                             
                             <!-- Connection Buttons -->

@@ -9,20 +9,20 @@
 //------------------------------------------------------------------------------
 
 namespace ChatP2P.Client.Properties {
-    
-    
+
+
     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]
     [global::System.CodeDom.Compiler.GeneratedCodeAttribute("Microsoft.VisualStudio.Editors.SettingsDesigner.SettingsSingleFileGenerator", "17.8.0.0")]
     internal sealed partial class Settings : global::System.Configuration.ApplicationSettingsBase {
-        
+
         private static Settings defaultInstance = ((Settings)(global::System.Configuration.ApplicationSettingsBase.Synchronized(new Settings())));
-        
+
         public static Settings Default {
             get {
                 return defaultInstance;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("")]
@@ -34,7 +34,7 @@ namespace ChatP2P.Client.Properties {
                 this["DisplayName"] = value;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("8888")]
@@ -46,7 +46,7 @@ namespace ChatP2P.Client.Properties {
                 this["LocalPort"] = value;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("")]
@@ -58,7 +58,7 @@ namespace ChatP2P.Client.Properties {
                 this["RemoteIP"] = value;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("8888")]
@@ -70,7 +70,7 @@ namespace ChatP2P.Client.Properties {
                 this["RemotePort"] = value;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("False")]
@@ -82,7 +82,7 @@ namespace ChatP2P.Client.Properties {
                 this["StrictTrust"] = value;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("False")]
@@ -94,7 +94,7 @@ namespace ChatP2P.Client.Properties {
                 this["VerboseLogging"] = value;
             }
         }
-        
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("True")]
@@ -106,8 +106,19 @@ namespace ChatP2P.Client.Properties {
                 this["EncryptRelay"] = value;
             }
         }
-        
-        
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("True")]
+        public bool EncryptP2P {
+            get {
+                return ((bool)(this["EncryptP2P"]));
+            }
+            set {
+                this["EncryptP2P"] = value;
+            }
+        }
+
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
         [global::System.Configuration.DefaultSettingValueAttribute("False")]
@@ -117,6 +128,42 @@ namespace ChatP2P.Client.Properties {
             }
             set {
                 this["AutoConnect"] = value;
+            }
+        }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("False")]
+        public bool ForceRelayMode {
+            get {
+                return ((bool)(this["ForceRelayMode"]));
+            }
+            set {
+                this["ForceRelayMode"] = value;
+            }
+        }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("True")]
+        public bool SmartRoutingEnabled {
+            get {
+                return ((bool)(this["SmartRoutingEnabled"]));
+            }
+            set {
+                this["SmartRoutingEnabled"] = value;
+            }
+        }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("192.168.1.152")]
+        public string RelayServerIP {
+            get {
+                return ((string)(this["RelayServerIP"]));
+            }
+            set {
+                this["RelayServerIP"] = value;
             }
         }
     }

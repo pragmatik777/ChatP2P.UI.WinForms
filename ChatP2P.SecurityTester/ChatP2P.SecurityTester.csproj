@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyTitle>ChatP2P Security Tester - Red Team Tool</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 📊 UI and data binding -->
+    <PackageReference Include="Microsoft.Toolkit.Mvvm" Version="7.1.2" />
+    <!-- 🕷️ Real network packet manipulation for ARP spoofing -->
+    <PackageReference Include="SharpPcap" Version="6.2.5" />
+    <PackageReference Include="PacketDotNet" Version="1.4.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 🔗 Reference to ChatP2P.Client for protocol understanding -->
+    <ProjectReference Include="..\ChatP2P.Client\ChatP2P.Client.csproj" />
+  </ItemGroup>
+
+</Project>

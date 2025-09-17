@@ -1,0 +1,415 @@
+<Window x:Class="ChatP2P.SecurityTester.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="🕷️ ChatP2P Security Tester - MITM Attack Suite" Height="800" Width="1200"
+        WindowStartupLocation="CenterScreen" Background="#1e1e1e">
+
+    <Window.Resources>
+        <!-- Style pour TabControl -->
+        <Style TargetType="TabControl">
+            <Setter Property="Background" Value="#2d2d30"/>
+        </Style>
+
+        <!-- Style forcé pour TabItem -->
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#3c3c3c"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="Margin" Value="0,0,1,0"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Foreground" Value="Black"/>
+                    <Setter Property="Background" Value="White"/>
+                    <Setter Property="FontWeight" Value="Bold"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Style pour DataGrid -->
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="#3c3c3c"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="RowBackground" Value="#3c3c3c"/>
+            <Setter Property="AlternatingRowBackground" Value="#444"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#555"/>
+            <Setter Property="BorderBrush" Value="#555"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+        </Style>
+
+        <!-- Style pour DataGridColumnHeader -->
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#404040"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#555"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Padding" Value="8,4"/>
+        </Style>
+
+        <!-- Style pour DataGridRow -->
+        <Style TargetType="DataGridRow">
+            <Setter Property="Background" Value="#3c3c3c"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#505050"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#007ACC"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="200"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header Controls -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10" Background="#2d2d30">
+            <GroupBox Header="🎯 Target Configuration" Margin="5" Foreground="White">
+                <StackPanel Orientation="Horizontal">
+                    <Label Content="Target IP:" Foreground="White"/>
+                    <TextBox x:Name="txtTargetClientIP" Text="192.168.1.100" Width="120" Margin="5"/>
+                    <Label Content="Relay Server:" Foreground="White"/>
+                    <TextBox x:Name="txtRelayServerIP" Text="relay.chatp2p.com" Width="140" Margin="5"/>
+                    <Button x:Name="btnUpdateTargets" Content="🎯 Update" Click="BtnUpdateTargets_Click"
+                            Background="#007ACC" Foreground="White" Margin="5"/>
+                </StackPanel>
+            </GroupBox>
+
+            <GroupBox Header="🌐 Network Interface" Margin="5" Foreground="White">
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox x:Name="cmbInterfaces" Width="200" Margin="5"/>
+                    <Button x:Name="btnRefreshInterfaces" Content="🔄" Click="BtnRefreshInterfaces_Click"
+                            Background="#007ACC" Foreground="White" Margin="5"/>
+                </StackPanel>
+            </GroupBox>
+        </StackPanel>
+
+        <!-- Main Attack Panel -->
+        <TabControl Grid.Row="1" Background="#2d2d30" Margin="10">
+
+            <!-- Packet Capture Tab -->
+            <TabItem Header="📡 Packet Capture">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10">
+                        <Button x:Name="btnStartCapture" Content="▶️ Start Capture" Click="BtnStartCapture_Click"
+                                Background="#28a745" Foreground="White" Margin="5"/>
+                        <Button x:Name="btnStopCapture" Content="⏹️ Stop Capture" Click="BtnStopCapture_Click"
+                                Background="#dc3545" Foreground="White" Margin="5" IsEnabled="False"/>
+                        <Button x:Name="btnClearCapture" Content="🗑️ Clear" Click="BtnClearCapture_Click"
+                                Background="#6c757d" Foreground="White" Margin="5"/>
+                        <TextBlock x:Name="txtCaptureStatus" Text="Status: Stopped"
+                                   Foreground="White" VerticalAlignment="Center" Margin="10"/>
+                    </StackPanel>
+
+                    <DataGrid x:Name="dgCapturedPackets" Grid.Row="1" Margin="10"
+                              AutoGenerateColumns="False" IsReadOnly="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Time" Binding="{Binding Timestamp, StringFormat='HH:mm:ss.fff'}" Width="80"/>
+                            <DataGridTextColumn Header="Source" Binding="{Binding SourceIP}" Width="120"/>
+                            <DataGridTextColumn Header="Destination" Binding="{Binding DestinationIP}" Width="120"/>
+                            <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="120"/>
+                            <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="80"/>
+                            <DataGridTextColumn Header="Content" Binding="{Binding ParsedContent}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
+            <!-- ARP Spoofing Tab -->
+            <TabItem Header="🕷️ ARP Spoofing">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="10">
+                        <StackPanel Orientation="Horizontal" Margin="5">
+                            <Button x:Name="btnStartARP" Content="🕷️ Start ARP Spoofing" Click="BtnStartARP_Click"
+                                    Background="#dc3545" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnStopARP" Content="⏹️ Stop ARP Spoofing" Click="BtnStopARP_Click"
+                                    Background="#6c757d" Foreground="White" Margin="5" IsEnabled="False"/>
+                            <TextBlock x:Name="txtARPStatus" Text="Status: Stopped"
+                                       Foreground="White" VerticalAlignment="Center" Margin="10"/>
+                        </StackPanel>
+
+                        <TextBlock Text="⚠️ WARNING: ARP Spoofing will intercept traffic from target client. Use only for authorized testing!"
+                                   Foreground="Orange" Margin="5" FontWeight="Bold"/>
+                    </StackPanel>
+
+                    <TextBox x:Name="txtARPLog" Grid.Row="1" Margin="10" Background="#3c3c3c"
+                             Foreground="White" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                             FontFamily="Consolas"/>
+                </Grid>
+            </TabItem>
+
+            <!-- DNS Poisoning Tab -->
+            <TabItem Header="🌐 DNS Poisoning">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="10">
+                        <GroupBox Header="🌐 DNS Target Configuration" Foreground="White" Margin="5">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="5">
+                                    <TextBlock Text="Target Domain:" Foreground="White" VerticalAlignment="Center" Width="120"/>
+                                    <TextBox x:Name="txtTargetDomain" Background="#FF404040" Foreground="White"
+                                             BorderBrush="#FF666666" Width="200" Text="google.com" Margin="5,0"/>
+                                    <TextBlock Text="Redirect IP:" Foreground="White" VerticalAlignment="Center" Width="80" Margin="10,0,0,0"/>
+                                    <TextBox x:Name="txtRedirectIP" Background="#FF404040" Foreground="White"
+                                             BorderBrush="#FF666666" Width="150" Text="192.168.1.145" Margin="5,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <StackPanel Orientation="Horizontal" Margin="5">
+                            <Button x:Name="btnStartDNS" Content="🌐 Start DNS Poisoning" Click="BtnStartDNS_Click"
+                                    Background="#17a2b8" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnStopDNS" Content="⏹️ Stop DNS Poisoning" Click="BtnStopDNS_Click"
+                                    Background="#6c757d" Foreground="White" Margin="5" IsEnabled="False"/>
+                            <Button x:Name="btnTestDNS" Content="🧪 Test DNS Response" Click="BtnTestDNS_Click"
+                                    Background="#ffc107" Foreground="Black" Margin="5"/>
+                            <TextBlock x:Name="txtDNSStatus" Text="Status: Stopped"
+                                       Foreground="White" VerticalAlignment="Center" Margin="10"/>
+                        </StackPanel>
+
+                        <TextBlock Text="⚠️ INFO: DNS Poisoning works with ARP Spoofing to redirect domain names to attacker IP"
+                                   Foreground="Cyan" Margin="5" FontWeight="Bold"/>
+                        <TextBlock Text="🎯 Use case: google.com → 192.168.1.145 (your attacker machine)"
+                                   Foreground="LightGreen" Margin="5"/>
+                    </StackPanel>
+
+                    <TextBox x:Name="txtDNSLog" Grid.Row="1" Margin="10" Background="#3c3c3c"
+                             Foreground="White" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                             FontFamily="Consolas"/>
+                </Grid>
+            </TabItem>
+
+            <!-- Key Substitution Tab -->
+            <TabItem Header="🔐 Key Substitution">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="10">
+                        <StackPanel Orientation="Horizontal" Margin="5">
+                            <Button x:Name="btnGenerateAttackerKeys" Content="🔑 Generate Attacker Keys"
+                                    Click="BtnGenerateAttackerKeys_Click" Background="#007ACC" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnInterceptFriendRequest" Content="🎯 Intercept Friend Request"
+                                    Click="BtnInterceptFriendRequest_Click" Background="#dc3545" Foreground="White" Margin="5"/>
+                            <TextBlock x:Name="txtKeyAttackStatus" Text="Status: Ready"
+                                       Foreground="White" VerticalAlignment="Center" Margin="10"/>
+                        </StackPanel>
+
+                        <GroupBox Header="🔐 Attacker Keys" Foreground="White" Margin="5">
+                            <TextBox x:Name="txtAttackerFingerprints" Background="#3c3c3c" Foreground="White"
+                                     IsReadOnly="True" Height="60" FontFamily="Consolas"/>
+                        </GroupBox>
+                    </StackPanel>
+
+                    <TextBox x:Name="txtKeyAttackLog" Grid.Row="1" Margin="10" Background="#3c3c3c"
+                             Foreground="White" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                             FontFamily="Consolas"/>
+                </Grid>
+            </TabItem>
+
+            <!-- Attack Orchestration Tab -->
+            <TabItem Header="🎮 Attack Orchestration">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="10">
+                        <StackPanel Orientation="Horizontal" Margin="5">
+                            <Button x:Name="btnStartFullAttack" Content="🚀 Start Full MITM Attack"
+                                    Click="BtnStartFullAttack_Click" Background="#dc3545" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnStartCompleteScenario" Content="🎯 Complete Scenario"
+                                    Click="BtnStartCompleteScenario_Click" Background="#28a745" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnStopAllAttacks" Content="⏹️ Stop All Attacks"
+                                    Click="BtnStopAllAttacks_Click" Background="#6c757d" Foreground="White" Margin="5"/>
+                            <TextBlock x:Name="txtOrchestrationStatus" Text="Status: Ready"
+                                       Foreground="White" VerticalAlignment="Center" Margin="10"/>
+                        </StackPanel>
+
+                        <GroupBox Header="🎯 Attack Options" Foreground="White" Margin="5">
+                            <StackPanel>
+                                <CheckBox x:Name="chkAutoKeySubstitution" Content="Auto-substitute keys in friend requests"
+                                          Foreground="White" Margin="5" IsChecked="True"/>
+                                <TextBlock Text="💡 Target IP and Relay Server are taken from Target Configuration above"
+                                           Foreground="Orange" Margin="5" FontStyle="Italic"/>
+                            </StackPanel>
+                        </GroupBox>
+                    </StackPanel>
+
+                    <DataGrid x:Name="dgAttackResults" Grid.Row="1" Margin="10"
+                              AutoGenerateColumns="False" IsReadOnly="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Time" Binding="{Binding Timestamp, StringFormat='HH:mm:ss'}" Width="80"/>
+                            <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="80"/>
+                            <DataGridTextColumn Header="Attack Type" Binding="{Binding AttackType}" Width="150"/>
+                            <DataGridTextColumn Header="Target" Binding="{Binding TargetPeer}" Width="100"/>
+                            <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Grid>
+            </TabItem>
+
+            <!-- Complete Scenario Tab -->
+            <TabItem Header="🎯 Complete Scenario">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Margin="10">
+                        <TextBlock Text="🚀 Scénario Complet: Substitution + Interception + Décryptage"
+                                   Foreground="Orange" FontWeight="Bold" Margin="5"/>
+                        <StackPanel Orientation="Horizontal" Margin="5">
+                            <Button x:Name="btnStartRealisticScenario" Content="🎯 Start Realistic Attack"
+                                    Click="BtnStartRealisticScenario_Click" Background="#dc3545" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnStopScenario" Content="⏹️ Stop Scenario"
+                                    Click="BtnStopScenario_Click" Background="#6c757d" Foreground="White" Margin="5"/>
+                            <TextBlock x:Name="txtScenarioStatus" Text="Status: Ready"
+                                       Foreground="White" VerticalAlignment="Center" Margin="10"/>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <TabControl Grid.Row="1" Background="#2d2d30" Margin="10">
+                        <TabItem Header="📋 Attack Progress">
+                            <TextBox x:Name="txtScenarioLog" Background="#3c3c3c" Foreground="White"
+                                     IsReadOnly="True" VerticalScrollBarVisibility="Auto" FontFamily="Consolas"/>
+                        </TabItem>
+
+                        <TabItem Header="💬 Intercepted Conversations">
+                            <DataGrid x:Name="dgInterceptedConversations"
+                                      AutoGenerateColumns="False" IsReadOnly="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Time" Binding="{Binding Timestamp, StringFormat='HH:mm:ss'}" Width="80"/>
+                                    <DataGridTextColumn Header="From" Binding="{Binding FromPeer}" Width="80"/>
+                                    <DataGridTextColumn Header="To" Binding="{Binding ToPeer}" Width="80"/>
+                                    <DataGridTextColumn Header="Decrypted Message" Binding="{Binding DecryptedContent}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </TabItem>
+                    </TabControl>
+                </Grid>
+            </TabItem>
+
+            <!-- Port Forwarding Tab -->
+            <TabItem Header="🌐 Port Forwarding">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Current Status Display -->
+                    <GroupBox Grid.Row="0" Header="🔍 Current Port Forwarding Status" Foreground="White" Margin="10">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="5">
+                                <TextBlock Text="IP Forwarding:" Foreground="White" VerticalAlignment="Center" Width="120"/>
+                                <TextBlock x:Name="txtIPForwardingStatus" Text="Unknown" Foreground="Yellow"
+                                          VerticalAlignment="Center" FontWeight="Bold" Width="100"/>
+                                <Button x:Name="btnRefreshStatus" Content="🔄 Refresh" Click="BtnRefreshStatus_Click"
+                                        Background="#007ACC" Foreground="White" Margin="10,0"/>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Margin="5">
+                                <TextBlock Text="Active Port Proxies:" Foreground="White" VerticalAlignment="Center" Width="120"/>
+                                <TextBlock x:Name="txtActiveProxies" Text="0" Foreground="Cyan"
+                                          VerticalAlignment="Center" FontWeight="Bold"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <!-- Manual Controls -->
+                    <GroupBox Grid.Row="1" Header="🛠️ Manual Port Forwarding Controls" Foreground="White" Margin="10">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="5">
+                                <TextBlock Text="Listen Port:" Foreground="White" VerticalAlignment="Center" Width="80"/>
+                                <TextBox x:Name="txtListenPort" Background="#FF404040" Foreground="White"
+                                         BorderBrush="#FF666666" Width="80" Text="8889" Margin="5,0"/>
+
+                                <TextBlock Text="Target IP:" Foreground="White" VerticalAlignment="Center" Width="70" Margin="10,0,0,0"/>
+                                <TextBox x:Name="txtTargetIP" Background="#FF404040" Foreground="White"
+                                         BorderBrush="#FF666666" Width="140" Margin="5,0"/>
+
+                                <TextBlock Text="Attacker IP:" Foreground="White" VerticalAlignment="Center" Width="70" Margin="10,0,0,0"/>
+                                <TextBox x:Name="txtAttackerIP" Background="#FF404040" Foreground="White"
+                                         BorderBrush="#FF666666" Width="100" Margin="5,0"/>
+                                <Button x:Name="btnDetectAttackerIP" Content="🔍" Click="BtnDetectAttackerIP_Click"
+                                        Background="#007ACC" Foreground="White" Margin="2,0"/>
+
+                                <TextBlock Text="Connect IP:" Foreground="White" VerticalAlignment="Center" Width="80" Margin="10,0,0,0"/>
+                                <TextBox x:Name="txtConnectIP" Background="#FF404040" Foreground="White"
+                                         BorderBrush="#FF666666" Width="100" Text="127.0.0.1" Margin="5,0"/>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Margin="5">
+                                <Button x:Name="btnEnableIPForwarding" Content="⚡ Enable IP Forwarding" Click="BtnEnableIPForwarding_Click"
+                                        Background="#28a745" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnAddPortProxy" Content="➕ Add Port Proxy" Click="BtnAddPortProxy_Click"
+                                        Background="#17a2b8" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnRemovePortProxy" Content="➖ Remove Port Proxy" Click="BtnRemovePortProxy_Click"
+                                        Background="#ffc107" Foreground="Black" Margin="5"/>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Margin="5">
+                                <Button x:Name="btnRouteWebTraffic" Content="🌐 Route Web Traffic (80,443)" Click="BtnRouteWebTraffic_Click"
+                                        Background="#6f42c1" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnRemoveWebRouting" Content="🚫 Remove Web Routing" Click="BtnRemoveWebRouting_Click"
+                                        Background="#fd7e14" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnTestTransparentProxy" Content="🧪 Test Proxy Config" Click="BtnTestTransparentProxy_Click"
+                                        Background="#17a2b8" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnRestoreNormal" Content="🔄 Restore Normal Mode" Click="BtnRestoreNormal_Click"
+                                        Background="#dc3545" Foreground="White" Margin="5"/>
+                            </StackPanel>
+
+                            <TextBlock Text="⚠️ LOGIC: ARP spoofs target → traffic to TargetIP gets redirected to AttackerIP"
+                                       Foreground="Cyan" Margin="5" FontWeight="Bold"/>
+                            <TextBlock Text="🎯 Custom ports: TargetIP:8889 → AttackerIP:8889 (ChatP2P MITM proxy)"
+                                       Foreground="LightGreen" Margin="5"/>
+                            <TextBlock Text="🌐 Web routing: TargetIP:80,443 → Gateway (target keeps internet access)"
+                                       Foreground="Orange" Margin="5"/>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <!-- Port Forwarding Log -->
+                    <TextBox x:Name="txtPortForwardingLog" Grid.Row="2" Margin="10" Background="#3c3c3c"
+                             Foreground="White" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                             FontFamily="Consolas"/>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- Status Log -->
+        <GroupBox Grid.Row="2" Header="📋 Attack Log" Margin="10" Foreground="White">
+            <ScrollViewer>
+                <TextBox x:Name="txtGlobalLog" Background="#3c3c3c" Foreground="White"
+                         IsReadOnly="True" FontFamily="Consolas" TextWrapping="Wrap"/>
+            </ScrollViewer>
+        </GroupBox>
+    </Grid>
+</Window>

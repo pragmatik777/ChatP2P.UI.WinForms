@@ -160,7 +160,8 @@ namespace ChatP2P.Client
             {
                 // Load from app settings or config file
                 txtDisplayName.Text = Properties.Settings.Default.DisplayName ?? Environment.UserName;
-                
+                txtRelayServerIP.Text = Properties.Settings.Default.RelayServerIP ?? "192.168.1.152";
+
                 chkStrictTrust.IsChecked = Properties.Settings.Default.StrictTrust;
                 chkVerbose.IsChecked = Properties.Settings.Default.VerboseLogging;
                 chkEncryptRelay.IsChecked = Properties.Settings.Default.EncryptRelay;
@@ -178,7 +179,8 @@ namespace ChatP2P.Client
             try
             {
                 Properties.Settings.Default.DisplayName = txtDisplayName.Text;
-                
+                Properties.Settings.Default.RelayServerIP = txtRelayServerIP.Text;
+
                 Properties.Settings.Default.StrictTrust = chkStrictTrust.IsChecked ?? false;
                 Properties.Settings.Default.VerboseLogging = chkVerbose.IsChecked ?? false;
                 Properties.Settings.Default.EncryptRelay = chkEncryptRelay.IsChecked ?? false;
@@ -374,8 +376,13 @@ namespace ChatP2P.Client
                     txtDisplayName.Text = displayName;
                 }
 
+                // DEBUG: Log quelle IP est passée au RelayClient
+                await LogToFile($"🔧 [DEBUG] InitializeRelayClient with IP: {serverIp}, DisplayName: {displayName}", forceLog: true);
+
+                await LogToFile($"🔧 [DEBUG] Creating RelayClient instance", forceLog: true);
                 _relayClient = new RelayClient(serverIp);
-                
+
+                await LogToFile($"🔧 [DEBUG] Subscribing to RelayClient events", forceLog: true);
                 // Subscribe to events
                 _relayClient.FriendRequestReceived += OnFriendRequestReceived;
                 _relayClient.FriendRequestAccepted += OnFriendRequestAccepted;
@@ -395,16 +402,18 @@ namespace ChatP2P.Client
 
                 // ✅ REMOVED: VB.NET P2PManager - now using C# server API directly
                 Console.WriteLine("✅ [P2P-INIT] Using C# server API directly (no VB.NET P2PManager)");
-                await LogToFile("✅ [P2P-INIT] Using C# server API directly (no VB.NET P2PManager)");
-                
+                await LogToFile("✅ [P2P-INIT] Using C# server API directly (no VB.NET P2PManager)", forceLog: true);
+
+                await LogToFile($"🔧 [DEBUG] Attempting RelayClient.ConnectAsync({displayName})", forceLog: true);
                 var connected = await _relayClient.ConnectAsync(displayName);
                 if (connected)
                 {
-                    await LogToFile($"RelayClient connected as {displayName}", forceLog: true);
+                    await LogToFile($"✅ RelayClient connected successfully as {displayName}", forceLog: true);
                 }
                 else
                 {
-                    await LogToFile("Failed to connect RelayClient", forceLog: true);
+                    await LogToFile($"❌ RelayClient failed to connect as {displayName}", forceLog: true);
+                    throw new Exception("RelayClient connection failed");
                 }
             }
             catch (Exception ex)
@@ -1586,54 +1595,69 @@ namespace ChatP2P.Client
         // ===== Server Connection =====
         private async Task ConnectToServer()
         {
-            var serverIp = "127.0.0.1";
-            
+            var serverIp = txtRelayServerIP.Text.Trim();
+            if (string.IsNullOrWhiteSpace(serverIp))
+            {
+                serverIp = "192.168.1.152"; // Default value
+                txtRelayServerIP.Text = serverIp;
+            }
+
+            // DEBUG: Log quelle IP est utilisée
+            await LogToFile($"🔧 [DEBUG] Starting connection to server IP: {serverIp} (from textbox: {txtRelayServerIP.Text})", forceLog: true);
+
             try
             {
+                // Step 1: Test TCP connection to port 8889
+                await LogToFile($"🔧 [DEBUG] Step 1: Creating TcpClient for {serverIp}:8889", forceLog: true);
                 _serverConnection = new TcpClient();
-                
-                try
-                {
-                    var exeDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location) ?? ".";
-                    var serverFile = Path.Combine(exeDir, "server.txt");
-                    
-                    if (File.Exists(serverFile))
-                    {
-                        serverIp = File.ReadAllText(serverFile).Trim();
-                        await LogToFile($"Server IP loaded from {serverFile}: {serverIp}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    await LogToFile($"Error reading server.txt: {ex.Message}");
-                }
-                
+
+                await LogToFile($"🔧 [DEBUG] Step 2: Attempting ConnectAsync to {serverIp}:8889", forceLog: true);
                 await _serverConnection.ConnectAsync(serverIp, 8889);
+
+                await LogToFile($"🔧 [DEBUG] Step 3: TCP connection successful, getting stream", forceLog: true);
                 _serverStream = _serverConnection.GetStream();
                 _isConnectedToServer = true;
-                
+
+                await LogToFile($"🔧 [DEBUG] Step 4: Initializing RelayClient", forceLog: true);
                 // Initialiser RelayClient pour friend requests
                 await InitializeRelayClient(serverIp);
 
+                await LogToFile($"🔧 [DEBUG] Step 5: Initializing WebRTC client", forceLog: true);
                 // ✅ NOUVEAU: Initialiser WebRTC direct client
                 InitializeWebRTCClient();
 
+                await LogToFile($"🔧 [DEBUG] Step 6: Updating UI status and starting P2P", forceLog: true);
                 UpdateServerStatus("Connected", Colors.Green);
                 await StartP2PNetwork();
-                
+
+                await LogToFile($"🔧 [DEBUG] Step 7: Cleaning up old friend requests", forceLog: true);
                 // Clean up old friend requests before loading
                 await ClearOldFriendRequests();
-                
+
+                await LogToFile($"🔧 [DEBUG] Step 8: Refreshing data", forceLog: true);
                 // Immediate refresh after connection
                 await RefreshFriendRequests();
                 await RefreshPeersList();
-                await LogToFile("Initial refresh after server connection completed");
+                await LogToFile("✅ Connection sequence completed successfully", forceLog: true);
+            }
+            catch (System.Net.Sockets.SocketException sockEx)
+            {
+                await LogToFile($"❌ SOCKET ERROR - IP: {serverIp}, Port: 8889, SocketError: {sockEx.SocketErrorCode}, Message: {sockEx.Message}", forceLog: true);
+                UpdateServerStatus($"Socket Error: {sockEx.SocketErrorCode}", Colors.Red);
+                _isConnectedToServer = false;
+            }
+            catch (System.TimeoutException timeEx)
+            {
+                await LogToFile($"❌ TIMEOUT ERROR - IP: {serverIp}, Port: 8889, Message: {timeEx.Message}", forceLog: true);
+                UpdateServerStatus("Connection Timeout", Colors.Red);
+                _isConnectedToServer = false;
             }
             catch (Exception ex)
             {
+                await LogToFile($"❌ GENERAL CONNECTION ERROR - IP: {serverIp}, Port: 8889, Type: {ex.GetType().Name}, Message: {ex.Message}", forceLog: true);
+                await LogToFile($"❌ Stack trace: {ex.StackTrace}", forceLog: true);
                 UpdateServerStatus($"Connection Error", Colors.Red);
                 _isConnectedToServer = false;
-                await LogToFile($"SERVER CONNECTION ERROR - IP: {serverIp}, Port: 8889, Error: {ex.Message}");
             }
         }
 
