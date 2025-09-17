@@ -379,6 +379,7 @@ namespace ChatP2P.Client
                 // Subscribe to events
                 _relayClient.FriendRequestReceived += OnFriendRequestReceived;
                 _relayClient.FriendRequestAccepted += OnFriendRequestAccepted;
+                _relayClient.DualKeyAcceptanceReceived += OnDualKeyAcceptanceReceived;
                 _relayClient.FriendRequestRejected += OnFriendRequestRejected;
                 _relayClient.PrivateMessageReceived += OnPrivateMessageReceived;
                 _relayClient.PeerListUpdated += OnPeerListUpdated;
@@ -443,6 +444,16 @@ namespace ChatP2P.Client
                 {
                     await LogToFile($"🔔 [DEBUG] OnFriendRequestReceived called: {fromPeer} → {toPeer} | PublicKey: {publicKey?.Substring(0, Math.Min(20, publicKey?.Length ?? 0))}...", forceLog: true);
 
+                    // ✅ Update Last Seen when receiving friend request
+                    try
+                    {
+                        await DatabaseService.Instance.UpdatePeerLastSeen(fromPeer);
+                    }
+                    catch (Exception ex)
+                    {
+                        await LogToFile($"Error updating last seen for {fromPeer}: {ex.Message}");
+                    }
+
                     // Vérifier si on a déjà cette request (éviter doublons)
                     var existingRequest = _friendRequests.FirstOrDefault(r => r.FromPeer == fromPeer && r.ToPeer == toPeer);
                     if (existingRequest != null)
@@ -480,9 +491,10 @@ namespace ChatP2P.Client
                     // ✅ NOUVEAU: Le stockage des clés Ed25519 + PQC est maintenant géré directement dans RelayClient
                     // pour les friend requests via secure tunnel. Ce handler ne stocke plus de clés.
                     await LogToFile($"✅ Friend request processed - key storage handled by RelayClient secure tunnel", forceLog: true);
-                    
-                    // NOTE: Server persistence is now handled by RelayHub event handler
-                    // No need to call NotifyServerFriendRequestReceived here
+
+                    // ✅ FIX: Notify server of secure friend request for persistence
+                    await NotifyServerFriendRequestReceived(fromPeer, toPeer, publicKey, message);
+                    await LogToFile($"✅ Server notified of secure friend request from {fromPeer}", forceLog: true);
                 }
                 catch (Exception ex)
                 {
@@ -498,11 +510,15 @@ namespace ChatP2P.Client
                 // La demande a été acceptée - mettre à jour la DB locale et retirer de la liste
                 try
                 {
+                    // ✅ FIX: Get display name once to avoid self-operations
+                    var displayName = txtDisplayName.Text.Trim();
+
                     await LogToFile($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}, PQC={!string.IsNullOrEmpty(pqcPublicKey)}", forceLog: true);
                     Console.WriteLine($"🎉 [ACCEPT EVENT] Friend request accepted event: fromPeer={fromPeer}, toPeer={toPeer}, PQC={!string.IsNullOrEmpty(pqcPublicKey)}");
-                    
+
                     // ✅ PQC: Store the accepter's PQC public key if provided
-                    if (!string.IsNullOrEmpty(pqcPublicKey))
+                    // ✅ FIX: Don't store our own key as a peer key
+                    if (!string.IsNullOrEmpty(pqcPublicKey) && toPeer != displayName)
                     {
                         try
                         {
@@ -518,19 +534,36 @@ namespace ChatP2P.Client
                         }
                     }
 
-                    await DatabaseService.Instance.SetPeerTrusted(toPeer, true, $"Trusted by {toPeer} via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                    await DatabaseService.Instance.SetPeerVerified(toPeer, true); // Mark as verified contact
-                    await DatabaseService.Instance.LogSecurityEvent(toPeer, "FRIEND_ACCEPT_SENDER", $"Our friend request was accepted by {toPeer}, marking them as trusted and verified");
+                    // ✅ FIX: Don't mark ourselves as trusted peer
+                    if (toPeer != displayName)
+                    {
+                        await DatabaseService.Instance.SetPeerTrusted(toPeer, true, $"Trusted by {toPeer} via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                        await DatabaseService.Instance.SetPeerVerified(toPeer, true); // Mark as verified contact
+                        await DatabaseService.Instance.LogSecurityEvent(toPeer, "FRIEND_ACCEPT_SENDER", $"Our friend request was accepted by {toPeer}, marking them as trusted and verified");
+                    }
                     await LogToFile($"Friend request accepted: {fromPeer} ← {toPeer} (now trusted)", forceLog: true);
                     
                     // NOUVEAU: Synchroniser le nouveau statut AUTH avec le peer
-                    await SyncStatusWithPeer(toPeer, "AUTH", true);
-                    await LogToFile($"🔐 [TOFU-SYNC] AUTH status synced with {toPeer}: trusted=true");
-                    
+                    // ✅ FIX: Don't sync status with ourselves
+                    if (toPeer != displayName)
+                    {
+                        await SyncStatusWithPeer(toPeer, "AUTH", true);
+                        await LogToFile($"🔐 [TOFU-SYNC] AUTH status synced with {toPeer}: trusted=true");
+                    }
+
                     // Add the accepter to our local contacts (bidirectional contact)
-                    await LogToFile($"📝 [BIDIRECTIONAL] Adding {toPeer} as local contact on {Environment.MachineName}", forceLog: true);
-                    Console.WriteLine($"📝 [BIDIRECTIONAL] Adding {toPeer} as local contact on {Environment.MachineName}");
-                    await AddLocalContact(toPeer, "Offline"); // Will be updated with real status
+                    // ✅ FIX: Don't add ourselves as a contact
+                    if (toPeer != displayName)
+                    {
+                        await LogToFile($"📝 [BIDIRECTIONAL] Adding {toPeer} as local contact on {Environment.MachineName}", forceLog: true);
+                        Console.WriteLine($"📝 [BIDIRECTIONAL] Adding {toPeer} as local contact on {Environment.MachineName}");
+                        await AddLocalContact(toPeer, "Offline"); // Will be updated with real status
+                    }
+                    else
+                    {
+                        await LogToFile($"🚫 [SELF-CONTACT] Skipping self-contact addition: {toPeer}", forceLog: true);
+                        Console.WriteLine($"🚫 [SELF-CONTACT] Skipping self-contact addition: {toPeer}");
+                    }
                     
                     // Supprimer de la liste des pending requests
                     var requestToRemove = _friendRequests.FirstOrDefault(r => r.FromPeer == fromPeer && r.ToPeer == toPeer);
@@ -539,12 +572,60 @@ namespace ChatP2P.Client
                         _friendRequests.Remove(requestToRemove);
                     }
                     
+                    // ✅ Note: No need for AUTO-EXCHANGE here anymore since the friend acceptance
+                    // flow now sends both Ed25519 + PQC keys directly via SendFriendRequestWithBothKeysAsync
+
                     // Refresh contacts list
                     await RefreshLocalContactsUI();
                 }
                 catch (Exception ex)
                 {
                     await LogToFile($"Error handling friend request acceptance: {ex.Message}", forceLog: true);
+                }
+            });
+        }
+
+        private void OnDualKeyAcceptanceReceived(string fromPeer, string toPeer, string ed25519Key, string pqcKey)
+        {
+            Dispatcher.Invoke(async () =>
+            {
+                try
+                {
+                    // ✅ This is when WE (toPeer) receive confirmation that OUR friend request was accepted by fromPeer
+                    // fromPeer = who accepted our request, toPeer = us (the original requester)
+                    var displayName = txtDisplayName.Text.Trim();
+
+                    await LogToFile($"🎉 [DUAL-ACCEPT] Our friend request was accepted by {fromPeer}!", forceLog: true);
+                    Console.WriteLine($"🎉 [DUAL-ACCEPT] Our friend request was accepted by {fromPeer}!");
+
+                    // Don't process if this is somehow for someone else (shouldn't happen)
+                    if (toPeer != displayName)
+                    {
+                        await LogToFile($"⚠️ [DUAL-ACCEPT] Dual acceptance not for us: toPeer={toPeer}, displayName={displayName}", forceLog: true);
+                        return;
+                    }
+
+                    // Mark the accepter as trusted and verified (TOFU)
+                    await DatabaseService.Instance.SetPeerTrusted(fromPeer, true, $"Trusted via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                    await DatabaseService.Instance.SetPeerVerified(fromPeer, true);
+                    await DatabaseService.Instance.LogSecurityEvent(fromPeer, "FRIEND_ACCEPT_RECEIVED", $"Friend request accepted by {fromPeer}, marking them as trusted and verified via TOFU");
+
+                    // Add the accepter to our local contacts
+                    await LogToFile($"📝 [DUAL-ACCEPT] Adding {fromPeer} to local contacts", forceLog: true);
+                    await AddLocalContact(fromPeer, "Offline");
+
+                    // Sync AUTH status
+                    await SyncStatusWithPeer(fromPeer, "AUTH", true);
+                    await LogToFile($"🔐 [DUAL-ACCEPT] AUTH status synced with {fromPeer}: trusted=true");
+
+                    // Refresh contacts list
+                    await RefreshLocalContactsUI();
+
+                    await LogToFile($"✅ [DUAL-ACCEPT] Successfully processed dual key acceptance from {fromPeer}", forceLog: true);
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"❌ Error handling dual key acceptance: {ex.Message}", forceLog: true);
                 }
             });
         }
@@ -675,6 +756,16 @@ namespace ChatP2P.Client
                 {
                     await LogToFile($"🔄 [ECHO-FILTER] Ignoring echo message from self: {fromPeer}");
                     return;
+                }
+
+                // ✅ Update Last Seen when receiving message
+                try
+                {
+                    await DatabaseService.Instance.UpdatePeerLastSeen(fromPeer);
+                }
+                catch (Exception ex)
+                {
+                    await LogToFile($"Error updating last seen for {fromPeer}: {ex.Message}");
                 }
 
                 // ✅ NOUVEAU: Déchiffrement des messages chiffrés
@@ -2093,30 +2184,48 @@ namespace ChatP2P.Client
                 {
                     var displayName = txtDisplayName.Text.Trim();
                     
-                    // ✅ PQC: Accept friend request via RelayClient with our PQC key
+                    // ✅ DUAL-KEY: Accept friend request via RelayClient with BOTH our Ed25519 + PQC keys
                     if (_relayClient?.IsConnected == true)
                     {
-                        // Get our PQC public key to send back
+                        // Get BOTH our Ed25519 and PQC public keys to send back
+                        await DatabaseService.Instance.EnsureEd25519Identity();
                         await DatabaseService.Instance.EnsurePqIdentity();
                         var identity = await DatabaseService.Instance.GetIdentity();
+                        var myEd25519PublicKey = identity?.Ed25519Pub != null ? Convert.ToBase64String(identity.Ed25519Pub) : null;
                         var myPqPublicKey = identity?.PqPub != null ? Convert.ToBase64String(identity.PqPub) : null;
-                        await CryptoService.LogCrypto($"🔑 [FRIEND-ACCEPT] Sending our PQC key to {request.FromPeer}: {myPqPublicKey?.Substring(0, Math.Min(40, myPqPublicKey.Length))}...");
 
-                        var success = await _relayClient.AcceptFriendRequestAsync(request.FromPeer, displayName, myPqPublicKey);
+                        await CryptoService.LogCrypto($"🔑 [FRIEND-ACCEPT] Sending our Ed25519 key to {request.FromPeer}: {myEd25519PublicKey?.Substring(0, Math.Min(40, myEd25519PublicKey?.Length ?? 0))}...");
+                        await CryptoService.LogCrypto($"🔑 [FRIEND-ACCEPT] Sending our PQC key to {request.FromPeer}: {myPqPublicKey?.Substring(0, Math.Min(40, myPqPublicKey?.Length ?? 0))}...");
+
+                        // Use AcceptFriendRequestWithBothKeysAsync for dual key acceptance (fixes infinite loop)
+                        // fromPeer = qui accepte (nous), toPeer = qui a envoyé la demande
+                        var success = await _relayClient.AcceptFriendRequestWithBothKeysAsync(
+                            displayName, request.FromPeer, myEd25519PublicKey, myPqPublicKey);
                         
                         if (success)
                         {
                             await LogToFile($"Friend request accepted via RelayClient: {request.FromPeer} -> {displayName}", forceLog: true);
                             
                             // Add the requester to our local contacts and mark as trusted (TOFU)
-                            await DatabaseService.Instance.SetPeerTrusted(request.FromPeer, true, $"Trusted via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                            await DatabaseService.Instance.SetPeerVerified(request.FromPeer, true); // Mark as verified contact
-                            await DatabaseService.Instance.LogSecurityEvent(request.FromPeer, "FRIEND_ACCEPT", $"Friend request accepted, peer marked as trusted and verified via TOFU");
-                            await AddLocalContact(request.FromPeer, "Offline"); // Will be updated with real status
-                            
-                            // NOUVEAU: Synchroniser le nouveau statut AUTH avec le peer
-                            await SyncStatusWithPeer(request.FromPeer, "AUTH", true);
-                            await LogToFile($"🔐 [TOFU-SYNC] AUTH status synced with {request.FromPeer}: trusted=true");
+                            // ✅ FIX: Don't add ourselves as a contact
+                            if (request.FromPeer != displayName)
+                            {
+                                await DatabaseService.Instance.SetPeerTrusted(request.FromPeer, true, $"Trusted via friend request acceptance on {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                                await DatabaseService.Instance.SetPeerVerified(request.FromPeer, true); // Mark as verified contact
+                                await DatabaseService.Instance.LogSecurityEvent(request.FromPeer, "FRIEND_ACCEPT", $"Friend request accepted, peer marked as trusted and verified via TOFU");
+                                await AddLocalContact(request.FromPeer, "Offline"); // Will be updated with real status
+                            }
+                            else
+                            {
+                                await LogToFile($"⚠️ Skipping self-contact addition: {request.FromPeer} == {displayName}");
+                            }
+
+                            // NOUVEAU: Synchroniser le nouveau statut AUTH avec le peer (outside the if to maintain normal flow)
+                            if (request.FromPeer != displayName)
+                            {
+                                await SyncStatusWithPeer(request.FromPeer, "AUTH", true);
+                                await LogToFile($"🔐 [TOFU-SYNC] AUTH status synced with {request.FromPeer}: trusted=true");
+                            }
                             
                             MessageBox.Show($"Friend request from {request.FromPeer} accepted!", "Success", 
                                           MessageBoxButton.OK, MessageBoxImage.Information);

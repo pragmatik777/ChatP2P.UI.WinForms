@@ -1029,8 +1029,10 @@ namespace ChatP2P.Client
                 if (latestEd25519Key?.Public != null)
                 {
                     // Calculer le fingerprint Ed25519 réel (identifiant permanent)
-                    peerFingerprint = ComputeFingerprint(latestEd25519Key.Public);
-                    ed25519Fingerprint = peerFingerprint;
+                    var fullFingerprint = ComputeFingerprint(latestEd25519Key.Public);
+                    // Pour l'ID permanent, utiliser les premiers 16 chars (plus lisible)
+                    peerFingerprint = fullFingerprint.Length >= 16 ? $"{fullFingerprint[..8]}-{fullFingerprint[8..16]}" : fullFingerprint;
+                    ed25519Fingerprint = fullFingerprint;
                 }
 
                 // ✅ Récupérer clés PQC pour ce peer

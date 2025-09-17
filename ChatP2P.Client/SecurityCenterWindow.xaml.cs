@@ -57,8 +57,12 @@ namespace ChatP2P.Client
                 _peers.Clear();
 
                 var peers = await DatabaseService.Instance.GetSecurityPeerList(searchFilter);
+
+                // DEBUG: Log loaded peers info
+                System.Diagnostics.Debug.WriteLine($"Security Center loaded {peers.Count} peers:");
                 foreach (var peer in peers)
                 {
+                    System.Diagnostics.Debug.WriteLine($"  - {peer.Name}: PeerFP='{peer.PeerFingerprint}', Ed25519FP='{peer.Fingerprint}', PQC={peer.HasPqcKey}, LastSeen='{peer.LastSeenUtc}'");
                     _peers.Add(peer);
                 }
             }

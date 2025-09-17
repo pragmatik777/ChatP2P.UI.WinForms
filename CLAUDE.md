@@ -522,3 +522,62 @@ L'attaquant substitue SES clés → Chiffrement PQC compromis dès le début
 - **Nouveaux utilisateurs** : Interface simplifiée dès le démarrage
 - **Crypto inchangé** : ECDH P-384 + AES-GCM reste identique sous le capot
 - **Expérience unifiée** : Un seul bouton pour activer le chiffrement relay PQC
+
+*Dernière mise à jour: 17 Septembre 2025 - Friend Request Flow Fixes + UI Chat Stabilisé*
+
+## 🔧 **FRIEND REQUEST FLOW FIXES CRITIQUES (17 Sept 2025)**
+**⚠️ SECTION CRITIQUE - BOUCLES INFINIES ET SELF-CONTACTS RÉSOLUS ⚠️**
+
+### ✅ **Fix 1: Boucle Infinie Friend Request Acceptation**
+- **Problème** : Après acceptation VM2→VM1, nouvelles friend requests infinies générées
+- **Cause** : Événement `FriendRequestAccepted` déclenché à tort pour `FRIEND_ACCEPT_DUAL`
+- **Solution** :
+  - Supprimé `FriendRequestAccepted?.Invoke()` dans traitement `FRIEND_ACCEPT_DUAL`
+  - Créé nouvel événement `DualKeyAcceptanceReceived` spécifique pour acceptations
+  - Handler `OnDualKeyAcceptanceReceived` traite côté demandeur sans créer boucles
+- **Résultat** : ✅ Plus de boucles infinies après acceptation friend requests
+
+### ✅ **Fix 2: Self-Contact dans Security Center**
+- **Problème** : VM1 apparaissait dans sa propre liste Security Center
+- **Cause** : `OnFriendRequestAccepted` ajoutait `toPeer` sans vérifier si = soi-même
+- **Solution** :
+  - Vérifications `if (toPeer != displayName)` avant toutes opérations self
+  - Protection stockage clés PQC : pas de clés self comme peer keys
+  - Protection trusted/verified : pas de self-marking
+  - Protection sync AUTH : pas de synchronisation avec soi-même
+  - Protection contacts locaux : pas d'auto-ajout en contacts
+- **Résultat** : ✅ VM1 ne s'ajoute plus lui-même dans Security Center
+
+### 🔄 **Architecture Dual-Key Acceptance Finale**
+```csharp
+// Nouvel événement spécifique (RelayClient.cs)
+public event Action<string, string, string, string>? DualKeyAcceptanceReceived;
+
+// Handler côté demandeur (MainWindow.xaml.cs)
+private void OnDualKeyAcceptanceReceived(string fromPeer, string toPeer,
+                                         string ed25519Key, string pqcKey)
+{
+    // fromPeer = qui a accepté notre demande
+    // toPeer = nous (le demandeur original)
+    // ✅ Ajoute fromPeer aux contacts sans créer nouvelles requests
+}
+```
+
+### 📊 **Flow Friend Request Bidirectionnel Corrigé**
+```
+VM1 → [FRIEND_REQUEST] → VM2
+VM1 ← [FRIEND_ACCEPT_DUAL] ← VM2 (accepte)
+VM1: OnDualKeyAcceptanceReceived → Ajoute VM2 aux contacts ✅
+VM2: OnFriendRequestAccepted → Ajoute VM1 aux contacts ✅
+Résultat: Relation bidirectionnelle sans boucles ni self-contacts
+```
+
+### ✅ **Validation Fixes Friend Request (17 Sept 2025)**
+- **✅ Plus de boucles** : Acceptation ne génère plus nouvelles requests
+- **✅ Contacts bidirectionnels** : VM1 et VM2 s'ajoutent mutuellement
+- **✅ Security Center propre** : Plus d'entrées self dans liste peers
+- **✅ Self-contact protection** : Toutes opérations self bloquées
+- **✅ Build Success** : Compilation réussie, système stable production
+- **✅ Flow testé** : VM1→VM2 friend request + acceptation fonctionne parfaitement
+
+**🎯 STATUS FINAL FRIEND REQUESTS :** ✅ **FLOW BIDIRECTIONNEL STABLE** - Acceptation propre sans boucles ni self-contacts

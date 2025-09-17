@@ -76,6 +76,7 @@ namespace ChatP2P.Client
             catch { /* Ignore log errors */ }
         }
         public event Action<string, string, string?>? FriendRequestAccepted; // from, to, pqcPublicKey
+        public event Action<string, string, string, string>? DualKeyAcceptanceReceived; // fromPeer, toPeer, ed25519Key, pqcKey
         public event Action<string, string>? FriendRequestRejected; // from, to
         public event Action<string, string, string>? PrivateMessageReceived; // from, to, message
         public event Action<List<string>>? PeerListUpdated;
@@ -276,44 +277,8 @@ namespace ChatP2P.Client
                     // Initialiser tunnel si pas encore fait
                     if (_secureTunnel == null)
                     {
-                        _secureTunnel = new SecureRelayTunnel(fromPeer);
-
-                        // Connecter l'événement de friend request sécurisée à notre événement principal
-                        _secureTunnel.SecureFriendRequestReceived += async (fromPeer, toPeer, ed25519Key, pqcKey, message) =>
-                        {
-                            // Stocker directement les deux clés
-                            try
-                            {
-                                if (!string.IsNullOrEmpty(ed25519Key) && ed25519Key != "no_ed25519_key")
-                                {
-                                    var ed25519Bytes = Convert.FromBase64String(ed25519Key);
-                                    await DatabaseService.Instance.AddPeerKey(fromPeer, "Ed25519", ed25519Bytes, "Secure tunnel Ed25519 key");
-                                    await LogToFile($"✅ Ed25519 key stored for {fromPeer} from secure tunnel");
-                                }
-
-                                if (!string.IsNullOrEmpty(pqcKey) && pqcKey != "no_pqc_key")
-                                {
-                                    var pqcBytes = Convert.FromBase64String(pqcKey);
-                                    await DatabaseService.Instance.AddPeerKey(fromPeer, "PQ", pqcBytes, "Secure tunnel PQC key");
-                                    await LogToFile($"✅ PQC key stored for {fromPeer} from secure tunnel");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                await LogToFile($"❌ Error storing keys for {fromPeer}: {ex.Message}");
-                            }
-
-                            // Pour compatibilité avec l'interface existante, on passe la clé PQC comme clé principale
-                            FriendRequestReceived?.Invoke(fromPeer, toPeer, pqcKey, message);
-                        };
-
-                        // Configurer le callback pour envoyer des messages
-                        _secureTunnel.SetSendMessageCallback(async (message) =>
-                        {
-                            using var writer = new StreamWriter(_friendRequestStream, Encoding.UTF8, leaveOpen: true);
-                            await writer.WriteLineAsync(message);
-                            await writer.FlushAsync();
-                        });
+                        await LogToFile("❌ [ERROR] Secure tunnel should be initialized in ConnectAsync, not here!");
+                        return false;
                     }
 
                     // Établir canal sécurisé si nécessaire
@@ -761,6 +726,47 @@ namespace ChatP2P.Client
 
                         Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer} (PQC: {!string.IsNullOrEmpty(pqcPublicKey)})");
                         FriendRequestAccepted?.Invoke(fromPeer, toPeer, pqcPublicKey);
+                    }
+                }
+                else if (message.StartsWith("FRIEND_ACCEPT_DUAL:"))
+                {
+                    // Format: FRIEND_ACCEPT_DUAL:fromPeer:toPeer:ed25519Key:pqcKey
+                    var parts = message.Substring("FRIEND_ACCEPT_DUAL:".Length).Split(':', 4);
+                    if (parts.Length >= 4)
+                    {
+                        var fromPeer = parts[0];
+                        var toPeer = parts[1];
+                        var ed25519Key = parts[2];
+                        var pqcKey = parts[3];
+
+                        Console.WriteLine($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
+
+                        // Store both keys automatically
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(ed25519Key) && ed25519Key != "no_ed25519_key")
+                            {
+                                var ed25519Bytes = Convert.FromBase64String(ed25519Key);
+                                await DatabaseService.Instance.AddPeerKey(fromPeer, "Ed25519", ed25519Bytes, "Dual key acceptance Ed25519");
+                                await LogToFile($"✅ Ed25519 key stored for {fromPeer} from dual acceptance");
+                            }
+
+                            if (!string.IsNullOrEmpty(pqcKey) && pqcKey != "no_pqc_key")
+                            {
+                                var pqcBytes = Convert.FromBase64String(pqcKey);
+                                await DatabaseService.Instance.AddPeerKey(fromPeer, "PQ", pqcBytes, "Dual key acceptance PQC");
+                                await LogToFile($"✅ PQC key stored for {fromPeer} from dual acceptance");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"❌ Error storing dual keys for {fromPeer}: {ex.Message}");
+                        }
+
+                        // ✅ FIX: Use a new event specifically for dual key acceptance responses
+                        // This avoids infinite loops while still handling the acceptance properly
+                        DualKeyAcceptanceReceived?.Invoke(fromPeer, toPeer, ed25519Key, pqcKey);
+                        Console.WriteLine($"✅ [DUAL-ACCEPT] Keys stored for {fromPeer}, dual acceptance event triggered");
                     }
                 }
                 else if (message.StartsWith("FRIEND_REJECT:"))

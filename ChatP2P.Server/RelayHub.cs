@@ -24,6 +24,7 @@ namespace ChatP2P.Server
         // Friend requests (nouveau - canal ouvert)
         public const string TAG_FRIEND_REQ = "FRIEND_REQ:";
         public const string TAG_FRIEND_ACCEPT = "FRIEND_ACCEPT:";
+        public const string TAG_FRIEND_ACCEPT_DUAL = "FRIEND_ACCEPT_DUAL:";
         public const string TAG_FRIEND_REJECT = "FRIEND_REJECT:";
         
         // ICE/P2P Signaling
@@ -365,6 +366,10 @@ namespace ChatP2P.Server
             {
                 await HandleFriendAccept(client, message);
             }
+            else if (message.StartsWith(ProtocolTags.TAG_FRIEND_ACCEPT_DUAL))
+            {
+                await HandleFriendAcceptDual(client, message);
+            }
             else if (message.StartsWith(ProtocolTags.TAG_FRIEND_REJECT))
             {
                 await HandleFriendReject(client, message);
@@ -563,6 +568,52 @@ namespace ChatP2P.Server
             else
             {
                 Console.WriteLine($"[ERROR] Impossible de trouver {fromPeer} sur canal friend request pour FRIEND_ACCEPT");
+            }
+        }
+
+        private async Task HandleFriendAcceptDual(ClientConnection client, string message)
+        {
+            // Format: FRIEND_ACCEPT_DUAL:fromPeer:toPeer:ed25519Key:pqcKey
+            var parts = message.Substring(ProtocolTags.TAG_FRIEND_ACCEPT_DUAL.Length).Split(':', 4);
+            if (parts.Length < 4) return;
+
+            var fromPeer = parts[0];
+            var toPeer = parts[1];
+            var ed25519Key = parts[2];
+            var pqcKey = parts[3];
+
+            Console.WriteLine($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
+
+            // Accept the request on server side (add contact + remove request)
+            try
+            {
+                var success = await ContactManager.AcceptContactRequest(fromPeer, toPeer);
+                if (success)
+                {
+                    Console.WriteLine($"✅ Dual key friend request accepted and removed server-side: {fromPeer} ↔ {toPeer}");
+                }
+                else
+                {
+                    Console.WriteLine($"⚠️ Dual key friend request not found server-side: {fromPeer} → {toPeer}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error accepting dual key friend request: {ex.Message}");
+            }
+
+            // Forward the dual key acceptance to the original requester (toPeer, not fromPeer!)
+            if (_friendRequestNameToId.TryGetValue(toPeer, out var targetClientId) &&
+                _friendRequestClients.TryGetValue(targetClientId, out var targetClient))
+            {
+                Console.WriteLine($"[DEBUG] Sending FRIEND_ACCEPT_DUAL to {toPeer} via friend request channel (ID: {targetClientId})");
+                var acceptMessage = $"{ProtocolTags.TAG_FRIEND_ACCEPT_DUAL}{fromPeer}:{toPeer}:{ed25519Key}:{pqcKey}";
+                await targetClient.SendAsync(acceptMessage);
+                Console.WriteLine($"[DEBUG] FRIEND_ACCEPT_DUAL sent successfully to {toPeer} with both keys");
+            }
+            else
+            {
+                Console.WriteLine($"[ERROR] Unable to find {toPeer} on friend request channel for FRIEND_ACCEPT_DUAL");
             }
         }
 
