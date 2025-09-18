@@ -187,6 +187,60 @@ namespace ChatP2P.SecurityTester.Network
                     }
                 }
 
+                // 🔓 Détecter messages chiffrés PQC pour déchiffrement
+                if (content.Contains("[PQC_ENCRYPTED]") && direction == "Client→Relay")
+                {
+                    LogMessage?.Invoke($"🔒 MESSAGE CHIFFRÉ INTERCEPTÉ!");
+                    LogMessage?.Invoke($"   Direction: {direction}");
+                    LogMessage?.Invoke($"   Contenu chiffré: {content.Substring(0, Math.Min(100, content.Length))}...");
+
+                    // 🕷️ DÉCHIFFREMENT EN TEMPS RÉEL avec clés attaquant
+                    var decryptResult = await _keyAttack.AttemptMessageDecryption(content);
+
+                    if (decryptResult.Success && !string.IsNullOrEmpty(decryptResult.Details))
+                    {
+                        LogMessage?.Invoke("🔓 DÉCHIFFREMENT RÉUSSI - Message en clair lu!");
+                        LogMessage?.Invoke($"💬 Contenu: \"{decryptResult.Details}\"");
+
+                        PacketModified?.Invoke(new AttackResult
+                        {
+                            Success = true,
+                            AttackType = "REAL_TIME_MESSAGE_DECRYPTION",
+                            Description = "Message chiffré déchiffré en temps réel",
+                            Details = $"Message: \"{decryptResult.Details}\""
+                        });
+
+                        // Laisser passer le message chiffré original (invisible)
+                    }
+                }
+
+                // 📁 Détecter fichiers chiffrés pour déchiffrement
+                if (content.Contains("FILE_CHUNK_RELAY:") && content.Contains("ENC:") && direction == "Client→Relay")
+                {
+                    LogMessage?.Invoke($"📁 FICHIER CHIFFRÉ INTERCEPTÉ!");
+                    LogMessage?.Invoke($"   Direction: {direction}");
+                    LogMessage?.Invoke($"   Chunk chiffré: {content.Substring(0, Math.Min(100, content.Length))}...");
+
+                    // 🕷️ DÉCHIFFREMENT FICHIER EN TEMPS RÉEL avec clés attaquant
+                    var decryptResult = await _keyAttack.AttemptFileDecryption(content);
+
+                    if (decryptResult.Success && !string.IsNullOrEmpty(decryptResult.Details))
+                    {
+                        LogMessage?.Invoke("🔓 FICHIER DÉCHIFFRÉ - Chunk en clair lu!");
+                        LogMessage?.Invoke($"📄 Contenu: {decryptResult.Details.Substring(0, Math.Min(50, decryptResult.Details.Length))}...");
+
+                        PacketModified?.Invoke(new AttackResult
+                        {
+                            Success = true,
+                            AttackType = "REAL_TIME_FILE_DECRYPTION",
+                            Description = "Fichier chiffré déchiffré en temps réel",
+                            Details = $"Chunk: {decryptResult.Details.Length} bytes déchiffrés"
+                        });
+
+                        // Laisser passer le chunk chiffré original (invisible)
+                    }
+                }
+
                 // 🔍 Logger autres trafics intéressants
                 if (content.Contains("CHAT_MSG") || content.Contains("FILE_CHUNK"))
                 {

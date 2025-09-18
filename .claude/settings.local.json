@@ -27,7 +27,10 @@
       "Bash(dotnet sln:*)",
       "Bash(dotnet publish:*)",
       "Bash(del PropertiesSettings.Designer.cs)",
-      "Bash(del Settings.Designer.cs)"
+      "Bash(del Settings.Designer.cs)",
+      "Bash(taskkill:*)",
+      "Bash(Stop-Process -Name \"ChatP2P.Server\" -Force)",
+      "Bash(wmic process where:*)"
     ],
     "deny": [],
     "ask": []
