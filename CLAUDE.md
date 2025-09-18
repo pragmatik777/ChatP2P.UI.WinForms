@@ -627,6 +627,55 @@ public static List<ContactRequest> GetAllReceivedRequests(string toPeer)
 
 ### ✅ **Tests et Validation Loop Fix**
 - **✅ Server Build** : Compilation réussie sans erreur
+
+### 🔧 **SECOND FIX CRITIQUE - PARAMÈTRES INVERSÉS RelayHub (18 Sept 2025)**
+**⚠️ VRAIS ROOT CAUSE DU LOOP - ORDRE PARAMÈTRES ACCEPTATION ⚠️**
+
+### ❌ **Problème Identifié - Paramètres Inversés**
+**Issue:** Après premier fix, loop persistait car serveur cherchait mauvaise direction request
+**Cause:** RelayHub appelait `AcceptContactRequest(fromPeer, toPeer)` au lieu de `(toPeer, fromPeer)`
+
+### 🔍 **Root Cause Analysis RelayHub**
+```csharp
+// PROBLÉMATIQUE (RelayHub.cs)
+// VM1 → FRIEND_REQ:VM1:VM2 → VM2 accepte → FRIEND_ACCEPT_DUAL:VM2:VM1
+// Mais server cherchait request FROM VM2 TO VM1 (n'existe pas!)
+
+// HandleFriendAccept - PROBLÉMATIQUE
+var success = await ContactManager.AcceptContactRequest(fromPeer, toPeer);
+//                                                      ↑        ↑
+//                                                     VM2      VM1
+// Cherchait request VM2→VM1 mais vraie request était VM1→VM2!
+
+// HandleFriendAcceptDual - MÊME PROBLÈME
+var success = await ContactManager.AcceptContactRequest(fromPeer, toPeer);
+```
+
+### ✅ **Fix Appliqué - Ordre Paramètres Corrigé**
+```csharp
+// CORRIGÉ (RelayHub.cs)
+// HandleFriendAccept - PARAMÈTRES INVERSÉS
+var success = await ContactManager.AcceptContactRequest(toPeer, fromPeer);
+//                                                      ↑      ↑
+//                                                     VM1    VM2
+// Maintenant cherche request VM1→VM2 (celle qui existe vraiment!)
+
+// HandleFriendAcceptDual - PARAMÈTRES INVERSÉS
+var success = await ContactManager.AcceptContactRequest(toPeer, fromPeer);
+```
+
+### 🎯 **Flow Correct Post-Fix Paramètres**
+```
+1. VM1 → FRIEND_REQ:VM1:VM2 → Server stocke request VM1→VM2
+2. VM2 accepte → FRIEND_ACCEPT_DUAL:VM2:VM1 → RelayHub
+3. RelayHub parse fromPeer=VM2, toPeer=VM1
+4. AcceptContactRequest(toPeer=VM1, fromPeer=VM2) → Cherche request VM1→VM2 ✅
+5. Request trouvée et supprimée → Loop résolu!
+```
+
+### ✅ **Tests et Validation Fix Paramètres**
+- **✅ Server Build** : Compilation réussie après correction RelayHub
+- **✅ Loop résolu** : Plus de friend requests infinies après acceptation
 - **✅ Logic Validated** : Méthode filtre correctement status "pending"
 - **✅ Real Test** : Logs VM1/VM2 montrent acceptation unique sans répétition
 - **✅ Architecture** : Cohérence entre RelayHub, ContactManager et API endpoints

@@ -539,10 +539,10 @@ namespace ChatP2P.Server
             // NOUVEAU: Accepter la demande côté serveur (ajout contact + suppression request)
             try
             {
-                var success = await ContactManager.AcceptContactRequest(fromPeer, toPeer);
+                var success = await ContactManager.AcceptContactRequest(toPeer, fromPeer);
                 if (success)
                 {
-                    Console.WriteLine($"✅ Friend request acceptée et supprimée côté serveur: {fromPeer} ↔ {toPeer}");
+                    Console.WriteLine($"✅ Friend request acceptée et supprimée côté serveur: {toPeer} ↔ {fromPeer}");
                 }
                 else
                 {
@@ -587,10 +587,10 @@ namespace ChatP2P.Server
             // Accept the request on server side (add contact + remove request)
             try
             {
-                var success = await ContactManager.AcceptContactRequest(fromPeer, toPeer);
+                var success = await ContactManager.AcceptContactRequest(toPeer, fromPeer);
                 if (success)
                 {
-                    Console.WriteLine($"✅ Dual key friend request accepted and removed server-side: {fromPeer} ↔ {toPeer}");
+                    Console.WriteLine($"✅ Dual key friend request accepted and removed server-side: {toPeer} ↔ {fromPeer}");
                 }
                 else
                 {
