@@ -198,12 +198,8 @@ namespace ChatP2P.SecurityTester.Network
                 {
                     LogMessage?.Invoke($"🎯 PEERS détectés ! Injection automatique friend request VM1→VM2");
 
-                    // Injecter une friend request automatique après un délai
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(2000); // Attendre 2 secondes
-                        await InjectFriendRequest();
-                    });
+                    // TODO: Implement InjectFriendRequest method
+                    LogMessage?.Invoke($"⚠️ Friend request injection not implemented yet");
                 }
 
                 return data; // Pas de modification

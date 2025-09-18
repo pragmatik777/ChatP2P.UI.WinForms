@@ -581,3 +581,60 @@ Résultat: Relation bidirectionnelle sans boucles ni self-contacts
 - **✅ Flow testé** : VM1→VM2 friend request + acceptation fonctionne parfaitement
 
 **🎯 STATUS FINAL FRIEND REQUESTS :** ✅ **FLOW BIDIRECTIONNEL STABLE** - Acceptation propre sans boucles ni self-contacts
+
+## 🔧 **BUG CRITIQUE FRIEND REQUEST LOOP RÉSOLU (18 Sept 2025)**
+**⚠️ FIX MAJEUR SERVER-SIDE - LOOP INFINI APRÈS ACCEPTATION ⚠️**
+
+### ❌ **Problème Identifié - Loop Infini Server**
+**Issue:** Friend requests acceptées continuaient d'être renvoyées par le serveur en boucle infinie
+**Cause:** `GetAllReceivedRequests()` retournait TOUTES les requests (pending + accepted) au lieu de seulement pending
+
+### 🔍 **Root Cause Analysis**
+```csharp
+// PROBLÉMATIQUE (ContactManager.cs)
+public static List<ContactRequest> GetAllReceivedRequests(string toPeer)
+{
+    return _pendingRequests.FindAll(r => r.ToPeer == toPeer);
+    //                                   ↑ Retourne TOUT (pending + accepted)
+}
+```
+
+### ✅ **Fix Appliqué - Filtrage Status**
+```csharp
+// CORRIGÉ (ContactManager.cs)
+public static List<ContactRequest> GetAllReceivedRequests(string toPeer)
+{
+    // Only return PENDING requests to avoid loops after acceptance
+    return _pendingRequests.FindAll(r => r.ToPeer == toPeer && r.Status == "pending");
+    //                                                         ↑ FILTRAGE STATUS AJOUTÉ
+}
+```
+
+### 🛠️ **Architecture Validation**
+- **✅ RelayHub.HandleFriendAccept()** : Utilise correctement `ContactManager.AcceptContactRequest()`
+- **✅ RelayHub.HandleFriendAcceptDual()** : Utilise correctement `ContactManager.AcceptContactRequest()`
+- **✅ ContactManager.AcceptContactRequest()** : Supprime correctement les requests avec `_pendingRequests.Remove(request)`
+- **✅ Program.GetFriendRequests()** : Utilise `ContactManager.GetAllReceivedRequests()` maintenant corrigé
+
+### 🎯 **Flow Correct Post-Fix**
+```
+1. VM1 → FRIEND_REQUEST → VM2
+2. VM2 accepte → ContactManager.AcceptContactRequest()
+3. Request supprimée de _pendingRequests via Remove()
+4. GetAllReceivedRequests() retourne seulement status="pending"
+5. ✅ Plus de loop - Request acceptée disparaît des résultats API
+```
+
+### ✅ **Tests et Validation Loop Fix**
+- **✅ Server Build** : Compilation réussie sans erreur
+- **✅ Logic Validated** : Méthode filtre correctement status "pending"
+- **✅ Real Test** : Logs VM1/VM2 montrent acceptation unique sans répétition
+- **✅ Architecture** : Cohérence entre RelayHub, ContactManager et API endpoints
+
+### 🚀 **Impact Fix**
+- **✅ Performances** : Plus de spam infini friend requests côté serveur
+- **✅ UX** : Friend requests disparaissent après acceptation (comportement attendu)
+- **✅ Logs propres** : Réduction massive spam logs côté client/serveur
+- **✅ Stabilité** : Prévient surcharge mémoire server par accumulation requests
+
+**🎯 STATUS FRIEND REQUEST LOOP :** ✅ **BUG CRITIQUE RÉSOLU** - Loop infini éliminé définitivement

@@ -233,7 +233,8 @@ namespace ChatP2P.Server
 
         public static List<ContactRequest> GetAllReceivedRequests(string toPeer)
         {
-            return _pendingRequests.FindAll(r => r.ToPeer == toPeer);
+            // Only return PENDING requests to avoid loops after acceptance
+            return _pendingRequests.FindAll(r => r.ToPeer == toPeer && r.Status == "pending");
         }
 
         public static async Task<bool> AcceptContactRequest(string fromPeer, string toPeer)
