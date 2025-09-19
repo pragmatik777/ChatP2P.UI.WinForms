@@ -1611,6 +1611,11 @@ namespace ChatP2P.Client
                 await LogToFile($"🔧 [DEBUG] Step 1: Creating TcpClient for {serverIp}:8889", forceLog: true);
                 _serverConnection = new TcpClient();
 
+                // ⏱️ FIX SEARCH TIMEOUT: Augmenter timeouts pour searches manuelles lentes
+                _serverConnection.ReceiveTimeout = 60000; // 60 secondes pour search réseau
+                _serverConnection.SendTimeout = 60000;    // 60 secondes
+                await LogToFile($"🔧 [DEBUG] TcpClient timeouts configurés: 60s (support search lentes)", forceLog: true);
+
                 await LogToFile($"🔧 [DEBUG] Step 2: Attempting ConnectAsync to {serverIp}:8889", forceLog: true);
                 await _serverConnection.ConnectAsync(serverIp, 8889);
 

@@ -44,5 +44,8 @@ namespace ChatP2P.SecurityTester.Core
         // 🛡️ Safety Limits (éviter DoS accidentel)
         public static int MaxARPPacketsPerSecond { get; set; } = 10;
         public static int MaxAttackDurationMinutes { get; set; } = 30;
+
+        // 🌐 Network Interface Selection (Persistence)
+        public static string PreferredNetworkInterface { get; set; } = "Microsoft Hyper-V Network Adapter #2";
     }
 }

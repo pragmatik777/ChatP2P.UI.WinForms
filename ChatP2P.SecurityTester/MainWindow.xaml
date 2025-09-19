@@ -85,7 +85,7 @@
 
             <GroupBox Header="🌐 Network Interface" Margin="5" Foreground="White">
                 <StackPanel Orientation="Horizontal">
-                    <ComboBox x:Name="cmbInterfaces" Width="200" Margin="5"/>
+                    <ComboBox x:Name="cmbInterfaces" Width="200" Margin="5" SelectionChanged="CmbInterfaces_SelectionChanged"/>
                     <Button x:Name="btnRefreshInterfaces" Content="🔄" Click="BtnRefreshInterfaces_Click"
                             Background="#007ACC" Foreground="White" Margin="5"/>
                 </StackPanel>
@@ -343,6 +343,10 @@
                                         Background="#17a2b8" Foreground="White" Margin="5"/>
                                 <Button x:Name="btnRestoreNormal" Content="🔄 Restore Normal Mode" Click="BtnRestoreNormal_Click"
                                         Background="#dc3545" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnClearPortLog" Content="🗑️ Clear Port Log" Click="BtnClearPortLog_Click"
+                                        Background="#6c757d" Foreground="White" Margin="5"/>
+                                <Button x:Name="btnExportPortLog" Content="💾 Export Port Log" Click="BtnExportPortLog_Click"
+                                        Background="#28a745" Foreground="White" Margin="5"/>
                             </StackPanel>
 
                             <TextBlock Text="⚠️ LOGIC: ARP spoofs target → traffic to TargetIP gets redirected to AttackerIP"
@@ -363,7 +367,24 @@
         </TabControl>
 
         <!-- Status Log -->
-        <GroupBox Grid.Row="2" Header="📋 Attack Log" Margin="10" Foreground="White">
+        <GroupBox Grid.Row="2" Margin="10" Foreground="White">
+            <GroupBox.Header>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="📋 Attack Log" Foreground="White" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button x:Name="btnExportLogs" Content="💾 Export Logs"
+                                Click="BtnExportLogs_Click" Background="#28a745" Foreground="White"
+                                Padding="8,4" Margin="0,0,5,0" FontSize="11"/>
+                        <Button x:Name="btnClearLogs" Content="🗑️ Clear Logs"
+                                Click="BtnClearLogs_Click" Background="#dc3545" Foreground="White"
+                                Padding="8,4" FontSize="11"/>
+                    </StackPanel>
+                </Grid>
+            </GroupBox.Header>
             <ScrollViewer>
                 <TextBox x:Name="txtGlobalLog" Background="#3c3c3c" Foreground="White"
                          IsReadOnly="True" FontFamily="Consolas" TextWrapping="Wrap"/>

@@ -1,6 +1,9 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
 using System.Net;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using ChatP2P.SecurityTester.Core;
@@ -108,7 +111,7 @@ namespace ChatP2P.SecurityTester
                 // 🎯 Use SecurityTesterConfig values instead of hardcoded IPs
                 var targetIP = SecurityTesterConfig.RelayServerIP; // Real relay server from config
                 var targetPort = 8889; // Port du vrai relay server
-                var listenPort = 8890; // Port d'écoute local TCPProxy (évite conflit portproxy)
+                var listenPort = 8889; // Port d'écoute local TCPProxy (ARP spoofing direct)
 
                 AppendLog($"🔗 [TCP-PROXY] Starting proxy: localhost:{listenPort} → {targetIP}:{targetPort}");
                 AppendLog($"📋 [TCP-PROXY] Using Relay IP from config: {targetIP}");
@@ -144,9 +147,20 @@ namespace ChatP2P.SecurityTester
             {
                 var interfaces = _packetCapture?.GetAvailableInterfaces() ?? new System.Collections.Generic.List<string>();
                 cmbInterfaces.ItemsSource = interfaces;
-                if (interfaces.Count > 0)
+
+                // 🎯 Restore preferred interface from config
+                var preferredInterface = SecurityTesterConfig.PreferredNetworkInterface;
+                var foundIndex = interfaces.ToList().FindIndex(i => i.Contains(preferredInterface));
+
+                if (foundIndex >= 0)
+                {
+                    cmbInterfaces.SelectedIndex = foundIndex;
+                    AppendLog($"✅ Restored preferred interface: {preferredInterface}");
+                }
+                else if (interfaces.Count > 0)
                 {
                     cmbInterfaces.SelectedIndex = 0;
+                    AppendLog($"⚠️ Preferred interface '{preferredInterface}' not found, using default");
                 }
             }
             catch (Exception ex)
@@ -248,6 +262,26 @@ namespace ChatP2P.SecurityTester
         {
             RefreshNetworkInterfaces();
             AppendLog("🔄 Network interfaces refreshed");
+        }
+
+        // 🌐 Network Interface Selection Event
+        private void CmbInterfaces_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            try
+            {
+                var selectedInterface = cmbInterfaces.SelectedItem?.ToString();
+                if (!string.IsNullOrEmpty(selectedInterface))
+                {
+                    // 💾 Save selected interface to config for persistence
+                    SecurityTesterConfig.PreferredNetworkInterface = selectedInterface;
+                    AppendLog($"📡 Interface selected: {selectedInterface}");
+                    AppendLog($"💾 Interface preference saved for next startup");
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"❌ Error saving interface selection: {ex.Message}");
+            }
         }
 
         // Packet Capture Events
@@ -451,12 +485,8 @@ namespace ChatP2P.SecurityTester
                 var targetIP = txtTargetClientIP.Text.Trim();
                 var relayServerIP = txtRelayServerIP.Text.Trim();
 
-                // 🚀 STEP 1: Start TCP Proxy for MITM relay interception
-                AppendScenarioLog("🔗 [STEP 1] Starting TCP Proxy for relay interception...");
-                await StartTCPProxy();
-
-                // 🚀 STEP 2: Start Complete Attack Scenario
-                AppendScenarioLog("🎯 [STEP 2] Starting complete attack scenario...");
+                // 🚀 DIRECT: Start Complete Attack Scenario (gère tous les proxies en interne)
+                AppendScenarioLog("🎯 Starting complete attack scenario...");
                 var success = await _completeScenario?.StartCompleteAttack(targetIP, relayServerIP)!;
 
                 if (success)
@@ -776,14 +806,14 @@ namespace ChatP2P.SecurityTester
                     AppendPortForwardingLog($"🌐 Standard proxy: {listenPort} → {connectIP}");
                 }
 
-                // 🎯 MITM SPECIAL CASE: Port 8889 redirects to TCPProxy on port 8890
-                var connectPort = (listenPort == "8889") ? "8890" : listenPort;
+                // 🎯 DIRECT PORT MAPPING: pas de redirection complexe
+                var connectPort = listenPort;
 
                 AppendPortForwardingLog($"➕ Adding transparent proxy: 0.0.0.0:{listenPort} → {targetIP}:{connectPort}");
                 AppendPortForwardingLog($"   📡 ARP spoofed traffic will be captured on any interface and proxied to {targetIP}");
                 if (listenPort == "8889")
                 {
-                    AppendPortForwardingLog($"   🕷️ MITM: Port 8889 → TCPProxy(8890) for key substitution attacks");
+                    AppendPortForwardingLog($"   🕷️ MITM: Port 8889 → TCPProxy DIRECT for key substitution attacks");
                 }
 
                 var command = $"netsh interface portproxy add v4tov4 listenport={listenPort} listenaddress=0.0.0.0 connectport={connectPort} connectaddress={targetIP}";
@@ -1375,6 +1405,87 @@ namespace ChatP2P.SecurityTester
             catch
             {
                 return false;
+            }
+        }
+
+        // Clear Logs Methods
+        private void BtnClearLogs_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                txtGlobalLog.Clear();
+                AppendLog("📋 Logs cleared");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"❌ Error clearing logs: {ex.Message}");
+            }
+        }
+
+        private void BtnClearPortLog_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                txtPortForwardingLog.Clear();
+                AppendPortForwardingLog("📋 Port forwarding logs cleared");
+            }
+            catch (Exception ex)
+            {
+                AppendPortForwardingLog($"❌ Error clearing port logs: {ex.Message}");
+            }
+        }
+
+        private void BtnExportLogs_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                string logsFolder = Path.Combine(desktopPath, "SecurityTester_Logs");
+                Directory.CreateDirectory(logsFolder);
+
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+                string fileName = $"attack_logs_{timestamp}.txt";
+                string filePath = Path.Combine(logsFolder, fileName);
+
+                string logContent = txtGlobalLog.Text;
+                File.WriteAllText(filePath, logContent, Encoding.UTF8);
+
+                AppendLog($"💾 Logs exported to: {filePath}");
+                AppendLog($"📁 File size: {new FileInfo(filePath).Length} bytes");
+
+                // Ouvrir le dossier dans l'explorateur
+                Process.Start("explorer.exe", logsFolder);
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"❌ Error exporting logs: {ex.Message}");
+            }
+        }
+
+        private void BtnExportPortLog_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                string logsFolder = Path.Combine(desktopPath, "SecurityTester_Logs");
+                Directory.CreateDirectory(logsFolder);
+
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+                string fileName = $"port_logs_{timestamp}.txt";
+                string filePath = Path.Combine(logsFolder, fileName);
+
+                string logContent = txtPortForwardingLog.Text;
+                File.WriteAllText(filePath, logContent, Encoding.UTF8);
+
+                AppendPortForwardingLog($"💾 Port logs exported to: {filePath}");
+                AppendPortForwardingLog($"📁 File size: {new FileInfo(filePath).Length} bytes");
+
+                // Ouvrir le dossier dans l'explorateur
+                Process.Start("explorer.exe", logsFolder);
+            }
+            catch (Exception ex)
+            {
+                AppendPortForwardingLog($"❌ Error exporting port logs: {ex.Message}");
             }
         }
     }

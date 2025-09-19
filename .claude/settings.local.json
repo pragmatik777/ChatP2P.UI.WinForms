@@ -30,7 +30,9 @@
       "Bash(del Settings.Designer.cs)",
       "Bash(taskkill:*)",
       "Bash(Stop-Process -Name \"ChatP2P.Server\" -Force)",
-      "Bash(wmic process where:*)"
+      "Bash(wmic process where:*)",
+      "WebFetch(domain:stackoverflow.com)",
+      "Bash(del:*)"
     ],
     "deny": [],
     "ask": []

