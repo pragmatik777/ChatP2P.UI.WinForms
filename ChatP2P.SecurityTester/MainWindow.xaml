@@ -248,6 +248,8 @@
                                     Click="BtnStartRealisticScenario_Click" Background="#dc3545" Foreground="White" Margin="5"/>
                             <Button x:Name="btnStopScenario" Content="⏹️ Stop Scenario"
                                     Click="BtnStopScenario_Click" Background="#6c757d" Foreground="White" Margin="5"/>
+                            <Button x:Name="btnWinDivertLogs" Content="🕷️ WinDivert Logs"
+                                    Click="BtnWinDivertLogs_Click" Background="#17a2b8" Foreground="White" Margin="5"/>
                             <TextBlock x:Name="txtScenarioStatus" Text="Status: Ready"
                                        Foreground="White" VerticalAlignment="Center" Margin="10"/>
                         </StackPanel>

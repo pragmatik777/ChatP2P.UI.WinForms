@@ -91,6 +91,7 @@ namespace ChatP2P.SecurityTester
             // 📋 Auto-populate Port Forwarding fields with intelligent defaults
             txtTargetIP.Text = SecurityTesterConfig.TargetClientIP;   // For ARP spoofing target
             txtConnectIP.Text = SecurityTesterConfig.RelayServerIP;   // For MITM attacks, connect to real relay
+            SetAttackerIPAddress(SecurityTesterConfig.AttackerIP);
 
             AppendLog("📋 UI initialized with SecurityTesterConfig defaults");
             AppendLog($"   📍 Target Client: {SecurityTesterConfig.TargetClientIP}");
@@ -102,6 +103,7 @@ namespace ChatP2P.SecurityTester
         {
             SecurityTesterConfig.TargetClientIP = txtTargetClientIP.Text.Trim();
             SecurityTesterConfig.RelayServerIP = txtRelayServerIP.Text.Trim();
+            SecurityTesterConfig.AttackerIP = txtAttackerIP.Text.Trim();
         }
 
         private async Task StartTCPProxy()
@@ -487,7 +489,8 @@ namespace ChatP2P.SecurityTester
 
                 // 🚀 DIRECT: Start Complete Attack Scenario (gère tous les proxies en interne)
                 AppendScenarioLog("🎯 Starting complete attack scenario...");
-                var success = await _completeScenario?.StartCompleteAttack(targetIP, relayServerIP)!;
+                var gatewayIP = "192.168.1.1"; // Default gateway - could be made configurable
+                var success = await _completeScenario?.StartCompleteAttack(targetIP, relayServerIP, gatewayIP)!;
 
                 if (success)
                 {
@@ -518,6 +521,38 @@ namespace ChatP2P.SecurityTester
             catch (Exception ex)
             {
                 AppendScenarioLog($"❌ Error stopping scenario: {ex.Message}");
+            }
+        }
+
+        private void BtnWinDivertLogs_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var relayServerIP = txtRelayServerIP.Text.Trim();
+                var attackerIP = txtAttackerIP.Text.Trim();
+
+                if (string.IsNullOrEmpty(relayServerIP))
+                {
+                    AppendScenarioLog("❌ Please set Relay Server IP first");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(attackerIP))
+                {
+                    AppendScenarioLog("❌ Please set Attacker IP first");
+                    return;
+                }
+
+                // Ouvrir la fenêtre de logs WinDivert
+                var winDivertLogWindow = new Windows.WinDivertLogWindow();
+                winDivertLogWindow.SetConfiguration(relayServerIP, attackerIP);
+                winDivertLogWindow.Show();
+
+                AppendScenarioLog("🕷️ WinDivert log window opened");
+            }
+            catch (Exception ex)
+            {
+                AppendScenarioLog($"❌ Error opening WinDivert logs: {ex.Message}");
             }
         }
 
@@ -700,7 +735,7 @@ namespace ChatP2P.SecurityTester
                 if (string.IsNullOrEmpty(attackerIP))
                 {
                     attackerIP = await GetLocalIPAddress();
-                    txtAttackerIP.Text = attackerIP;
+                    SetAttackerIPAddress(attackerIP);
                 }
 
                 var gatewayIP = await GetGatewayIP();
@@ -905,7 +940,7 @@ namespace ChatP2P.SecurityTester
                 if (string.IsNullOrEmpty(attackerIP))
                 {
                     attackerIP = await GetLocalIPAddress();
-                    txtAttackerIP.Text = attackerIP;
+                    SetAttackerIPAddress(attackerIP);
                 }
 
                 AppendPortForwardingLog($"📋 Current Configuration:");
@@ -1057,7 +1092,7 @@ namespace ChatP2P.SecurityTester
                 if (string.IsNullOrEmpty(attackerIP))
                 {
                     attackerIP = await GetLocalIPAddress();
-                    txtAttackerIP.Text = attackerIP;
+                    SetAttackerIPAddress(attackerIP);
                 }
 
                 AppendPortForwardingLog($"🔄 Setting up ARP spoofing transparent proxy...");
@@ -1102,7 +1137,7 @@ namespace ChatP2P.SecurityTester
                 if (string.IsNullOrEmpty(attackerIP))
                 {
                     attackerIP = await GetLocalIPAddress();
-                    txtAttackerIP.Text = attackerIP;
+                    SetAttackerIPAddress(attackerIP);
                 }
 
                 AppendPortForwardingLog("🚫 Removing transparent proxy routing...");
@@ -1268,6 +1303,25 @@ namespace ChatP2P.SecurityTester
             AppendLog($"[PORT-FWD] {message}");
         }
 
+        private void SetAttackerIPAddress(string attackerIP)
+        {
+            if (string.IsNullOrWhiteSpace(attackerIP))
+            {
+                return;
+            }
+
+            SecurityTesterConfig.AttackerIP = attackerIP;
+
+            if (Dispatcher.CheckAccess())
+            {
+                txtAttackerIP.Text = attackerIP;
+            }
+            else
+            {
+                Dispatcher.BeginInvoke(() => txtAttackerIP.Text = attackerIP);
+            }
+        }
+
         private async void BtnDetectAttackerIP_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -1288,12 +1342,7 @@ namespace ChatP2P.SecurityTester
                 var attackerIP = await GetLocalIPAddress();
                 if (!string.IsNullOrEmpty(attackerIP))
                 {
-                    // Update UI on main thread
-                    Dispatcher.BeginInvoke(() =>
-                    {
-                        txtAttackerIP.Text = attackerIP;
-                    });
-
+                    SetAttackerIPAddress(attackerIP);
                     AppendPortForwardingLog($"✅ Attacker IP detected: {attackerIP}");
                 }
                 else

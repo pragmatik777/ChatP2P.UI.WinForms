@@ -32,7 +32,11 @@
       "Bash(Stop-Process -Name \"ChatP2P.Server\" -Force)",
       "Bash(wmic process where:*)",
       "WebFetch(domain:stackoverflow.com)",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "Bash(dotnet add:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(move:*)",
+      "WebFetch(domain:reqrypt.org)"
     ],
     "deny": [],
     "ask": []
