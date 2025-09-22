@@ -17,6 +17,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 // ✅ REMOVED: VB.NET ChatP2P.Crypto - using C# CryptoService directly
+using ChatP2P.Client.Services;
 
 namespace ChatP2P.Client
 {
@@ -62,6 +63,16 @@ namespace ChatP2P.Client
 
         // ✅ NOUVEAU: WebRTC décentralisé pour connexions P2P directes
         private WebRTCDirectClient? _webrtcClient;
+
+        // 🎥 NOUVEAU: Services VOIP/Vidéo
+        private VOIPCallManager? _voipManager;
+        private SimpleWebRTCMediaClient? _mediaClient;
+        private SimpleAudioCaptureService? _audioCapture;
+        private SimpleVideoCaptureService? _videoCapture;
+        private DispatcherTimer? _callDurationTimer;
+        private DateTime _callStartTime;
+        private bool _isAudioMuted = false;
+        private bool _isVideoMuted = false;
 
         // Variables manquantes pour architecture client/serveur
         private string _clientId = Environment.MachineName; // Default client ID
@@ -206,13 +217,24 @@ namespace ChatP2P.Client
                 await ConnectToServer();
                 await RefreshAll();
             }
+
+            // 🎥 NOUVEAU: Initialiser VOIP après que tout soit prêt
+            InitializeVOIPServices();
+
+            // Initialiser l'état des boutons VOIP
+            InitializeVOIPButtonsState();
         }
 
         private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
             _refreshTimer?.Stop();
+            _callDurationTimer?.Stop(); // 🎥 NOUVEAU: Arrêter timer VOIP
             SaveSettings();
             await DisconnectFromServer();
+
+            // 🎥 NOUVEAU: Nettoyer les services VOIP
+            _voipManager?.Dispose();
+            _mediaClient?.Dispose();
         }
 
         // ===== RelayClient Management =====
@@ -362,6 +384,123 @@ namespace ChatP2P.Client
             catch (Exception ex)
             {
                 _ = LogToFile($"[INIT] Error initializing WebRTC client: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 🎥 NOUVEAU: Initialiser les services VOIP/Vidéo
+        /// </summary>
+        private void InitializeVOIPServices()
+        {
+            try
+            {
+                // Nettoyer les services existants
+                _voipManager?.Dispose();
+                _mediaClient?.Dispose();
+
+                // Créer les nouveaux services
+                if (_webrtcClient != null)
+                {
+                    // 🔧 FIX CRITIQUE: Utiliser displayName au lieu de _clientId (hostname) pour VOIP signaling
+                    var displayName = txtDisplayName?.Text?.Trim() ?? Environment.UserName;
+                    _voipManager = new VOIPCallManager(displayName, _webrtcClient);
+                    _mediaClient = new SimpleWebRTCMediaClient(displayName);
+
+                    // 🎬 NOUVEAU: Initialiser les services de capture
+                    _audioCapture = new SimpleAudioCaptureService();
+                    _videoCapture = new SimpleVideoCaptureService();
+
+                    // Event handlers pour VOIP Manager
+                    _voipManager.CallStateChanged += OnCallStateChanged;
+                    _voipManager.IncomingCallReceived += OnIncomingCallReceived;
+                    _voipManager.SendVOIPSignal += SendWebRTCSignal; // ✅ NOUVEAU: Connecter signaling VOIP
+
+                    // ✅ FIX CRITIQUE: Se connecter automatiquement au VOIP relay au démarrage
+                    // Cela permet à VM2 de recevoir les appels entrants même si WebRTC signaling échoue
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await LogToFile($"🔄 [VOIP-INIT] Connecting to VOIP relay at startup...");
+                            var connected = await _voipManager.EnsureRelayConnectionForIncomingCallAsync();
+                            if (connected)
+                            {
+                                await LogToFile($"✅ [VOIP-INIT] Successfully connected to VOIP relay at startup");
+                            }
+                            else
+                            {
+                                await LogToFile($"⚠️ [VOIP-INIT] Could not connect to VOIP relay at startup");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await LogToFile($"❌ [VOIP-INIT] Error connecting to VOIP relay at startup: {ex.Message}");
+                        }
+                    });
+                    // Note: Events compatibles à implémenter
+                    _voipManager.LogEvent += (msg) => _ = LogToFile($"[VOIP] {msg}");
+
+                    // Event handlers pour Capture Services
+                    _audioCapture.LogEvent += (msg) => _ = LogToFile($"[AUDIO] {msg}");
+                    _videoCapture.LogEvent += (msg) => _ = LogToFile($"[VIDEO] {msg}");
+
+                    // Event handlers pour Media Client
+                    _mediaClient.MediaConnectionChanged += OnMediaConnectionChanged;
+                    _mediaClient.ICECandidateGenerated += OnMediaICECandidateGenerated;
+                    _mediaClient.RemoteAudioReceived += OnRemoteAudioReceived;
+                    _mediaClient.RemoteVideoReceived += OnRemoteVideoReceived;
+                    _mediaClient.LogEvent += (msg) => _ = LogToFile($"[MEDIA] {msg}");
+
+                    // Initialiser le timer de durée d'appel
+                    _callDurationTimer = new DispatcherTimer
+                    {
+                        Interval = TimeSpan.FromSeconds(1)
+                    };
+                    _callDurationTimer.Tick += UpdateCallDuration;
+
+                    _ = LogToFile($"[VOIP-INIT] VOIP services initialized for {_clientId}");
+                }
+                else
+                {
+                    _ = LogToFile($"[VOIP-INIT] ❌ Cannot initialize VOIP without WebRTC client");
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[VOIP-INIT] ❌ Error initializing VOIP services: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 🎥 NOUVEAU: Initialiser l'état des boutons VOIP
+        /// </summary>
+        private void InitializeVOIPButtonsState()
+        {
+            try
+            {
+                // S'assurer que les boutons sont visibles mais désactivés au démarrage
+                btnAudioCall.Visibility = Visibility.Visible;
+                btnVideoCall.Visibility = Visibility.Visible;
+                btnEndCall.Visibility = Visibility.Collapsed;
+
+                // État initial : désactivés avec couleur grise et tooltip informatif
+                btnAudioCall.IsEnabled = false;
+                btnVideoCall.IsEnabled = false;
+                btnAudioCall.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF666666"));
+                btnVideoCall.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF666666"));
+
+                btnAudioCall.ToolTip = "Select a chat first to make calls";
+                btnVideoCall.ToolTip = "Select a chat first to make calls";
+
+                // État initial du status VOIP
+                lblVOIPStatus.Text = "📞: ❌";
+                lblVOIPStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFFF6B6B"));
+
+                _ = LogToFile("[VOIP-UI] VOIP buttons initialized and visible");
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[VOIP-UI] ❌ Error initializing VOIP buttons: {ex.Message}");
             }
         }
 
@@ -1274,6 +1413,22 @@ namespace ChatP2P.Client
                         var success = await _webrtcClient.ProcessCandidateAsync(fromPeer, iceData);
                         await LogToFile($"✅ [WebRTC-DIRECT] Candidate processed: {success}");
                     }
+                    // ✅ NOUVEAU: Traitement des signaux VOIP
+                    else if (iceType.ToLower() == "call_invite" && toPeer == _clientId)
+                    {
+                        await LogToFile($"📞 [VOIP-SIGNAL] Incoming call invite from {fromPeer}");
+                        await HandleIncomingCallInvite(fromPeer, iceData);
+                    }
+                    else if (iceType.ToLower() == "call_accept" && toPeer == _clientId)
+                    {
+                        await LogToFile($"📞 [VOIP-SIGNAL] Call accepted by {fromPeer}");
+                        await HandleCallAccepted(fromPeer, iceData);
+                    }
+                    else if (iceType.ToLower() == "call_end" && toPeer == _clientId)
+                    {
+                        await LogToFile($"📞 [VOIP-SIGNAL] Call ended by {fromPeer}");
+                        await HandleCallEnded(fromPeer, iceData);
+                    }
                     else
                     {
                         await LogToFile($"⏭️ [WebRTC-DIRECT] Signal not for me ({toPeer} != {_clientId}) or unknown type: {iceType}");
@@ -1290,6 +1445,172 @@ namespace ChatP2P.Client
             {
                 await LogToFile($"❌ [WEBRTC-SIGNAL] Error processing signal: {ex.Message}");
                 Console.WriteLine($"❌ [WEBRTC-SIGNAL] Error processing signal: {ex.Message}");
+            }
+        }
+
+        // ===== 📞 NOUVEAU: VOIP SIGNAL HANDLERS =====
+
+        /// <summary>
+        /// Traiter une invitation d'appel entrant
+        /// </summary>
+        private async Task HandleIncomingCallInvite(string fromPeer, string inviteData)
+        {
+            try
+            {
+                await LogToFile($"📞 [VOIP-INVITE] Processing call invite from {fromPeer}");
+
+                // Parser les données d'invitation
+                var invite = JsonSerializer.Deserialize<JsonElement>(inviteData);
+                var callType = invite.GetProperty("callType").GetString() ?? "audio";
+                var offer = invite.GetProperty("offer").GetString() ?? "";
+
+                if (string.IsNullOrEmpty(offer))
+                {
+                    await LogToFile($"❌ [VOIP-INVITE] Invalid offer in invite from {fromPeer}");
+                    return;
+                }
+
+                // ✅ FIX CRITIQUE: Se connecter au VOIP relay dès réception de l'appel
+                // Cela permet au serveur de savoir que VM2 est disponible pour le relay
+                if (_voipManager != null)
+                {
+                    await LogToFile($"🔄 [VOIP-INVITE] Pre-connecting to VOIP relay for incoming call from {fromPeer}");
+                    try
+                    {
+                        var connected = await _voipManager.EnsureRelayConnectionForIncomingCallAsync();
+                        if (connected)
+                        {
+                            await LogToFile($"✅ [VOIP-INVITE] Connected to VOIP relay for incoming call");
+                        }
+                        else
+                        {
+                            await LogToFile($"⚠️ [VOIP-INVITE] Could not connect to VOIP relay");
+                        }
+                    }
+                    catch (Exception relayEx)
+                    {
+                        await LogToFile($"⚠️ [VOIP-INVITE] Error pre-connecting to VOIP relay: {relayEx.Message}");
+                    }
+                }
+
+                // Afficher la notification d'appel entrant sur l'UI thread
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    var isVideo = callType.ToLower() == "video";
+                    var callTypeText = isVideo ? "vidéo" : "audio";
+
+                    var result = MessageBox.Show(
+                        $"Appel {callTypeText} entrant de {fromPeer}\n\nAccepter l'appel ?",
+                        "Appel entrant",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question
+                    );
+
+                    if (result == MessageBoxResult.Yes)
+                    {
+                        await LogToFile($"📞 [VOIP-INVITE] User accepted call from {fromPeer}");
+
+                        // Accepter l'appel via le VOIPCallManager
+                        if (_voipManager != null)
+                        {
+                            var success = await _voipManager.AcceptCallAsync(fromPeer, callType, offer);
+                            if (success)
+                            {
+                                await LogToFile($"✅ [VOIP-INVITE] Call accepted successfully");
+                            }
+                            else
+                            {
+                                await LogToFile($"❌ [VOIP-INVITE] Failed to accept call");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        await LogToFile($"📞 [VOIP-INVITE] User declined call from {fromPeer}");
+                        // TODO: Envoyer signal de refus
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [VOIP-INVITE] Error handling invite: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Traiter l'acceptation d'un appel sortant
+        /// </summary>
+        private async Task HandleCallAccepted(string fromPeer, string acceptData)
+        {
+            try
+            {
+                await LogToFile($"📞 [VOIP-ACCEPT] Processing call acceptance from {fromPeer}");
+
+                // Parser les données d'acceptation
+                var accept = JsonSerializer.Deserialize<JsonElement>(acceptData);
+                var callType = accept.GetProperty("callType").GetString() ?? "audio";
+                var answer = accept.GetProperty("answer").GetString() ?? "";
+
+                if (string.IsNullOrEmpty(answer))
+                {
+                    await LogToFile($"❌ [VOIP-ACCEPT] Invalid answer from {fromPeer}");
+                    return;
+                }
+
+                // Traiter l'answer WebRTC
+                if (_webrtcClient != null)
+                {
+                    var success = await _webrtcClient.ProcessOfferAsync(fromPeer, answer);
+                    if (success != null)
+                    {
+                        await LogToFile($"✅ [VOIP-ACCEPT] Call established with {fromPeer}");
+
+                        // Mettre à jour l'état d'appel
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            if (_voipManager != null)
+                            {
+                                // TODO: Notifier VOIPCallManager que l'appel est connecté
+                                UpdateVOIPUI(fromPeer, $"📞: Connecté ({callType})", "#FF0D7377", true);
+                            }
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [VOIP-ACCEPT] Error handling acceptance: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Traiter la fin d'un appel
+        /// </summary>
+        private async Task HandleCallEnded(string fromPeer, string endData)
+        {
+            try
+            {
+                await LogToFile($"📞 [VOIP-END] Processing call end from {fromPeer}");
+
+                // Parser les données de fin
+                var end = JsonSerializer.Deserialize<JsonElement>(endData);
+                var reason = end.GetProperty("reason").GetString() ?? "unknown";
+
+                // Terminer l'appel
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    if (_voipManager != null)
+                    {
+                        await _voipManager.EndCallAsync(fromPeer);
+                        UpdateVOIPUI(fromPeer, "📞: Terminé", "#FF666666", false);
+                    }
+                });
+
+                await LogToFile($"✅ [VOIP-END] Call ended with {fromPeer}, reason: {reason}");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"❌ [VOIP-END] Error handling call end: {ex.Message}");
             }
         }
 
@@ -2486,8 +2807,38 @@ namespace ChatP2P.Client
             {
                 _currentChatSession = session;
                 _currentPeer = session.PeerName;
+                await LogToFile($"[VOIP-DIAG] Chat session selected: {session.PeerName}");
 
                 LoadChatForSession(session);
+
+                // 🎥 NOUVEAU: Activer les boutons VOIP pour le peer sélectionné
+                var isCallActive = _voipManager?.IsCallActive(session.PeerName) ?? false;
+                var canCall = !isCallActive;
+
+                btnAudioCall.IsEnabled = canCall;
+                btnVideoCall.IsEnabled = canCall;
+                btnEndCall.Visibility = isCallActive ? Visibility.Visible : Visibility.Collapsed;
+
+                // Changer la couleur des boutons selon l'état
+                var buttonColor = canCall ? "#FF0D7377" : "#FF666666";
+                btnAudioCall.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(buttonColor));
+                btnVideoCall.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(buttonColor));
+
+                // Mettre à jour les tooltips
+                btnAudioCall.ToolTip = canCall ? $"Start audio call with {session.PeerName}" : "Call in progress";
+                btnVideoCall.ToolTip = canCall ? $"Start video call with {session.PeerName}" : "Call in progress";
+
+                // Mettre à jour le status VOIP
+                if (isCallActive)
+                {
+                    lblVOIPStatus.Text = "📞: ✅";
+                    lblVOIPStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF4CAF50"));
+                }
+                else
+                {
+                    lblVOIPStatus.Text = "📞: Ready";
+                    lblVOIPStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF0D7377"));
+                }
 
                 // Mark as read when opening from history
                 if (session.UnreadCount > 0)
@@ -2632,6 +2983,254 @@ namespace ChatP2P.Client
         {
             // TODO: Cancel file transfer
             fileTransferBorder.Visibility = Visibility.Collapsed;
+        }
+
+        // 🎥 NOUVEAU: Gestionnaires de boutons VOIP/Vidéo
+
+        private async void BtnAudioCall_Click(object sender, RoutedEventArgs e)
+        {
+            // 🔍 DIAGNOSTIC: Vérifier les conditions détaillées
+            await LogToFile($"[VOIP-DIAG] Audio call button clicked");
+            await LogToFile($"[VOIP-DIAG] _currentChatSession: {(_currentChatSession != null ? _currentChatSession.PeerName : "NULL")}");
+            await LogToFile($"[VOIP-DIAG] _voipManager: {(_voipManager != null ? "INITIALIZED" : "NULL")}");
+            await LogToFile($"[VOIP-DIAG] _webrtcClient: {(_webrtcClient != null ? "INITIALIZED" : "NULL")}");
+
+            if (_currentChatSession == null)
+            {
+                MessageBox.Show("No chat session selected. Please select a chat first.", "No Chat Selected", MessageBoxButton.OK, MessageBoxImage.Warning);
+                await LogToFile("[VOIP-DIAG] ❌ Audio call failed: No chat session selected");
+                return;
+            }
+
+            if (_voipManager == null)
+            {
+                MessageBox.Show("VOIP services not ready. Please wait for initialization to complete.", "VOIP Not Ready", MessageBoxButton.OK, MessageBoxImage.Warning);
+                await LogToFile("[VOIP-DIAG] ❌ Audio call failed: VOIP manager not initialized");
+                return;
+            }
+
+            try
+            {
+                await LogToFile($"[VOIP-UI] Starting audio call to {_currentChatSession.PeerName}");
+                var success = await _voipManager.StartAudioCallAsync(_currentChatSession.PeerName);
+
+                if (!success)
+                {
+                    MessageBox.Show("Failed to start audio call. Please check your microphone and try again.", "Audio Call Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-UI] ❌ Error starting audio call: {ex.Message}");
+                MessageBox.Show($"Error starting audio call: {ex.Message}", "Audio Call Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void BtnVideoCall_Click(object sender, RoutedEventArgs e)
+        {
+            if (_currentChatSession == null || _voipManager == null)
+            {
+                MessageBox.Show("No chat selected or VOIP services not ready.", "Video Call", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            try
+            {
+                await LogToFile($"[VOIP-UI] Starting video call to {_currentChatSession.PeerName}");
+                var success = await _voipManager.StartVideoCallAsync(_currentChatSession.PeerName);
+
+                if (!success)
+                {
+                    MessageBox.Show("Failed to start video call. Please check your camera and microphone and try again.", "Video Call Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-UI] ❌ Error starting video call: {ex.Message}");
+                MessageBox.Show($"Error starting video call: {ex.Message}", "Video Call Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void BtnEndCall_Click(object sender, RoutedEventArgs e)
+        {
+            if (_currentChatSession == null || _voipManager == null)
+                return;
+
+            try
+            {
+                await LogToFile($"[VOIP-UI] Ending call with {_currentChatSession.PeerName}");
+                await _voipManager.EndCallAsync(_currentChatSession.PeerName);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-UI] ❌ Error ending call: {ex.Message}");
+            }
+        }
+
+        private async void BtnMuteAudio_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _isAudioMuted = !_isAudioMuted;
+                btnMuteAudio.Content = _isAudioMuted ? "🔇" : "🔊";
+                btnMuteAudio.ToolTip = _isAudioMuted ? "Unmute audio" : "Mute audio";
+
+                await LogToFile($"[VOIP-UI] Audio {(_isAudioMuted ? "muted" : "unmuted")}");
+                // TODO: Implémenter le mute/unmute dans AudioCaptureService
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-UI] ❌ Error toggling audio mute: {ex.Message}");
+            }
+        }
+
+        private async void BtnMuteVideo_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _isVideoMuted = !_isVideoMuted;
+                btnMuteVideo.Content = _isVideoMuted ? "📷" : "📹";
+                btnMuteVideo.ToolTip = _isVideoMuted ? "Enable video" : "Disable video";
+
+                await LogToFile($"[VOIP-UI] Video {(_isVideoMuted ? "disabled" : "enabled")}");
+                // TODO: Implémenter l'enable/disable dans VideoCaptureService
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-UI] ❌ Error toggling video mute: {ex.Message}");
+            }
+        }
+
+        // 🎬 NOUVEAU: Gestionnaires de boutons test VOIP
+
+        private async void BtnTestAudioFile_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var openFileDialog = new Microsoft.Win32.OpenFileDialog()
+                {
+                    Title = "Select Audio File for Testing",
+                    Filter = "Audio Files|*.wav;*.mp3;*.wma|WAV Files|*.wav|MP3 Files|*.mp3|All Files|*.*",
+                    DefaultExt = ".wav"
+                };
+
+                if (openFileDialog.ShowDialog() == true)
+                {
+                    var audioFile = openFileDialog.FileName;
+                    await LogToFile($"[VOIP-TEST] Loading audio file: {audioFile}");
+
+                    if (_audioCapture != null)
+                    {
+                        var success = await _audioCapture.StartAudioFilePlaybackAsync(audioFile);
+                        if (success)
+                        {
+                            lblAudioTestStatus.Text = $"Playing: {Path.GetFileName(audioFile)}";
+                            lblAudioTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF4CAF50"));
+                            btnTestAudioFile.IsEnabled = false;
+                            btnStopAudioTest.IsEnabled = true;
+                            await LogToFile($"[VOIP-TEST] ✅ Audio file playback started");
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to start audio file playback.", "Audio Test", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Audio service not ready.", "Audio Test", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-TEST] ❌ Error loading audio file: {ex.Message}");
+                MessageBox.Show($"Error loading audio file: {ex.Message}", "Audio Test Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void BtnStopAudioTest_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_audioCapture != null)
+                {
+                    await _audioCapture.StopCaptureAsync();
+                    lblAudioTestStatus.Text = "Audio test stopped";
+                    lblAudioTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF888888"));
+                    btnTestAudioFile.IsEnabled = true;
+                    btnStopAudioTest.IsEnabled = false;
+                    await LogToFile("[VOIP-TEST] Audio test stopped");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-TEST] ❌ Error stopping audio test: {ex.Message}");
+            }
+        }
+
+        private async void BtnTestVideoFile_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var openFileDialog = new Microsoft.Win32.OpenFileDialog()
+                {
+                    Title = "Select Video File for Testing",
+                    Filter = "Video Files|*.mp4;*.avi;*.mov;*.wmv|MP4 Files|*.mp4|AVI Files|*.avi|All Files|*.*",
+                    DefaultExt = ".mp4"
+                };
+
+                if (openFileDialog.ShowDialog() == true)
+                {
+                    var videoFile = openFileDialog.FileName;
+                    await LogToFile($"[VOIP-TEST] Loading video file: {videoFile}");
+
+                    if (_videoCapture != null)
+                    {
+                        var success = await _videoCapture.StartVideoFilePlaybackAsync(videoFile);
+                        if (success)
+                        {
+                            lblVideoTestStatus.Text = $"Playing: {Path.GetFileName(videoFile)}";
+                            lblVideoTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF4CAF50"));
+                            btnTestVideoFile.IsEnabled = false;
+                            btnStopVideoTest.IsEnabled = true;
+                            await LogToFile($"[VOIP-TEST] ✅ Video file playback started");
+                        }
+                        else
+                        {
+                            MessageBox.Show("Failed to start video file playback.", "Video Test", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Video service not ready.", "Video Test", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-TEST] ❌ Error loading video file: {ex.Message}");
+                MessageBox.Show($"Error loading video file: {ex.Message}", "Video Test Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void BtnStopVideoTest_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_videoCapture != null)
+                {
+                    await _videoCapture.StopCaptureAsync();
+                    lblVideoTestStatus.Text = "Video test stopped";
+                    lblVideoTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF888888"));
+                    btnTestVideoFile.IsEnabled = true;
+                    btnStopVideoTest.IsEnabled = false;
+                    await LogToFile("[VOIP-TEST] Video test stopped");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-TEST] ❌ Error stopping video test: {ex.Message}");
+            }
         }
 
         private async void BtnSendMessage_Click(object sender, RoutedEventArgs e)
@@ -4720,6 +5319,293 @@ namespace ChatP2P.Client
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ [P2P-LOG] Error processing log message: {ex.Message}");
+            }
+        }
+
+        // 🎥 NOUVEAU: Gestionnaires d'événements VOIP/Vidéo
+
+        private async void OnCallStateChanged(string peer, CallState state)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    _ = LogToFile($"[VOIP-STATE] Call with {peer} changed to {state}");
+
+                    // Mettre à jour l'interface selon l'état de l'appel
+                    switch (state)
+                    {
+                        case CallState.Initiating:
+                        case CallState.Calling:
+                            UpdateVOIPUI(peer, "📞 Calling...", "#FFFF8C42", true);
+                            break;
+
+                        case CallState.Ringing:
+                            UpdateVOIPUI(peer, "📞 Ringing...", "#FF4CAF50", true);
+                            break;
+
+                        case CallState.Connected:
+                            _callStartTime = DateTime.Now;
+                            _callDurationTimer?.Start();
+                            UpdateVOIPUI(peer, "📞 Connected", "#FF4CAF50", true);
+
+                            // 🎥 NOUVEAU: Afficher panel vidéo et démarrer preview local
+                            videoCallPanel.Visibility = Visibility.Visible;
+                            lblCallStatus.Text = "📞 Connected";
+
+                            // Déterminer si c'est un appel vidéo ou audio seulement
+                            var activeCall = _voipManager?.GetCallState(peer);
+                            if (activeCall.HasValue)
+                            {
+                                // Pour l'instant, démarrer la vidéo pour tous les appels connectés
+                                StartLocalVideoPreview();
+                                _ = LogToFile($"[VOIP-STATE] Video panel activated for call with {peer}");
+                            }
+                            break;
+
+                        case CallState.Ended:
+                        case CallState.Failed:
+                            _callDurationTimer?.Stop();
+                            UpdateVOIPUI(peer, "📞: ❌", "#FFFF6B6B", false);
+
+                            // 🎥 NOUVEAU: Cacher panel vidéo et arrêter displays
+                            videoCallPanel.Visibility = Visibility.Collapsed;
+                            StopVideoDisplays();
+
+                            btnEndCall.Visibility = Visibility.Collapsed;
+                            btnAudioCall.IsEnabled = true;
+                            btnVideoCall.IsEnabled = true;
+                            _ = LogToFile($"[VOIP-STATE] Video panel deactivated, call ended with {peer}");
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _ = LogToFile($"[VOIP-STATE] ❌ Error updating call state UI: {ex.Message}");
+                }
+            });
+        }
+
+        private async void OnIncomingCallReceived(string fromPeer, string callType)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    _ = LogToFile($"[VOIP-INCOMING] Incoming {callType} call from {fromPeer}");
+
+                    var result = MessageBox.Show(
+                        $"Incoming {callType} call from {fromPeer}. Accept?",
+                        "Incoming Call",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (result == MessageBoxResult.Yes && _voipManager != null)
+                    {
+                        // ✅ FIX CRITIQUE: Décommenter AcceptCallAsync - pour relay l'offer est optionnel
+                        _ = _voipManager.AcceptCallAsync(fromPeer, callType, "relay_offer");
+                        _ = LogToFile($"[VOIP-INCOMING] Call from {fromPeer} accepted");
+                    }
+                    else
+                    {
+                        _ = LogToFile($"[VOIP-INCOMING] Call from {fromPeer} declined");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _ = LogToFile($"[VOIP-INCOMING] ❌ Error handling incoming call: {ex.Message}");
+                }
+            });
+        }
+
+        private async void OnRemoteAudioReceived(string peer, byte[] audioData)
+        {
+            try
+            {
+                // TODO: Jouer l'audio reçu via un AudioPlayback service
+                await LogToFile($"[VOIP-AUDIO] Received {audioData.Length} bytes audio from {peer}");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-AUDIO] ❌ Error processing remote audio: {ex.Message}");
+            }
+        }
+
+        private async void OnRemoteVideoReceived(string peer, byte[] videoData)
+        {
+            try
+            {
+                await LogToFile($"[VOIP-VIDEO] Received {videoData.Length} bytes video from {peer}");
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        // 🎥 NOUVEAU: Gestion avancée de l'affichage vidéo
+                        if (videoData.Length > 0)
+                        {
+                            // Créer un MemoryStream à partir des données vidéo reçues
+                            using (var stream = new MemoryStream(videoData))
+                            {
+                                // Pour l'instant, afficher le statut que des données sont reçues
+                                lblRemoteVideoStatus.Text = $"📹 Video stream active ({videoData.Length} bytes)";
+
+                                // TODO: Implémenter décodage de frame et affichage dans mediaRemoteVideo
+                                // En attendant l'intégration MediaStreamTrack complète, on masque le texte quand vidéo active
+                                if (mediaRemoteVideo.Visibility == Visibility.Collapsed)
+                                {
+                                    mediaRemoteVideo.Visibility = Visibility.Visible;
+                                    lblRemoteVideoStatus.Visibility = Visibility.Collapsed;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Aucune donnée vidéo - retour au mode texte
+                            mediaRemoteVideo.Visibility = Visibility.Collapsed;
+                            lblRemoteVideoStatus.Visibility = Visibility.Visible;
+                            lblRemoteVideoStatus.Text = $"📹 Connected to {peer} (no video)";
+                        }
+                    }
+                    catch (Exception uiEx)
+                    {
+                        _ = LogToFile($"[VOIP-VIDEO] ❌ Error updating video UI: {uiEx.Message}");
+                        lblRemoteVideoStatus.Text = $"📹 Video error";
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-VIDEO] ❌ Error processing remote video: {ex.Message}");
+            }
+        }
+
+        private async void OnMediaConnectionChanged(string peer, bool connected)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    _ = LogToFile($"[MEDIA-CONN] Media connection with {peer}: {connected}");
+
+                    if (connected)
+                    {
+                        // 🎥 NOUVEAU: Activer les éléments vidéo lors de connexion
+                        lblLocalVideoStatus.Text = "📹 Your video";
+                        lblRemoteVideoStatus.Text = $"📹 Connected to {peer}";
+
+                        // Préparer l'affichage vidéo locale (simulation pour l'instant)
+                        StartLocalVideoPreview();
+                    }
+                    else
+                    {
+                        // 🎥 NOUVEAU: Désactiver les éléments vidéo lors de déconnexion
+                        lblLocalVideoStatus.Text = "📹 Video disconnected";
+                        lblRemoteVideoStatus.Text = "📹 Connecting video...";
+
+                        // Arrêter l'affichage vidéo
+                        StopVideoDisplays();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _ = LogToFile($"[MEDIA-CONN] ❌ Error updating media connection UI: {ex.Message}");
+                }
+            });
+        }
+
+        // 🎥 NOUVEAU: Méthodes de gestion d'affichage vidéo
+        private void StartLocalVideoPreview()
+        {
+            try
+            {
+                // Afficher le MediaElement local (simulation d'une capture caméra)
+                if (mediaLocalVideo.Visibility == Visibility.Collapsed)
+                {
+                    mediaLocalVideo.Visibility = Visibility.Visible;
+                    lblLocalVideoStatus.Visibility = Visibility.Collapsed;
+
+                    // TODO: Connecter vraie capture caméra via VideoCaptureService
+                    _ = LogToFile("[VOIP-VIDEO] Local video preview started (simulated)");
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[VOIP-VIDEO] ❌ Error starting local video preview: {ex.Message}");
+            }
+        }
+
+        private void StopVideoDisplays()
+        {
+            try
+            {
+                // Cacher les MediaElements et revenir aux labels
+                mediaLocalVideo.Visibility = Visibility.Collapsed;
+                mediaRemoteVideo.Visibility = Visibility.Collapsed;
+
+                lblLocalVideoStatus.Visibility = Visibility.Visible;
+                lblRemoteVideoStatus.Visibility = Visibility.Visible;
+
+                _ = LogToFile("[VOIP-VIDEO] Video displays stopped");
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[VOIP-VIDEO] ❌ Error stopping video displays: {ex.Message}");
+            }
+        }
+
+        private async void OnMediaICECandidateGenerated(string fromPeer, string toPeer, string candidate)
+        {
+            try
+            {
+                await LogToFile($"[MEDIA-ICE] Sending media ICE candidate: {fromPeer} → {toPeer}");
+                // TODO: Envoyer le candidat via le système de signaling
+                // await SendWebRTCSignal("media_candidate", fromPeer, toPeer, candidate);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[MEDIA-ICE] ❌ Error sending media ICE candidate: {ex.Message}");
+            }
+        }
+
+        private void UpdateCallDuration(object? sender, EventArgs e)
+        {
+            try
+            {
+                var duration = DateTime.Now - _callStartTime;
+                lblCallDuration.Text = duration.ToString(@"mm\:ss");
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[VOIP-TIMER] ❌ Error updating call duration: {ex.Message}");
+            }
+        }
+
+        private void UpdateVOIPUI(string peer, string status, string color, bool callActive)
+        {
+            try
+            {
+                lblVOIPStatus.Text = status;
+                lblVOIPStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+
+                var canCall = !callActive && _currentChatSession?.PeerName == peer;
+
+                btnAudioCall.IsEnabled = canCall;
+                btnVideoCall.IsEnabled = canCall;
+                btnEndCall.Visibility = callActive ? Visibility.Visible : Visibility.Collapsed;
+
+                // Changer la couleur des boutons selon l'état
+                var buttonColor = canCall ? "#FF0D7377" : "#FF666666";
+                btnAudioCall.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(buttonColor));
+                btnVideoCall.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(buttonColor));
+
+                // Mettre à jour les tooltips
+                btnAudioCall.ToolTip = canCall ? "Start audio call" : "Select a chat first to make calls";
+                btnVideoCall.ToolTip = canCall ? "Start video call" : "Select a chat first to make calls";
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[VOIP-UI] ❌ Error updating VOIP UI: {ex.Message}");
             }
         }
 

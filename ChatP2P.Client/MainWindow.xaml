@@ -105,7 +105,7 @@
                     </GroupBox>
                     
                     <!-- Settings -->
-                    <GroupBox Header="Settings" Grid.Row="1" Margin="0,0,0,20" 
+                    <GroupBox Header="Settings" Grid.Row="1" Margin="0,0,0,20"
                               Foreground="White" BorderBrush="#FF0D7377">
                         <StackPanel Margin="15" Orientation="Horizontal">
                             <CheckBox Name="chkStrictTrust" Content="Strict Trust" Margin="0,0,25,0"
@@ -118,9 +118,46 @@
                                       Foreground="White"/>
                         </StackPanel>
                     </GroupBox>
+
+                    <!-- 🎬 NOUVEAU: VOIP Test Section -->
+                    <GroupBox Header="🎬 VOIP Testing" Grid.Row="2" Margin="0,0,0,20"
+                              Foreground="White" BorderBrush="#FF4ECDC4">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Audio Testing -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                                <Label Content="🎤 Audio Test:" Foreground="White" Width="100" VerticalAlignment="Center"/>
+                                <Button Name="btnTestAudioFile" Content="📁 Load Audio File" Width="120" Height="30"
+                                        Margin="5,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestAudioFile_Click"/>
+                                <Button Name="btnStopAudioTest" Content="🛑 Stop Audio" Width="100" Height="30"
+                                        Margin="5,0" Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnStopAudioTest_Click" IsEnabled="False"/>
+                                <TextBlock Name="lblAudioTestStatus" Text="No test audio" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="10,0"/>
+                            </StackPanel>
+
+                            <!-- Video Testing -->
+                            <StackPanel Grid.Row="1" Orientation="Horizontal">
+                                <Label Content="📹 Video Test:" Foreground="White" Width="100" VerticalAlignment="Center"/>
+                                <Button Name="btnTestVideoFile" Content="📁 Load Video File" Width="120" Height="30"
+                                        Margin="5,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestVideoFile_Click"/>
+                                <Button Name="btnStopVideoTest" Content="🛑 Stop Video" Width="100" Height="30"
+                                        Margin="5,0" Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnStopVideoTest_Click" IsEnabled="False"/>
+                                <TextBlock Name="lblVideoTestStatus" Text="No test video" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="10,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
                     
                     <!-- Status -->
-                    <GroupBox Header="Network Status" Grid.Row="2" Margin="0,0,0,20" 
+                    <GroupBox Header="Network Status" Grid.Row="3" Margin="0,0,0,20"
                               Foreground="White" BorderBrush="#FF0D7377">
                         <Grid Margin="15">
                             <Grid.ColumnDefinitions>
@@ -139,7 +176,7 @@
                     </GroupBox>
                     
                     <!-- Friends List -->
-                    <GroupBox Header="Friends Online" Grid.Row="3" Margin="0,0,0,20" 
+                    <GroupBox Header="Friends Online" Grid.Row="4" Margin="0,0,0,20"
                               Foreground="White" BorderBrush="#FF0D7377">
                         <Grid Margin="15">
                             <Grid.RowDefinitions>
@@ -402,31 +439,122 @@
                                     <TextBlock Name="lblChatPeer" Text="Select a chat..." 
                                                FontSize="16" FontWeight="SemiBold" Foreground="White"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                                        <TextBlock Name="lblP2PStatus" Text="P2P: ❌" Foreground="#FFFF6B6B" 
+                                        <TextBlock Name="lblP2PStatus" Text="P2P: ❌" Foreground="#FFFF6B6B"
                                                    FontSize="11" Margin="0,0,15,0"/>
-                                        <TextBlock Name="lblCryptoStatus" Text="🔒: ❌" Foreground="#FFFF6B6B" 
+                                        <TextBlock Name="lblCryptoStatus" Text="🔒: ❌" Foreground="#FFFF6B6B"
                                                    FontSize="11" Margin="0,0,15,0"/>
-                                        <TextBlock Name="lblAuthStatus" Text="Auth: ❌" Foreground="#FFFF6B6B" 
+                                        <TextBlock Name="lblAuthStatus" Text="Auth: ❌" Foreground="#FFFF6B6B"
+                                                   FontSize="11" Margin="0,0,15,0"/>
+                                        <!-- 🎥 NOUVEAU: Indicateurs VOIP/Vidéo -->
+                                        <TextBlock Name="lblVOIPStatus" Text="📞: ❌" Foreground="#FFFF6B6B"
                                                    FontSize="11"/>
                                     </StackPanel>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                    <Button Name="btnStartP2PChat" Content="🔗 Start P2P" Width="90" Height="30" 
-                                            Margin="5,0" Background="#FF0D7377" Foreground="White" 
+                                    <!-- 🎥 NOUVEAU: Boutons VOIP/Vidéo -->
+                                    <Button Name="btnAudioCall" Content="📞" Width="35" Height="30"
+                                            Margin="5,0" FontSize="14" Background="Transparent"
+                                            Foreground="#FF666666" BorderBrush="Transparent"
+                                            ToolTip="Start audio call (select a chat first)" Click="BtnAudioCall_Click" IsEnabled="False"/>
+                                    <Button Name="btnVideoCall" Content="📹" Width="35" Height="30"
+                                            Margin="5,0" FontSize="14" Background="Transparent"
+                                            Foreground="#FF666666" BorderBrush="Transparent"
+                                            ToolTip="Start video call (select a chat first)" Click="BtnVideoCall_Click" IsEnabled="False"/>
+                                    <Button Name="btnEndCall" Content="📵" Width="35" Height="30"
+                                            Margin="5,0" FontSize="14" Background="Transparent"
+                                            Foreground="#FFFF6B6B" BorderBrush="Transparent"
+                                            ToolTip="End call" Click="BtnEndCall_Click" Visibility="Collapsed"/>
+                                    <Separator Width="1" Height="20" Background="#FF666666" Margin="5,0"/>
+                                    <Button Name="btnStartP2PChat" Content="🔗 Start P2P" Width="90" Height="30"
+                                            Margin="5,0" Background="#FF0D7377" Foreground="White"
                                             BorderBrush="Transparent" Click="BtnStartP2PChat_Click"/>
-                                    <Button Name="btnSendFileChat" Content="📎" Width="35" Height="30" 
-                                            Margin="5,0" FontSize="16" Background="Transparent" 
-                                            Foreground="#FF0D7377" BorderBrush="Transparent" 
+                                    <Button Name="btnSendFileChat" Content="📎" Width="35" Height="30"
+                                            Margin="5,0" FontSize="16" Background="Transparent"
+                                            Foreground="#FF0D7377" BorderBrush="Transparent"
                                             Click="BtnSendFileChat_Click"/>
                                 </StackPanel>
                             </Grid>
                         </Border>
                         
                         <!-- Messages -->
-                        <ScrollViewer Grid.Row="1" Name="messagesScrollViewer" VerticalScrollBarVisibility="Auto" 
-                                      Background="#FF2B2B2B" Margin="20">
-                            <StackPanel Name="messagesPanel"/>
-                        </ScrollViewer>
+                        <Grid Grid.Row="1">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- 🎥 NOUVEAU: Zone d'affichage vidéo -->
+                            <Border Grid.Row="0" Name="videoCallPanel" Visibility="Collapsed"
+                                    Background="#FF1A1A1A" BorderBrush="#FF444444" BorderThickness="1"
+                                    Margin="20,20,20,10" CornerRadius="8">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="200"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Vidéo distante -->
+                                    <Border Grid.Column="0" Background="#FF333333" CornerRadius="8,0,0,8">
+                                        <Grid>
+                                            <!-- 🎥 MediaElement pour vidéo distante -->
+                                            <MediaElement Name="mediaRemoteVideo"
+                                                          Stretch="Uniform"
+                                                          LoadedBehavior="Manual"
+                                                          UnloadedBehavior="Manual"
+                                                          Visibility="Collapsed"/>
+                                            <TextBlock Name="lblRemoteVideoStatus" Text="📹 Connecting video..."
+                                                       Foreground="#FF888888" HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center" FontSize="16"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Vidéo locale + contrôles -->
+                                    <StackPanel Grid.Column="1" Margin="10">
+                                        <!-- Vidéo locale -->
+                                        <Border Background="#FF222222" Height="120" CornerRadius="4" Margin="0,0,0,10">
+                                            <Grid>
+                                                <!-- 🎥 MediaElement pour vidéo locale -->
+                                                <MediaElement Name="mediaLocalVideo"
+                                                              Stretch="Uniform"
+                                                              LoadedBehavior="Manual"
+                                                              UnloadedBehavior="Manual"
+                                                              Visibility="Collapsed"/>
+                                                <TextBlock Name="lblLocalVideoStatus" Text="📹 Your video"
+                                                           Foreground="#FF888888" HorizontalAlignment="Center"
+                                                           VerticalAlignment="Center" FontSize="12"/>
+                                            </Grid>
+                                        </Border>
+
+                                        <!-- Contrôles appel -->
+                                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                            <Button Name="btnMuteAudio" Content="🔊" Width="35" Height="35"
+                                                    Margin="5" Background="#FF444444" Foreground="White"
+                                                    BorderBrush="Transparent" ToolTip="Mute/Unmute audio"
+                                                    Click="BtnMuteAudio_Click"/>
+                                            <Button Name="btnMuteVideo" Content="📹" Width="35" Height="35"
+                                                    Margin="5" Background="#FF444444" Foreground="White"
+                                                    BorderBrush="Transparent" ToolTip="Enable/Disable video"
+                                                    Click="BtnMuteVideo_Click"/>
+                                        </StackPanel>
+
+                                        <!-- Informations appel -->
+                                        <StackPanel Margin="0,10,0,0">
+                                            <TextBlock Name="lblCallStatus" Text="📞 Connected"
+                                                       Foreground="#FF4CAF50" FontSize="12"
+                                                       HorizontalAlignment="Center"/>
+                                            <TextBlock Name="lblCallDuration" Text="00:00"
+                                                       Foreground="#FF888888" FontSize="11"
+                                                       HorizontalAlignment="Center" Margin="0,5,0,0"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+
+                            <ScrollViewer Grid.Row="1" Name="messagesScrollViewer" VerticalScrollBarVisibility="Auto"
+                                          Background="#FF2B2B2B" Margin="20,0,20,20">
+                                <StackPanel Name="messagesPanel"/>
+                            </ScrollViewer>
+                        </Grid>
                         
                         <!-- File Transfer Progress -->
                         <Border Grid.Row="2" Name="fileTransferBorder" Visibility="Collapsed" 

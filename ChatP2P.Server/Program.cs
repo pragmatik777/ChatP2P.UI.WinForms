@@ -13,6 +13,7 @@ namespace ChatP2P.Server
     {
         private static TcpListener? _tcpListener;
         private static RelayHub? _relayHub;
+        private static VOIPRelayService? _voipRelay;
 
         // Getter public pour le RelayHub
         public static RelayHub? GetRelayHub() => _relayHub;
@@ -49,6 +50,9 @@ namespace ChatP2P.Server
 
                 // Démarrage du RelayHub centralisé
                 await StartRelayHub();
+
+                // Démarrage du VOIP Relay Service (Port 8892)
+                await StartVOIPRelay();
 
                 // Démarrage du serveur TCP sur localhost (API)
                 await StartTcpServer();
@@ -313,6 +317,29 @@ namespace ChatP2P.Server
             catch (Exception ex)
             {
                 Console.WriteLine($"Erreur démarrage RelayHub: {ex.Message}");
+            }
+        }
+
+        private static async Task StartVOIPRelay()
+        {
+            try
+            {
+                _voipRelay = new VOIPRelayService();
+
+                // Subscribe to VOIP relay events
+                _voipRelay.LogEvent += (message) =>
+                {
+                    Console.WriteLine(message);
+                    LogToFile($"[VOIP-RELAY] {message}");
+                };
+
+                await _voipRelay.StartAsync();
+                Console.WriteLine("✅ VOIP Relay Service started on port 8892");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Failed to start VOIP Relay Service: {ex.Message}");
+                LogToFile($"[VOIP-RELAY] Failed to start: {ex.Message}");
             }
         }
 
@@ -2378,11 +2405,17 @@ namespace ChatP2P.Server
             _isRunning = false;
             
             _tcpListener?.Stop();
-            
+
             if (_relayHub != null)
             {
                 await _relayHub.StopAsync();
                 Console.WriteLine("RelayHub arrêté");
+            }
+
+            if (_voipRelay != null)
+            {
+                _voipRelay.Stop();
+                Console.WriteLine("VOIP Relay arrêté");
             }
             
             await Task.Delay(100); // Laisser le temps aux tâches de se terminer

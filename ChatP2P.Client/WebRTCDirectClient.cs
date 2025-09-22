@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 using System.Text;
 using System.Text.Json;
 using System.IO;
@@ -20,6 +21,21 @@ namespace ChatP2P.Client
         private readonly Dictionary<string, RTCPeerConnection> _peerConnections = new();
         private readonly Dictionary<string, RTCDataChannel> _messageChannels = new(); // Messages texte
         private readonly Dictionary<string, RTCDataChannel> _dataChannels = new();    // Transfert fichiers
+
+        // 🔧 MESSAGE FRAGMENTATION SYSTEM - Fix for WebRTC size limits
+        private readonly Dictionary<string, Dictionary<string, List<MessageFragment>>> _fragmentBuffers = new();
+        private readonly object _fragmentLock = new object();
+        private const int MAX_MESSAGE_SIZE = 16384; // 16KB max per WebRTC chunk
+
+        // Structure pour gérer les fragments de messages
+        private class MessageFragment
+        {
+            public string MessageId { get; set; } = "";
+            public int ChunkIndex { get; set; }
+            public int TotalChunks { get; set; }
+            public string Data { get; set; } = "";
+            public DateTime Timestamp { get; set; }
+        }
 
         // Events pour communication avec MainWindow
         public event Action<string, string>? MessageReceived; // peer, message
@@ -45,23 +61,65 @@ namespace ChatP2P.Client
         {
             _clientId = clientId;
 
-            // Configuration ICE servers
+            // 🔧 SIMPLIFIED ICE CONFIG - Fix for VM environment SCTP issues
             _rtcConfig = new RTCConfiguration
             {
                 iceServers = new List<RTCIceServer>
                 {
-                    new RTCIceServer { urls = "stun:stun.l.google.com:19302" },
-                    new RTCIceServer { urls = "stun:stun.cloudflare.com:3478" },
-                    new RTCIceServer
-                    {
-                        urls = "turn:openrelay.metered.ca:80",
-                        username = "openrelayproject",
-                        credential = "openrelayproject"
-                    }
-                }
+                    // Local network fallback for VMs
+                    new RTCIceServer { urls = "stun:stun.l.google.com:19302" }
+                },
+                // 🔧 VM-FRIENDLY: Disable problematic features for VM environments
+                iceTransportPolicy = RTCIceTransportPolicy.all,
+                bundlePolicy = RTCBundlePolicy.balanced
             };
 
             LogEvent?.Invoke($"[WebRTC-DIRECT] Initialized for client: {_clientId}");
+
+            // Start cleanup timer for old fragments
+            _ = Task.Run(CleanupOldFragments);
+        }
+
+        /// <summary>
+        /// 🧹 CLEANUP - Remove old incomplete fragment buffers
+        /// </summary>
+        private async Task CleanupOldFragments()
+        {
+            while (true)
+            {
+                try
+                {
+                    await Task.Delay(60000); // Check every minute
+
+                    lock (_fragmentLock)
+                    {
+                        var cutoffTime = DateTime.Now.AddMinutes(-5); // 5 minute timeout
+                        var toRemove = new List<(string peer, string messageId)>();
+
+                        foreach (var peerBuffer in _fragmentBuffers)
+                        {
+                            foreach (var messageBuffer in peerBuffer.Value)
+                            {
+                                var oldestFragment = messageBuffer.Value.MinBy(f => f.Timestamp);
+                                if (oldestFragment?.Timestamp < cutoffTime)
+                                {
+                                    toRemove.Add((peerBuffer.Key, messageBuffer.Key));
+                                }
+                            }
+                        }
+
+                        foreach (var (peer, messageId) in toRemove)
+                        {
+                            _fragmentBuffers[peer].Remove(messageId);
+                            LogEvent?.Invoke($"[WebRTC-FRAG] 🧹 Cleaned up old incomplete message {messageId} from {peer}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogEvent?.Invoke($"[WebRTC-FRAG] ❌ Error during fragment cleanup: {ex.Message}");
+                }
+            }
         }
 
         /// <summary>
@@ -73,9 +131,36 @@ namespace ChatP2P.Client
             {
                 LogEvent?.Invoke($"[WebRTC-DIRECT] Creating offer for: {targetPeer}");
 
-                // Créer nouvelle PeerConnection
-                var pc = new RTCPeerConnection(_rtcConfig);
+                // 🔧 VM-SAFE: Try full WebRTC sequence with fallback for SCTP issues
+                RTCPeerConnection pc;
+                bool usedFallback = false;
+
+                try
+                {
+                    pc = new RTCPeerConnection(_rtcConfig);
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ PeerConnection created successfully with standard config");
+                }
+                catch (Exception sctpEx)
+                {
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] ⚠️ Standard config failed (SCTP issue): {sctpEx.Message}");
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] 🔧 Trying minimal fallback config for VM environment");
+
+                    // Fallback: Minimal config for VMs
+                    var fallbackConfig = new RTCConfiguration
+                    {
+                        iceServers = new List<RTCIceServer>(),  // No STUN for local testing
+                        iceTransportPolicy = RTCIceTransportPolicy.all
+                    };
+                    pc = new RTCPeerConnection(fallbackConfig);
+                    usedFallback = true;
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ PeerConnection created with fallback config");
+                }
+
                 _peerConnections[targetPeer] = pc;
+
+                // 🔧 VM-SAFE: Try DataChannel creation with SCTP fallback
+                try
+                {
 
                 // Setup ICE candidate events
                 pc.onicecandidate += (candidate) =>
@@ -146,10 +231,34 @@ namespace ChatP2P.Client
                     sdp = offer.sdp
                 };
 
-                var jsonString = JsonSerializer.Serialize(offerJson);
-                LogEvent?.Invoke($"[WebRTC-DIRECT] Offer created for {targetPeer} (SDP length: {offer.sdp?.Length ?? 0})");
-                LogEvent?.Invoke($"[WebRTC-DIRECT] Offer SDP preview: {offer.sdp?.Substring(0, Math.Min(200, offer.sdp?.Length ?? 0))}...");
-                return jsonString;
+                    var jsonString = JsonSerializer.Serialize(offerJson);
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] Offer created for {targetPeer} (SDP length: {offer.sdp?.Length ?? 0})");
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] Offer SDP preview: {offer.sdp?.Substring(0, Math.Min(200, offer.sdp?.Length ?? 0))}...");
+                    return jsonString;
+                }
+                catch (Exception sctpDataEx)
+                {
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] ⚠️ SCTP/DataChannel error for {targetPeer}: {sctpDataEx.Message}");
+
+                    if (usedFallback)
+                    {
+                        LogEvent?.Invoke($"[WebRTC-DIRECT] ❌ Even fallback config failed - VM environment incompatible");
+                        return null;
+                    }
+
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] 🔧 Trying simplified approach without DataChannels");
+
+                    // Cleanup failed connection
+                    if (_peerConnections.TryGetValue(targetPeer, out var failedPc))
+                    {
+                        failedPc.close();
+                        _peerConnections.Remove(targetPeer);
+                    }
+
+                    // For VOIP, we might not need DataChannels - just return null to trigger TCP relay fallback
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] 💡 Suggesting TCP relay fallback for {targetPeer}");
+                    return null;
+                }
             }
             catch (Exception ex)
             {
@@ -371,18 +480,149 @@ namespace ChatP2P.Client
                     await WaitForBufferLow(msgChannel, targetPeer);
                 }
 
-                var data = Encoding.UTF8.GetBytes(message);
-                LogEvent?.Invoke($"[WebRTC-DIRECT] 🚀 Sending {data.Length} bytes to {targetPeer} via Message Channel");
+                // 🔧 MESSAGE FRAGMENTATION - Handle large messages (VOIP SDP, etc.)
+                var messageBytes = Encoding.UTF8.GetBytes(message);
+                LogEvent?.Invoke($"[WebRTC-DIRECT] 🚀 Sending {messageBytes.Length} bytes to {targetPeer} via Message Channel");
 
-                msgChannel.send(data);
+                if (messageBytes.Length <= MAX_MESSAGE_SIZE)
+                {
+                    // Single message - send directly
+                    msgChannel.send(messageBytes);
+                    LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ Single message sent to {targetPeer}: {message.Substring(0, Math.Min(50, message.Length))}...");
+                }
+                else
+                {
+                    // Large message - fragment and send
+                    await SendFragmentedMessageAsync(msgChannel, targetPeer, message);
+                }
 
-                LogEvent?.Invoke($"[WebRTC-DIRECT] ✅ Message sent to {targetPeer}: {message.Substring(0, Math.Min(50, message.Length))}...");
                 LogEvent?.Invoke($"[WebRTC-DIRECT] 📊 Buffer after send: {msgChannel.bufferedAmount} bytes");
                 return true;
             }
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[WebRTC-DIRECT] ❌ Error sending message to {targetPeer}: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 🔧 FRAGMENTATION - Envoyer un message volumineux en fragments
+        /// </summary>
+        private async Task SendFragmentedMessageAsync(RTCDataChannel channel, string targetPeer, string message)
+        {
+            var messageId = Guid.NewGuid().ToString("N")[..8];
+            var messageBytes = Encoding.UTF8.GetBytes(message);
+            var chunks = new List<string>();
+
+            // Split message into chunks
+            for (int i = 0; i < messageBytes.Length; i += MAX_MESSAGE_SIZE - 200) // Reserve space for headers
+            {
+                var chunkSize = Math.Min(MAX_MESSAGE_SIZE - 200, messageBytes.Length - i);
+                var chunkData = Convert.ToBase64String(messageBytes, i, chunkSize);
+                chunks.Add(chunkData);
+            }
+
+            LogEvent?.Invoke($"[WebRTC-FRAG] 📦 Fragmenting large message ({messageBytes.Length} bytes) into {chunks.Count} chunks for {targetPeer}");
+
+            // Send each fragment
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                var fragmentJson = JsonSerializer.Serialize(new
+                {
+                    type = "fragment",
+                    messageId = messageId,
+                    chunkIndex = i,
+                    totalChunks = chunks.Count,
+                    data = chunks[i]
+                });
+
+                var fragmentBytes = Encoding.UTF8.GetBytes(fragmentJson);
+
+                // Wait for buffer if needed
+                if (channel.bufferedAmount > BUFFER_THRESHOLD)
+                {
+                    await WaitForBufferLow(channel, targetPeer);
+                }
+
+                channel.send(fragmentBytes);
+                LogEvent?.Invoke($"[WebRTC-FRAG] 📮 Sent fragment {i + 1}/{chunks.Count} to {targetPeer}");
+
+                // Small delay between fragments
+                await Task.Delay(10);
+            }
+        }
+
+        /// <summary>
+        /// 🔧 REASSEMBLY - Traiter un fragment reçu et assembler le message complet
+        /// </summary>
+        private bool ProcessMessageFragment(string fromPeer, string fragmentData)
+        {
+            try
+            {
+                var fragment = JsonSerializer.Deserialize<Dictionary<string, object>>(fragmentData);
+
+                if (!fragment.ContainsKey("type") || fragment["type"].ToString() != "fragment")
+                    return false;
+
+                var messageId = fragment["messageId"].ToString();
+                var chunkIndex = int.Parse(fragment["chunkIndex"].ToString());
+                var totalChunks = int.Parse(fragment["totalChunks"].ToString());
+                var data = fragment["data"].ToString();
+
+                lock (_fragmentLock)
+                {
+                    // Initialize peer buffer if needed
+                    if (!_fragmentBuffers.ContainsKey(fromPeer))
+                        _fragmentBuffers[fromPeer] = new Dictionary<string, List<MessageFragment>>();
+
+                    // Initialize message buffer if needed
+                    if (!_fragmentBuffers[fromPeer].ContainsKey(messageId))
+                        _fragmentBuffers[fromPeer][messageId] = new List<MessageFragment>();
+
+                    // Add fragment
+                    _fragmentBuffers[fromPeer][messageId].Add(new MessageFragment
+                    {
+                        MessageId = messageId,
+                        ChunkIndex = chunkIndex,
+                        TotalChunks = totalChunks,
+                        Data = data,
+                        Timestamp = DateTime.Now
+                    });
+
+                    LogEvent?.Invoke($"[WebRTC-FRAG] 📥 Received fragment {chunkIndex + 1}/{totalChunks} from {fromPeer} (messageId: {messageId})");
+
+                    // Check if message is complete
+                    var fragments = _fragmentBuffers[fromPeer][messageId];
+                    if (fragments.Count == totalChunks)
+                    {
+                        // Reassemble message
+                        fragments.Sort((a, b) => a.ChunkIndex.CompareTo(b.ChunkIndex));
+
+                        var allData = new List<byte>();
+                        foreach (var frag in fragments)
+                        {
+                            var chunkBytes = Convert.FromBase64String(frag.Data);
+                            allData.AddRange(chunkBytes);
+                        }
+
+                        var completeMessage = Encoding.UTF8.GetString(allData.ToArray());
+                        LogEvent?.Invoke($"[WebRTC-FRAG] ✅ Message reassembled from {fromPeer}: {completeMessage.Substring(0, Math.Min(50, completeMessage.Length))}...");
+
+                        // Clean up fragments
+                        _fragmentBuffers[fromPeer].Remove(messageId);
+
+                        // Process the complete message
+                        MessageReceived?.Invoke(fromPeer, completeMessage);
+                        return true;
+                    }
+                }
+
+                return true; // Fragment processed but message not complete yet
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[WebRTC-FRAG] ❌ Error processing fragment from {fromPeer}: {ex.Message}");
                 return false;
             }
         }
@@ -575,14 +815,26 @@ namespace ChatP2P.Client
                 {
                     var message = Encoding.UTF8.GetString(data);
                     LogEvent?.Invoke($"[WebRTC-MSG] 📩 Text from {peer}: {message.Substring(0, Math.Min(50, message.Length))}...");
-                    MessageReceived?.Invoke(peer, message);
+
+                    // 🔧 FRAGMENTATION - Check if this is a fragment or complete message
+                    if (!ProcessMessageFragment(peer, message))
+                    {
+                        // Not a fragment, process as normal message
+                        MessageReceived?.Invoke(peer, message);
+                    }
                 }
                 else if (type == DataChannelPayloadProtocols.WebRTC_Binary)
                 {
                     // ✅ FIX: SIPSorcery envoie les strings comme Binary
                     var message = Encoding.UTF8.GetString(data);
                     LogEvent?.Invoke($"[WebRTC-MSG] 📦 Binary-as-text from {peer}: {message.Substring(0, Math.Min(50, message.Length))}...");
-                    MessageReceived?.Invoke(peer, message);
+
+                    // 🔧 FRAGMENTATION - Check if this is a fragment or complete message
+                    if (!ProcessMessageFragment(peer, message))
+                    {
+                        // Not a fragment, process as normal message
+                        MessageReceived?.Invoke(peer, message);
+                    }
                 }
             };
 
