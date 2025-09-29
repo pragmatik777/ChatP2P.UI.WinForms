@@ -195,6 +195,10 @@ namespace ChatP2P.Client
                 chkStrictTrust.IsChecked = Properties.Settings.Default.StrictTrust;
                 chkVerbose.IsChecked = Properties.Settings.Default.VerboseLogging;
                 chkEncryptRelay.IsChecked = Properties.Settings.Default.EncryptRelay;
+
+                // Initialize LogHelper with current VerboseLogging setting
+                LogHelper.SetVerboseLogging(Properties.Settings.Default.VerboseLogging);
+                Services.ServiceLogHelper.SetVerboseLogging(Properties.Settings.Default.VerboseLogging);
                 chkEncryptP2P.IsChecked = GetEncryptP2PSetting();
                 chkAutoConnect.IsChecked = Properties.Settings.Default.AutoConnect;
             }
@@ -214,6 +218,10 @@ namespace ChatP2P.Client
                 Properties.Settings.Default.StrictTrust = chkStrictTrust.IsChecked ?? false;
                 Properties.Settings.Default.VerboseLogging = chkVerbose.IsChecked ?? false;
                 Properties.Settings.Default.EncryptRelay = chkEncryptRelay.IsChecked ?? false;
+
+                // Update LogHelper when VerboseLogging setting changes
+                LogHelper.SetVerboseLogging(chkVerbose.IsChecked ?? false);
+                Services.ServiceLogHelper.SetVerboseLogging(chkVerbose.IsChecked ?? false);
                 SetEncryptP2PSetting(chkEncryptP2P.IsChecked ?? false);
                 Properties.Settings.Default.AutoConnect = chkAutoConnect.IsChecked ?? false;
                 
@@ -265,7 +273,7 @@ namespace ChatP2P.Client
             try
             {
                 await LogToFile($"📡 [SIGNAL-RELAY] Sending {signalType}: {fromPeer} → {toPeer}");
-                Console.WriteLine($"📡 [SIGNAL-RELAY] Sending {signalType}: {fromPeer} → {toPeer}");
+                LogHelper.LogToConsole($"📡 [SIGNAL-RELAY] Sending {signalType}: {fromPeer} → {toPeer}");
 
                 // ✅ FIX: Actually send the signal via API to server relay
                 var response = await SendApiRequest("p2p", "ice_signal", new
@@ -279,18 +287,18 @@ namespace ChatP2P.Client
                 if (response?.Success == true)
                 {
                     await LogToFile($"✅ [SIGNAL-RELAY] {signalType} sent successfully: {fromPeer} → {toPeer}");
-                    Console.WriteLine($"✅ [SIGNAL-RELAY] {signalType} sent successfully: {fromPeer} → {toPeer}");
+                    LogHelper.LogToConsole($"✅ [SIGNAL-RELAY] {signalType} sent successfully: {fromPeer} → {toPeer}");
                 }
                 else
                 {
                     await LogToFile($"❌ [SIGNAL-RELAY] Failed to send {signalType}: {response?.Error}");
-                    Console.WriteLine($"❌ [SIGNAL-RELAY] Failed to send {signalType}: {response?.Error}");
+                    LogHelper.LogToConsole($"❌ [SIGNAL-RELAY] Failed to send {signalType}: {response?.Error}");
                 }
             }
             catch (Exception ex)
             {
                 await LogToFile($"❌ [SIGNAL-RELAY] Error sending {signalType}: {ex.Message}");
-                Console.WriteLine($"❌ [SIGNAL-RELAY] Error sending {signalType}: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [SIGNAL-RELAY] Error sending {signalType}: {ex.Message}");
             }
         }
 
@@ -321,7 +329,7 @@ namespace ChatP2P.Client
                     await Dispatcher.InvokeAsync(async () =>
                     {
                         await LogToFile($"[P2P-STATUS] {peer}: {(connected ? "Connected" : "Disconnected")}");
-                        Console.WriteLine($"[P2P-STATUS] {peer}: {(connected ? "Connected" : "Disconnected")}");
+                        LogHelper.LogToConsole($"[P2P-STATUS] {peer}: {(connected ? "Connected" : "Disconnected")}");
 
                         if (connected)
                         {
@@ -4450,24 +4458,32 @@ namespace ChatP2P.Client
 
         private async Task LogToFile(string message, bool forceLog = false)
         {
-            try
+            // Déterminer le type de log basé sur le contenu du message
+            if (message.Contains("[AUDIO]") || message.Contains("AUDIO") || message.Contains("🎤") ||
+                message.Contains("🔊") || message.Contains("VOIP") || message.Contains("OPUS") ||
+                message.Contains("SPECTRUM") || message.Contains("MIC-TEST"))
             {
-                // Respecter les paramètres de verbosité, sauf si forceLog=true
-                if (!forceLog && !Properties.Settings.Default.VerboseLogging)
-                    return;
-                var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                var logDir = IOPath.Combine(desktopPath, "ChatP2P_Logs");
-                Directory.CreateDirectory(logDir);
-                
-                var logFile = IOPath.Combine(logDir, "client.log");
-                var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                var logEntry = $"[{timestamp}] {message}{Environment.NewLine}";
-                
-                await File.AppendAllTextAsync(logFile, logEntry);
+                await LogHelper.LogToAudioAsync(message, forceLog);
             }
-            catch
+            else if (message.Contains("[ICE]") || message.Contains("ICE"))
             {
-                // Ignore logging errors
+                await LogHelper.LogToIceAsync(message, forceLog);
+            }
+            else if (message.Contains("[CRYPTO]") || message.Contains("CRYPTO"))
+            {
+                await LogHelper.LogToCryptoAsync(message, forceLog);
+            }
+            else if (message.Contains("[RELAY]") || message.Contains("RELAY"))
+            {
+                await LogHelper.LogToRelayAsync(message, forceLog);
+            }
+            else if (message.Contains("[P2P]") || message.Contains("P2P"))
+            {
+                await LogHelper.LogToP2PAsync(message, forceLog);
+            }
+            else
+            {
+                await LogHelper.LogToGeneralAsync(message, forceLog);
             }
         }
 

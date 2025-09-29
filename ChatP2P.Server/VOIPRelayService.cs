@@ -249,6 +249,18 @@ namespace ChatP2P.Server
             _activeSessions.TryAdd(sessionId, session);
             LogEvent?.Invoke($"[VOIP-RELAY] 📞 Call started: {message.From} → {message.To}");
 
+            // ✅ NOUVEAU: Synchroniser avec le canal audio pur
+            try
+            {
+                var audioRelay = ChatP2P.Server.Program.GetAudioRelay();
+                audioRelay?.StartAudioSession(message.From, message.To);
+                LogEvent?.Invoke($"[VOIP-RELAY] 🎵 Pure audio session synchronized: {message.From} ↔ {message.To}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to sync audio session: {ex.Message}");
+            }
+
             // ✅ FIX CRITIQUE: Vérifier si le destinataire est connecté au relay
             if (_clients.ContainsKey(message.To))
             {
@@ -334,9 +346,58 @@ namespace ChatP2P.Server
 
         private async Task RelayBinaryData(string fromPeer, byte[] data, int length)
         {
-            // Pour des données binaires non structurées, difficile de savoir le destinataire
-            // Implémenter selon le protocole choisi côté client
-            LogEvent?.Invoke($"[VOIP-RELAY] 📡 Binary data relayed from {fromPeer}: {length} bytes");
+            try
+            {
+                // ✅ FIX CRITIQUE: Relayer réellement les données audio au destinataire
+                // Trouver la session active pour ce peer
+                VOIPSession? targetSession = null;
+                string targetPeer = "";
+
+                foreach (var session in _activeSessions.Values)
+                {
+                    if (session.Caller == fromPeer)
+                    {
+                        targetSession = session;
+                        targetPeer = session.Callee;
+                        break;
+                    }
+                    else if (session.Callee == fromPeer)
+                    {
+                        targetSession = session;
+                        targetPeer = session.Caller;
+                        break;
+                    }
+                }
+
+                if (targetSession != null && !string.IsNullOrEmpty(targetPeer))
+                {
+                    // Créer message JSON audio_data pour le client destinataire
+                    var audioMessage = new VOIPMessage
+                    {
+                        Type = "audio_data",
+                        From = fromPeer,
+                        To = targetPeer,
+                        Data = Convert.ToBase64String(data, 0, length),
+                        Timestamp = DateTime.UtcNow
+                    };
+
+                    // Relayer vers le destinataire
+                    await RelayMessageToPeer(targetPeer, audioMessage);
+
+                    // Mettre à jour les statistiques de session
+                    targetSession.AudioBytesRelayed += length;
+
+                    LogEvent?.Invoke($"[VOIP-RELAY] ✅ Audio data relayed: {fromPeer} → {targetPeer} ({length} bytes)");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ No active session found for {fromPeer}, dropping {length} bytes");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ❌ Error relaying binary data from {fromPeer}: {ex.Message}");
+            }
         }
 
         private async Task RelayMessageToPeer(string toPeer, VOIPMessage message)

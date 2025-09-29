@@ -181,7 +181,7 @@ namespace ChatP2P.Client
                     ordered = true,
                     maxRetransmits = null // Reliable delivery
                 };
-                var messageChannel = await pc.createDataChannel("messages", msgConfig);
+                var messageChannel = pc.createDataChannel("messages", msgConfig).Result;
 
                 // ✅ OPTIMISATION 2025: Configurer bufferedAmountLowThreshold pour messages aussi
                 messageChannel.bufferedAmountLowThreshold = LOW_BUFFER_THRESHOLD;
@@ -195,7 +195,7 @@ namespace ChatP2P.Client
                     ordered = false,
                     maxRetransmits = 3 // Limited retries for performance
                 };
-                var dataChannel = await pc.createDataChannel("data", dataConfig);
+                var dataChannel = pc.createDataChannel("data", dataConfig).Result;
 
                 // ✅ OPTIMISATION 2025: Configurer bufferedAmountLowThreshold pour haute performance
                 dataChannel.bufferedAmountLowThreshold = LOW_BUFFER_THRESHOLD;

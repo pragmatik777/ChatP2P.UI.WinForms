@@ -28,6 +28,13 @@ namespace ChatP2P.Client.Services
         public event Action<string, VideoFrame>? RemoteVideoReceived;
         public event Action<string, byte[]>? RemoteAudioReceived;
         public event Action<string>? LogEvent;
+
+        // Log utility method
+        private async void LogAudio(string message, bool forceLog = false)
+        {
+            LogEvent?.Invoke(message); // For backwards compatibility
+            await ServiceLogHelper.LogToAudioAsync(message, forceLog);
+        }
         public event Action<string, string>? IncomingCallReceived; // fromPeer, callType
 
         // ✅ NOUVEAU: Events pour signaling VOIP via MainWindow

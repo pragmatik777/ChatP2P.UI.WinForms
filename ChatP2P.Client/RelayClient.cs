@@ -43,37 +43,17 @@ namespace ChatP2P.Client
         // Logging helper
         private async Task LogToFile(string message)
         {
-            try
-            {
-                var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
-                Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "relay_client.log");
-                var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
-                await File.AppendAllTextAsync(logFile, logEntry);
-            }
-            catch { /* Ignore log errors */ }
+            await LogHelper.LogToRelayAsync(message);
         }
 
         // ICE Event logging helper
         private async Task LogIceEvent(string iceType, string fromPeer, string toPeer, string status, string? iceData = null)
         {
-            try
-            {
-                var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
-                Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "relay_client_ice.log");
-                var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                
-                var logEntry = $"[{timestamp}] 🧊 [ICE-{iceType.ToUpper()}] {fromPeer} → {toPeer} | {status}";
-                if (!string.IsNullOrEmpty(iceData))
-                    logEntry += $" | Data: {iceData}";
-                logEntry += Environment.NewLine;
-                
-                await File.AppendAllTextAsync(logFile, logEntry);
-            }
-            catch { /* Ignore log errors */ }
+            var logEntry = $"🧊 [ICE-{iceType.ToUpper()}] {fromPeer} → {toPeer} | {status}";
+            if (!string.IsNullOrEmpty(iceData))
+                logEntry += $" | Data: {iceData}";
+
+            await LogHelper.LogToIceAsync(logEntry);
         }
         public event Action<string, string, string?>? FriendRequestAccepted; // from, to, pqcPublicKey
         public event Action<string, string, string, string>? DualKeyAcceptanceReceived; // fromPeer, toPeer, ed25519Key, pqcKey
@@ -172,7 +152,7 @@ namespace ChatP2P.Client
                     });
 
                     await LogToFile($"🔐 [TUNNEL-INIT] P2P tunnel initialized for {displayName}");
-                    Console.WriteLine($"🔐 [TUNNEL-INIT] P2P tunnel initialized for {displayName}");
+                    LogHelper.LogToConsole($"🔐 [TUNNEL-INIT] P2P tunnel initialized for {displayName}");
 
                     // Générer nos clés P2P (pas de handshake serveur)
                     try
@@ -181,18 +161,18 @@ namespace ChatP2P.Client
                         if (established)
                         {
                             await LogToFile($"✅ [TUNNEL-INIT] P2P tunnel ready for {displayName}");
-                            Console.WriteLine($"✅ [TUNNEL-INIT] P2P tunnel ready for {displayName}");
+                            LogHelper.LogToConsole($"✅ [TUNNEL-INIT] P2P tunnel ready for {displayName}");
                         }
                         else
                         {
                             await LogToFile($"❌ [TUNNEL-INIT] Failed to initialize P2P tunnel for {displayName}");
-                            Console.WriteLine($"❌ [TUNNEL-INIT] Failed to initialize P2P tunnel for {displayName}");
+                            LogHelper.LogToConsole($"❌ [TUNNEL-INIT] Failed to initialize P2P tunnel for {displayName}");
                         }
                     }
                     catch (Exception ex)
                     {
                         await LogToFile($"❌ [TUNNEL-INIT] Error initializing P2P tunnel: {ex.Message}");
-                        Console.WriteLine($"❌ [TUNNEL-INIT] Error initializing P2P tunnel: {ex.Message}");
+                        LogHelper.LogToConsole($"❌ [TUNNEL-INIT] Error initializing P2P tunnel: {ex.Message}");
                     }
                 }
 
@@ -203,12 +183,12 @@ namespace ChatP2P.Client
                 _ = Task.Run(async () => await ListenMessagesChannel());
                 _ = Task.Run(async () => await ListenFilesChannel());
                 
-                Console.WriteLine($"RelayClient connected as {displayName}");
+                LogHelper.LogToConsole($"RelayClient connected as {displayName}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error connecting to RelayHub: {ex.Message}");
+                LogHelper.LogToConsole($"Error connecting to RelayHub: {ex.Message}");
                 await DisconnectAsync();
                 return false;
             }
@@ -239,7 +219,7 @@ namespace ChatP2P.Client
             }
             catch { }
             
-            Console.WriteLine("RelayClient disconnected");
+            LogHelper.LogToConsole("RelayClient disconnected");
         }
         
         // ===== FRIEND REQUESTS =====
@@ -252,12 +232,12 @@ namespace ChatP2P.Client
             {
                 var friendRequest = $"FRIEND_REQ:{fromPeer}:{toPeer}:{publicKey}:{message}";
                 await _friendRequestWriter.WriteLineAsync(friendRequest);
-                Console.WriteLine($"Friend request sent: {fromPeer} → {toPeer}");
+                LogHelper.LogToConsole($"Friend request sent: {fromPeer} → {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending friend request: {ex.Message}");
+                LogHelper.LogToConsole($"Error sending friend request: {ex.Message}");
                 return false;
             }
         }
@@ -287,7 +267,7 @@ namespace ChatP2P.Client
                         var established = await _secureTunnel.EstablishSecureChannelAsync(_friendRequestStream);
                         if (!established)
                         {
-                            Console.WriteLine("❌ Failed to establish secure tunnel, falling back to legacy mode");
+                            LogHelper.LogToConsole("❌ Failed to establish secure tunnel, falling back to legacy mode");
                             return await SendLegacyFriendRequest(fromPeer, toPeer, ed25519Key, pqcKey, message);
                         }
                     }
@@ -296,18 +276,18 @@ namespace ChatP2P.Client
                     var success = await _secureTunnel.SendSecureFriendRequestAsync(_friendRequestStream, toPeer, ed25519Key, pqcKey, message);
                     if (success)
                     {
-                        Console.WriteLine($"🔐 Secure dual key friend request sent: {fromPeer} → {toPeer}");
+                        LogHelper.LogToConsole($"🔐 Secure dual key friend request sent: {fromPeer} → {toPeer}");
                         return true;
                     }
                 }
 
                 // Fallback vers ancien protocole si tunnel échoue
-                Console.WriteLine("⚠️ Secure tunnel failed, using legacy friend request");
+                LogHelper.LogToConsole("⚠️ Secure tunnel failed, using legacy friend request");
                 return await SendLegacyFriendRequest(fromPeer, toPeer, ed25519Key, pqcKey, message);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending secure friend request: {ex.Message}");
+                LogHelper.LogToConsole($"Error sending secure friend request: {ex.Message}");
                 return false;
             }
         }
@@ -324,12 +304,12 @@ namespace ChatP2P.Client
                 // Format legacy: FRIEND_REQ_DUAL:fromPeer:toPeer:ed25519Key:pqcKey:message
                 var friendRequest = $"FRIEND_REQ_DUAL:{fromPeer}:{toPeer}:{ed25519Key}:{pqcKey}:{message}";
                 await _friendRequestWriter.WriteLineAsync(friendRequest);
-                Console.WriteLine($"⚠️ Legacy dual key friend request sent: {fromPeer} → {toPeer}");
+                LogHelper.LogToConsole($"⚠️ Legacy dual key friend request sent: {fromPeer} → {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending legacy friend request: {ex.Message}");
+                LogHelper.LogToConsole($"Error sending legacy friend request: {ex.Message}");
                 return false;
             }
         }
@@ -345,12 +325,12 @@ namespace ChatP2P.Client
                     ? $"FRIEND_ACCEPT:{fromPeer}:{toPeer}"
                     : $"FRIEND_ACCEPT:{fromPeer}:{toPeer}:{myPqcPublicKey}";
                 await _friendRequestWriter.WriteLineAsync(response);
-                Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer}");
+                LogHelper.LogToConsole($"Friend request accepted: {fromPeer} ← {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error accepting friend request: {ex.Message}");
+                LogHelper.LogToConsole($"Error accepting friend request: {ex.Message}");
                 return false;
             }
         }
@@ -367,12 +347,12 @@ namespace ChatP2P.Client
                 // Format: FRIEND_ACCEPT_DUAL:fromPeer:toPeer:ed25519Key:pqcKey
                 var response = $"FRIEND_ACCEPT_DUAL:{fromPeer}:{toPeer}:{myEd25519Key}:{myPqcKey}";
                 await _friendRequestWriter.WriteLineAsync(response);
-                Console.WriteLine($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
+                LogHelper.LogToConsole($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error accepting dual key friend request: {ex.Message}");
+                LogHelper.LogToConsole($"Error accepting dual key friend request: {ex.Message}");
                 return false;
             }
         }
@@ -385,12 +365,12 @@ namespace ChatP2P.Client
             {
                 var response = $"FRIEND_REJECT:{fromPeer}:{toPeer}";
                 await _friendRequestWriter.WriteLineAsync(response);
-                Console.WriteLine($"Friend request rejected: {fromPeer} ← {toPeer}");
+                LogHelper.LogToConsole($"Friend request rejected: {fromPeer} ← {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error rejecting friend request: {ex.Message}");
+                LogHelper.LogToConsole($"Error rejecting friend request: {ex.Message}");
                 return false;
             }
         }
@@ -405,12 +385,12 @@ namespace ChatP2P.Client
             {
                 var privateMessage = $"PRIV:{fromPeer}:{toPeer}:{message}";
                 await _messagesWriter.WriteLineAsync(privateMessage);
-                Console.WriteLine($"Private message sent: {fromPeer} → {toPeer}");
+                LogHelper.LogToConsole($"Private message sent: {fromPeer} → {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending private message: {ex.Message}");
+                LogHelper.LogToConsole($"Error sending private message: {ex.Message}");
                 return false;
             }
         }
@@ -427,12 +407,12 @@ namespace ChatP2P.Client
                 var metadataContent = $"FILE_METADATA_RELAY:{transferId}:{fileName}:{fileSize}";
                 var metadataMessage = $"PRIV:{fromPeer}:{toPeer}:{metadataContent}";
                 await _filesWriter.WriteLineAsync(metadataMessage);
-                Console.WriteLine($"📁 [FILES-CHANNEL-8891] Metadata sent: {fileName} ({fileSize} bytes) {fromPeer} → {toPeer}");
+                LogHelper.LogToConsole($"📁 [FILES-CHANNEL-8891] Metadata sent: {fileName} ({fileSize} bytes) {fromPeer} → {toPeer}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending file metadata: {ex.Message}");
+                LogHelper.LogToConsole($"Error sending file metadata: {ex.Message}");
                 return false;
             }
         }
@@ -462,7 +442,7 @@ namespace ChatP2P.Client
                     else
                     {
                         await CryptoService.LogCrypto($"⚠️ [FILE-ENCRYPT] No PQC key for {toPeer}, sending chunk {chunkIndex} unencrypted");
-                        Console.WriteLine($"⚠️ [FILE-ENCRYPT] No PQC key for {toPeer}, sending chunk unencrypted");
+                        LogHelper.LogToConsole($"⚠️ [FILE-ENCRYPT] No PQC key for {toPeer}, sending chunk unencrypted");
                     }
                 }
 
@@ -476,13 +456,13 @@ namespace ChatP2P.Client
                 if (chunkIndex % 100 == 0)
                 {
                     var encStatus = useEncryption ? "🔒 encrypted" : "📦 clear";
-                    Console.WriteLine($"{encStatus} [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} sent ({finalChunkData.Length} bytes)");
+                    LogHelper.LogToConsole($"{encStatus} [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} sent ({finalChunkData.Length} bytes)");
                 }
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending file chunk: {ex.Message}");
+                LogHelper.LogToConsole($"Error sending file chunk: {ex.Message}");
                 await CryptoService.LogCrypto($"❌ [FILE-ENCRYPT] Error sending chunk {chunkIndex}: {ex.Message}");
                 return false;
             }
@@ -493,11 +473,11 @@ namespace ChatP2P.Client
         private async Task ListenFriendRequestChannel()
         {
             await LogToFile("📡 [RelayClient] ListenFriendRequestChannel started");
-            Console.WriteLine($"📡 [RelayClient] ListenFriendRequestChannel started");
+            LogHelper.LogToConsole($"📡 [RelayClient] ListenFriendRequestChannel started");
             if (_friendRequestReader == null) 
             {
                 await LogToFile("❌ [RelayClient] _friendRequestReader is null!");
-                Console.WriteLine($"❌ [RelayClient] _friendRequestReader is null!");
+                LogHelper.LogToConsole($"❌ [RelayClient] _friendRequestReader is null!");
                 return;
             }
             
@@ -506,26 +486,26 @@ namespace ChatP2P.Client
                 while (_isConnected && !_cancellationToken!.Token.IsCancellationRequested)
                 {
                     await LogToFile("[DEBUG] Waiting for message on friend request channel...");
-                    Console.WriteLine($"[DEBUG] Waiting for message on friend request channel...");
+                    LogHelper.LogToConsole($"[DEBUG] Waiting for message on friend request channel...");
                     var message = await _friendRequestReader.ReadLineAsync();
                     
                     if (message == null) 
                     {
                         await LogToFile("⚠️  [RelayClient] Received null message, connection closed");
-                        Console.WriteLine($"⚠️  [RelayClient] Received null message, connection closed");
+                        LogHelper.LogToConsole($"⚠️  [RelayClient] Received null message, connection closed");
                         break;
                     }
                     
                     await LogToFile($"📥 [RelayClient] Raw message received: {message}");
-                    Console.WriteLine($"📥 [RelayClient] Raw message received: {message}");
+                    LogHelper.LogToConsole($"📥 [RelayClient] Raw message received: {message}");
                     await ProcessFriendRequestMessage(message);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [RelayClient] Error listening friend request channel: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [RelayClient] Error listening friend request channel: {ex.Message}");
             }
-            Console.WriteLine($"📡 [RelayClient] ListenFriendRequestChannel ended");
+            LogHelper.LogToConsole($"📡 [RelayClient] ListenFriendRequestChannel ended");
         }
         
         private async Task ListenMessagesChannel()
@@ -540,7 +520,7 @@ namespace ChatP2P.Client
                     if (message == null) break;
 
                     // ✅ FIX: Debug log every message received on trusted channel (8888)
-                    Console.WriteLine($"📨 [MSG-CHANNEL-8888] Received: {message.Substring(0, Math.Min(100, message.Length))}...");
+                    LogHelper.LogToConsole($"📨 [MSG-CHANNEL-8888] Received: {message.Substring(0, Math.Min(100, message.Length))}...");
                     await LogToFile($"[MSG-CHANNEL-8888] Received: {message}");
 
                     await ProcessMessageChannelMessage(message);
@@ -548,7 +528,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error listening message channel: {ex.Message}");
+                LogHelper.LogToConsole($"Error listening message channel: {ex.Message}");
             }
         }
 
@@ -570,7 +550,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error listening files channel: {ex.Message}");
+                LogHelper.LogToConsole($"Error listening files channel: {ex.Message}");
             }
         }
 
@@ -599,7 +579,7 @@ namespace ChatP2P.Client
                                 var fileName = metaParts[1];
                                 var fileSize = long.Parse(metaParts[2]);
 
-                                Console.WriteLine($"📁 [FILES-CHANNEL-8891] Metadata: {fileName} ({fileSize} bytes) from {fromPeer}");
+                                LogHelper.LogToConsole($"📁 [FILES-CHANNEL-8891] Metadata: {fileName} ({fileSize} bytes) from {fromPeer}");
                                 FileMetadataRelayReceived?.Invoke(transferId, fileName, fileSize, fromPeer);
                             }
                         }
@@ -632,14 +612,14 @@ namespace ChatP2P.Client
                                         else
                                         {
                                             await CryptoService.LogCrypto($"❌ [FILE-DECRYPT] No PQC private key to decrypt chunk {chunkIndex} from {fromPeer}");
-                                            Console.WriteLine($"❌ [FILE-DECRYPT] No PQC private key to decrypt chunk {chunkIndex} from {fromPeer}");
+                                            LogHelper.LogToConsole($"❌ [FILE-DECRYPT] No PQC private key to decrypt chunk {chunkIndex} from {fromPeer}");
                                             return; // Skip ce chunk si pas de clé
                                         }
                                     }
                                     catch (Exception ex)
                                     {
                                         await CryptoService.LogCrypto($"❌ [FILE-DECRYPT] Failed to decrypt chunk {chunkIndex}: {ex.Message}");
-                                        Console.WriteLine($"❌ [FILE-DECRYPT] Failed to decrypt chunk {chunkIndex}: {ex.Message}");
+                                        LogHelper.LogToConsole($"❌ [FILE-DECRYPT] Failed to decrypt chunk {chunkIndex}: {ex.Message}");
                                         return; // Skip ce chunk si décryption échoue
                                     }
                                 }
@@ -648,7 +628,7 @@ namespace ChatP2P.Client
                                 if (chunkIndex % 100 == 0)
                                 {
                                     var encStatus = encryptionFlag == "ENC" ? "🔓 decrypted" : "📦 clear";
-                                    Console.WriteLine($"{encStatus} [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
+                                    LogHelper.LogToConsole($"{encStatus} [FILES-CHANNEL-8891] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
                                 }
 
                                 FileChunkRelayReceived?.Invoke(transferId, chunkIndex, totalChunks, chunkData);
@@ -663,7 +643,7 @@ namespace ChatP2P.Client
 
                                 if (chunkIndex % 100 == 0)
                                 {
-                                    Console.WriteLine($"📦 [FILES-CHANNEL-8891-LEGACY] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
+                                    LogHelper.LogToConsole($"📦 [FILES-CHANNEL-8891-LEGACY] Chunk {chunkIndex}/{totalChunks} ({chunkData.Length} bytes)");
                                 }
 
                                 FileChunkRelayReceived?.Invoke(transferId, chunkIndex, totalChunks, chunkData);
@@ -674,24 +654,24 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing files channel message: {ex.Message}");
+                LogHelper.LogToConsole($"Error processing files channel message: {ex.Message}");
             }
         }
 
         private async Task ProcessFriendRequestMessage(string message)
         {
             await LogToFile($"🔄 [RelayClient] ProcessFriendRequestMessage: {message}");
-            Console.WriteLine($"🔄 [RelayClient] ProcessFriendRequestMessage: {message}");
+            LogHelper.LogToConsole($"🔄 [RelayClient] ProcessFriendRequestMessage: {message}");
             try
             {
                 if (message.StartsWith("FRIEND_REQ:"))
                 {
                     await LogToFile("🎯 [RelayClient] Friend request message détectée!");
-                    Console.WriteLine($"🎯 [RelayClient] Friend request message détectée!");
+                    LogHelper.LogToConsole($"🎯 [RelayClient] Friend request message détectée!");
                     // Format: FRIEND_REQ:fromPeer:toPeer:publicKey:message
                     var parts = message.Substring("FRIEND_REQ:".Length).Split(':', 4);
                     await LogToFile($"[DEBUG] Parts count: {parts.Length}");
-                    Console.WriteLine($"[DEBUG] Parts count: {parts.Length}");
+                    LogHelper.LogToConsole($"[DEBUG] Parts count: {parts.Length}");
                     
                     if (parts.Length >= 4)
                     {
@@ -702,16 +682,16 @@ namespace ChatP2P.Client
                         
                         await LogToFile($"[DEBUG] From: {fromPeer}, To: {toPeer}, Key: {publicKey}, Msg: {requestMessage}");
                         await LogToFile($"✅ Friend request received: {fromPeer} → {toPeer}");
-                        Console.WriteLine($"[DEBUG] From: {fromPeer}, To: {toPeer}, Key: {publicKey}, Msg: {requestMessage}");
-                        Console.WriteLine($"✅ Friend request received: {fromPeer} → {toPeer}");
+                        LogHelper.LogToConsole($"[DEBUG] From: {fromPeer}, To: {toPeer}, Key: {publicKey}, Msg: {requestMessage}");
+                        LogHelper.LogToConsole($"✅ Friend request received: {fromPeer} → {toPeer}");
                         FriendRequestReceived?.Invoke(fromPeer, toPeer, publicKey, requestMessage);
                         await LogToFile("✅ FriendRequestReceived event invoked");
-                        Console.WriteLine($"✅ FriendRequestReceived event invoked");
+                        LogHelper.LogToConsole($"✅ FriendRequestReceived event invoked");
                     }
                     else
                     {
                         await LogToFile($"❌ [RelayClient] Invalid friend request format: {parts.Length} parts");
-                        Console.WriteLine($"❌ [RelayClient] Invalid friend request format: {parts.Length} parts");
+                        LogHelper.LogToConsole($"❌ [RelayClient] Invalid friend request format: {parts.Length} parts");
                     }
                 }
                 else if (message.StartsWith("FRIEND_ACCEPT:"))
@@ -724,7 +704,7 @@ namespace ChatP2P.Client
                         var toPeer = parts[1];
                         var pqcPublicKey = parts.Length >= 3 ? parts[2] : null; // ✅ PQC key optional
 
-                        Console.WriteLine($"Friend request accepted: {fromPeer} ← {toPeer} (PQC: {!string.IsNullOrEmpty(pqcPublicKey)})");
+                        LogHelper.LogToConsole($"Friend request accepted: {fromPeer} ← {toPeer} (PQC: {!string.IsNullOrEmpty(pqcPublicKey)})");
                         FriendRequestAccepted?.Invoke(fromPeer, toPeer, pqcPublicKey);
                     }
                 }
@@ -739,7 +719,7 @@ namespace ChatP2P.Client
                         var ed25519Key = parts[2];
                         var pqcKey = parts[3];
 
-                        Console.WriteLine($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
+                        LogHelper.LogToConsole($"Dual key friend request accepted: {fromPeer} ← {toPeer}");
 
                         // Store both keys automatically
                         try
@@ -760,13 +740,13 @@ namespace ChatP2P.Client
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"❌ Error storing dual keys for {fromPeer}: {ex.Message}");
+                            LogHelper.LogToConsole($"❌ Error storing dual keys for {fromPeer}: {ex.Message}");
                         }
 
                         // ✅ FIX: Use a new event specifically for dual key acceptance responses
                         // This avoids infinite loops while still handling the acceptance properly
                         DualKeyAcceptanceReceived?.Invoke(fromPeer, toPeer, ed25519Key, pqcKey);
-                        Console.WriteLine($"✅ [DUAL-ACCEPT] Keys stored for {fromPeer}, dual acceptance event triggered");
+                        LogHelper.LogToConsole($"✅ [DUAL-ACCEPT] Keys stored for {fromPeer}, dual acceptance event triggered");
                     }
                 }
                 else if (message.StartsWith("FRIEND_REJECT:"))
@@ -778,7 +758,7 @@ namespace ChatP2P.Client
                         var fromPeer = parts[0];
                         var toPeer = parts[1];
 
-                        Console.WriteLine($"Friend request rejected: {fromPeer} ← {toPeer}");
+                        LogHelper.LogToConsole($"Friend request rejected: {fromPeer} ← {toPeer}");
                         FriendRequestRejected?.Invoke(fromPeer, toPeer);
                     }
                 }
@@ -790,7 +770,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing friend request message: {ex.Message}");
+                LogHelper.LogToConsole($"Error processing friend request message: {ex.Message}");
             }
         }
 
@@ -802,7 +782,7 @@ namespace ChatP2P.Client
             try
             {
                 await LogToFile($"🔐 [TUNNEL-RELAY] Received relayed tunnel message from server");
-                Console.WriteLine($"🔐 [TUNNEL-RELAY] Received relayed tunnel message from server");
+                LogHelper.LogToConsole($"🔐 [TUNNEL-RELAY] Received relayed tunnel message from server");
 
                 // Transférer le message au SecureRelayTunnel pour déchiffrement
                 if (_secureTunnel != null)
@@ -811,12 +791,12 @@ namespace ChatP2P.Client
                 }
                 else
                 {
-                    Console.WriteLine($"❌ [TUNNEL-RELAY] No secure tunnel available to handle relayed message");
+                    LogHelper.LogToConsole($"❌ [TUNNEL-RELAY] No secure tunnel available to handle relayed message");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [TUNNEL-RELAY] Error handling relayed tunnel message: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [TUNNEL-RELAY] Error handling relayed tunnel message: {ex.Message}");
             }
         }
         
@@ -826,7 +806,7 @@ namespace ChatP2P.Client
             {
                 // ✅ DEBUG: Log tous les messages reçus pour diagnostiquer WEBRTC_INITIATE
                 // ✅ FIX CRITIQUE: Plus de log debug pour éviter les 5GB de logs avec gros fichiers
-                // Console.WriteLine($"📥 [RELAY-DEBUG] Received message: {message.Substring(0, Math.Min(100, message.Length))}...");
+                // LogHelper.LogToConsole($"📥 [RELAY-DEBUG] Received message: {message.Substring(0, Math.Min(100, message.Length))}...");
                 // await LogToFile($"[RELAY-DEBUG] Received: {message}"); // SUPPRIMÉ - causait 5GB logs
                 if (message.StartsWith("PRIV:"))
                 {
@@ -849,12 +829,12 @@ namespace ChatP2P.Client
                                 var fileSize = metadata.GetProperty("fileSize").GetInt64();
                                 var transferId = metadata.GetProperty("transferId").GetString() ?? "";
                                 
-                                Console.WriteLine($"📁 [RELAY-FILE] Metadata received: {fileName} ({fileSize} bytes) from {fromPeer}");
+                                LogHelper.LogToConsole($"📁 [RELAY-FILE] Metadata received: {fileName} ({fileSize} bytes) from {fromPeer}");
                                 FileMetadataRelayReceived?.Invoke(transferId, fileName, fileSize, fromPeer);
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"❌ [RELAY-FILE] Error parsing metadata: {ex.Message}");
+                                LogHelper.LogToConsole($"❌ [RELAY-FILE] Error parsing metadata: {ex.Message}");
                             }
                         }
                         else if (messageBody.StartsWith("FILE_CHUNK_RELAY:"))
@@ -877,13 +857,13 @@ namespace ChatP2P.Client
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"❌ [RELAY-FILE] Error parsing chunk: {ex.Message}");
+                                LogHelper.LogToConsole($"❌ [RELAY-FILE] Error parsing chunk: {ex.Message}");
                             }
                         }
                         else
                         {
                             // Message privé normal
-                            Console.WriteLine($"Private message received: {fromPeer} → {toPeer}");
+                            LogHelper.LogToConsole($"Private message received: {fromPeer} → {toPeer}");
                             PrivateMessageReceived?.Invoke(fromPeer, toPeer, messageBody);
                         }
                     }
@@ -906,7 +886,7 @@ namespace ChatP2P.Client
                             var timestamp = remainingContent.Substring(0, lastColonIndex);
                             var content = remainingContent.Substring(lastColonIndex + 1);
                             
-                            Console.WriteLine($"💬 Chat message received from {fromPeer}: {content}");
+                            LogHelper.LogToConsole($"💬 Chat message received from {fromPeer}: {content}");
                             ChatMessageReceived?.Invoke(fromPeer, timestamp, content);
                         }
                     }
@@ -915,13 +895,13 @@ namespace ChatP2P.Client
                          message.StartsWith("ICE_ANSWER:") ||
                          message.StartsWith("ICE_CAND:"))
                 {
-                    Console.WriteLine($"🧊 [ICE-LEGACY] Legacy ICE signal received: {message.Substring(0, Math.Min(50, message.Length))}...");
+                    LogHelper.LogToConsole($"🧊 [ICE-LEGACY] Legacy ICE signal received: {message.Substring(0, Math.Min(50, message.Length))}...");
                     IceSignalReceived?.Invoke(message);
                 }
                 else if (message.StartsWith("WEBRTC_INITIATE:"))
                 {
                     // ✅ FIX: Explicitly log WebRTC initiation detection
-                    Console.WriteLine($"🎯 [MSG-PROCESS] WEBRTC_INITIATE detected, calling ProcessWebRTCInitiate");
+                    LogHelper.LogToConsole($"🎯 [MSG-PROCESS] WEBRTC_INITIATE detected, calling ProcessWebRTCInitiate");
                     await LogToFile($"[MSG-PROCESS] WEBRTC_INITIATE detected, calling ProcessWebRTCInitiate");
                     await ProcessWebRTCInitiate(message);
                 }
@@ -940,7 +920,7 @@ namespace ChatP2P.Client
                         var enabled = bool.Parse(parts[2]);
                         var timestamp = parts[3];
                         
-                        Console.WriteLine($"📡 [STATUS-SYNC] Received from {fromPeer}: {statusType} = {enabled}");
+                        LogHelper.LogToConsole($"📡 [STATUS-SYNC] Received from {fromPeer}: {statusType} = {enabled}");
                         StatusSyncReceived?.Invoke(fromPeer, statusType, enabled, timestamp);
                     }
                 }
@@ -950,13 +930,13 @@ namespace ChatP2P.Client
                     var peerList = message.Substring("PEERS:".Length);
                     var peers = string.IsNullOrEmpty(peerList) ? new List<string>() : peerList.Split(',').ToList();
                     
-                    Console.WriteLine($"Peer list updated: {peers.Count} peers");
+                    LogHelper.LogToConsole($"Peer list updated: {peers.Count} peers");
                     PeerListUpdated?.Invoke(peers);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [MESSAGE-CHANNEL] Error processing message: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [MESSAGE-CHANNEL] Error processing message: {ex.Message}");
             }
         }
         
@@ -970,7 +950,7 @@ namespace ChatP2P.Client
                 // Format: WEBRTC_INITIATE:{json}
                 var jsonData = message.Substring("WEBRTC_INITIATE:".Length);
                 
-                Console.WriteLine($"🚀 [WEBRTC-INITIATE] Processing initiation message: {jsonData}");
+                LogHelper.LogToConsole($"🚀 [WEBRTC-INITIATE] Processing initiation message: {jsonData}");
                 await LogToFile($"[WEBRTC-INITIATE] Received: {jsonData}");
                 
                 var initData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(jsonData);
@@ -985,7 +965,7 @@ namespace ChatP2P.Client
                     
                     if (action == "initiate_offer")
                     {
-                        Console.WriteLine($"🎯 [WEBRTC-INITIATE] Server requests ICE offer creation: {initiatorPeer} → {targetPeer}");
+                        LogHelper.LogToConsole($"🎯 [WEBRTC-INITIATE] Server requests ICE offer creation: {initiatorPeer} → {targetPeer}");
                         await LogToFile($"[WEBRTC-INITIATE] Creating offer: {initiatorPeer} → {targetPeer}");
                         await LogIceEvent("INITIATE", initiatorPeer, targetPeer, "RelayClient received WebRTC offer initiation from server", jsonData.Substring(0, Math.Min(100, jsonData.Length)));
                         
@@ -994,7 +974,7 @@ namespace ChatP2P.Client
                     }
                     else if (action == "incoming_connection")
                     {
-                        Console.WriteLine($"🔔 [WEBRTC-INITIATE] Incoming connection notification: {initiatorPeer} → {targetPeer}");
+                        LogHelper.LogToConsole($"🔔 [WEBRTC-INITIATE] Incoming connection notification: {initiatorPeer} → {targetPeer}");
                         await LogToFile($"[WEBRTC-INITIATE] Incoming connection from: {initiatorPeer}");
                         await LogIceEvent("INCOMING", initiatorPeer, targetPeer, "RelayClient received WebRTC incoming connection notification", jsonData.Substring(0, Math.Min(100, jsonData.Length)));
                         
@@ -1003,19 +983,19 @@ namespace ChatP2P.Client
                     }
                     else
                     {
-                        Console.WriteLine($"❓ [WEBRTC-INITIATE] Unknown action: {action}");
+                        LogHelper.LogToConsole($"❓ [WEBRTC-INITIATE] Unknown action: {action}");
                         await LogToFile($"[WEBRTC-INITIATE] Unknown action: {action}");
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"❌ [WEBRTC-INITIATE] Invalid initiation message format");
+                    LogHelper.LogToConsole($"❌ [WEBRTC-INITIATE] Invalid initiation message format");
                     await LogToFile($"[WEBRTC-INITIATE] ERROR: Invalid format - {jsonData}");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [WEBRTC-INITIATE] Error processing initiation: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [WEBRTC-INITIATE] Error processing initiation: {ex.Message}");
                 await LogToFile($"[WEBRTC-INITIATE] ERROR: {ex.Message}");
             }
         }
@@ -1030,7 +1010,7 @@ namespace ChatP2P.Client
                 // Format: WEBRTC_SIGNAL:{json}
                 var jsonData = message.Substring("WEBRTC_SIGNAL:".Length);
                 
-                Console.WriteLine($"📡 [WEBRTC-SIGNAL] Processing signal: {jsonData.Substring(0, Math.Min(80, jsonData.Length))}...");
+                LogHelper.LogToConsole($"📡 [WEBRTC-SIGNAL] Processing signal: {jsonData.Substring(0, Math.Min(80, jsonData.Length))}...");
                 await LogToFile($"[WEBRTC-SIGNAL] Received: {jsonData}");
                 
                 var signalData = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(jsonData);
@@ -1045,7 +1025,7 @@ namespace ChatP2P.Client
                     var toPeer = toPeerEl.GetString() ?? "";
                     var iceData = iceDataEl.GetString() ?? "";
                     
-                    Console.WriteLine($"🔄 [WEBRTC-SIGNAL] Routing {iceType}: {fromPeer} → {toPeer}");
+                    LogHelper.LogToConsole($"🔄 [WEBRTC-SIGNAL] Routing {iceType}: {fromPeer} → {toPeer}");
                     await LogToFile($"[WEBRTC-SIGNAL] {iceType} from {fromPeer} to {toPeer}");
                     await LogIceEvent("SIGNAL", fromPeer, toPeer, $"RelayClient received {iceType} from server", iceData.Substring(0, Math.Min(100, iceData.Length)));
                     
@@ -1054,13 +1034,13 @@ namespace ChatP2P.Client
                 }
                 else
                 {
-                    Console.WriteLine($"❌ [WEBRTC-SIGNAL] Invalid signal message format");
+                    LogHelper.LogToConsole($"❌ [WEBRTC-SIGNAL] Invalid signal message format");
                     await LogToFile($"[WEBRTC-SIGNAL] ERROR: Invalid format - {jsonData}");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [WEBRTC-SIGNAL] Error processing signal: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [WEBRTC-SIGNAL] Error processing signal: {ex.Message}");
                 await LogToFile($"[WEBRTC-SIGNAL] ERROR: {ex.Message}");
             }
         }
@@ -1076,11 +1056,11 @@ namespace ChatP2P.Client
             if (!enabled && _secureTunnel != null)
             {
                 _secureTunnel.ResetTunnel();
-                Console.WriteLine("🔓 Secure tunnel disabled, using legacy protocol");
+                LogHelper.LogToConsole("🔓 Secure tunnel disabled, using legacy protocol");
             }
             else if (enabled)
             {
-                Console.WriteLine("🔐 Secure tunnel enabled for friend requests");
+                LogHelper.LogToConsole("🔐 Secure tunnel enabled for friend requests");
             }
         }
 

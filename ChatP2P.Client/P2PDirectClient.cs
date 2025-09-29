@@ -213,15 +213,7 @@ namespace ChatP2P.Client
         
         private async Task LogToFile(string message)
         {
-            try
-            {
-                var logDir = @"C:\Users\User\Desktop\ChatP2P_Logs";
-                Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "p2p_direct.log");
-                var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
-                await File.AppendAllTextAsync(logFile, logEntry);
-            }
-            catch { /* Ignore log errors */ }
+            await LogHelper.LogToP2PAsync(message);
         }
         
         /// <summary>

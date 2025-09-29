@@ -308,11 +308,11 @@ namespace ChatP2P.Client
                 catch (System.Data.SQLite.SQLiteException ex) when (ex.Message.Contains("duplicate column"))
                 {
                     // Ignore duplicate column errors (migrations)
-                    Console.WriteLine($"Column already exists (ignored): {ex.Message}");
+                    LogHelper.LogToConsole($"Column already exists (ignored): {ex.Message}");
                 }
             }
 
-            Console.WriteLine($"Database initialized at: {_dbPath}");
+            LogHelper.LogToConsole($"Database initialized at: {_dbPath}");
         }
 
         // Helper methods pour les conversions SQLite
@@ -386,7 +386,7 @@ namespace ChatP2P.Client
                     updateCmd.Parameters.AddWithValue("@id", id);
                     updateCmd.ExecuteNonQuery();
 
-                    Console.WriteLine($"✅ [UUID-MIGRATION] Generated UUID for peer '{name}': {uuid}");
+                    LogHelper.LogToConsole($"✅ [UUID-MIGRATION] Generated UUID for peer '{name}': {uuid}");
                 }
 
                 // 2. Migrer les références existantes Messages.PeerName → Messages.PeerUUID
@@ -409,12 +409,12 @@ namespace ChatP2P.Client
 
                 if (peersToUpdate.Count > 0 || msgUpdated > 0 || keysUpdated > 0)
                 {
-                    Console.WriteLine($"✅ [UUID-MIGRATION] Migration completed: {peersToUpdate.Count} peers, {msgUpdated} messages, {keysUpdated} keys");
+                    LogHelper.LogToConsole($"✅ [UUID-MIGRATION] Migration completed: {peersToUpdate.Count} peers, {msgUpdated} messages, {keysUpdated} keys");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [UUID-MIGRATION] Error during UUID migration: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [UUID-MIGRATION] Error during UUID migration: {ex.Message}");
                 // Ne pas planter l'app si migration échoue
             }
         }
@@ -452,7 +452,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [DB-CHAT] Error getting chat sessions: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [DB-CHAT] Error getting chat sessions: {ex.Message}");
             }
             return sessions;
         }
@@ -487,7 +487,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [DB-CHAT] Error updating chat session for {peerName}: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [DB-CHAT] Error updating chat session for {peerName}: {ex.Message}");
                 return false;
             }
         }
@@ -508,7 +508,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [DB-CHAT] Error marking chat as read for {peerName}: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [DB-CHAT] Error marking chat as read for {peerName}: {ex.Message}");
                 return false;
             }
         }
@@ -529,7 +529,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [DB-CHAT] Error deleting chat session for {peerName}: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [DB-CHAT] Error deleting chat session for {peerName}: {ex.Message}");
                 return false;
             }
         }
@@ -743,12 +743,12 @@ namespace ChatP2P.Client
                 
                 var deletedCount = await command.ExecuteNonQueryAsync();
                 
-                Console.WriteLine($"🗑️ [DB-DELETE] Deleted {deletedCount} messages with peer: {peerName}");
+                LogHelper.LogToConsole($"🗑️ [DB-DELETE] Deleted {deletedCount} messages with peer: {peerName}");
                 return deletedCount > 0;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [DB-DELETE] Error deleting messages for {peerName}: {ex.Message}");
+                LogHelper.LogToConsole($"❌ [DB-DELETE] Error deleting messages for {peerName}: {ex.Message}");
                 return false;
             }
         }
@@ -1114,7 +1114,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error getting fingerprint: {ex.Message}");
+                LogHelper.LogToConsole($"Error getting fingerprint: {ex.Message}");
             }
             return "(unknown)";
         }
@@ -1143,7 +1143,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error exporting key: {ex.Message}");
+                LogHelper.LogToConsole($"Error exporting key: {ex.Message}");
             }
             return ("", "(unknown)");
         }
@@ -1165,7 +1165,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error getting PQC public key: {ex.Message}");
+                LogHelper.LogToConsole($"Error getting PQC public key: {ex.Message}");
                 return null;
             }
         }
@@ -1217,7 +1217,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error resetting TOFU: {ex.Message}");
+                LogHelper.LogToConsole($"Error resetting TOFU: {ex.Message}");
                 return false;
             }
         }
@@ -1248,7 +1248,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error importing peer key: {ex.Message}");
+                LogHelper.LogToConsole($"Error importing peer key: {ex.Message}");
                 throw;
             }
         }
@@ -1287,7 +1287,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error ensuring Ed25519 identity: {ex.Message}");
+                LogHelper.LogToConsole($"Error ensuring Ed25519 identity: {ex.Message}");
                 return false;
             }
         }
@@ -1304,12 +1304,12 @@ namespace ChatP2P.Client
                 var keyPair = await CryptoService.GenerateKeyPair();
                 await SetIdentityPq(keyPair.PublicKey, keyPair.PrivateKey);
 
-                Console.WriteLine($"Generated new PQ identity: {keyPair.Algorithm}");
+                LogHelper.LogToConsole($"Generated new PQ identity: {keyPair.Algorithm}");
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error ensuring PQ identity: {ex.Message}");
+                LogHelper.LogToConsole($"Error ensuring PQ identity: {ex.Message}");
                 return false;
             }
         }
@@ -1370,7 +1370,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error getting peer name by fingerprint: {ex.Message}");
+                LogHelper.LogToConsole($"Error getting peer name by fingerprint: {ex.Message}");
                 return null;
             }
         }
@@ -1383,7 +1383,7 @@ namespace ChatP2P.Client
             var peerName = await GetPeerNameByFingerprint(fingerprint);
             if (peerName == null)
             {
-                Console.WriteLine($"No peer found with fingerprint: {fingerprint}");
+                LogHelper.LogToConsole($"No peer found with fingerprint: {fingerprint}");
                 return false;
             }
 
@@ -1398,7 +1398,7 @@ namespace ChatP2P.Client
             var peerName = await GetPeerNameByFingerprint(fingerprint);
             if (peerName == null)
             {
-                Console.WriteLine($"No peer found with fingerprint: {fingerprint}");
+                LogHelper.LogToConsole($"No peer found with fingerprint: {fingerprint}");
                 return false;
             }
 
@@ -1413,7 +1413,7 @@ namespace ChatP2P.Client
             var peerName = await GetPeerNameByFingerprint(fingerprint);
             if (peerName == null)
             {
-                Console.WriteLine($"No peer found with fingerprint: {fingerprint}");
+                LogHelper.LogToConsole($"No peer found with fingerprint: {fingerprint}");
                 return false;
             }
 
@@ -1444,7 +1444,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error updating peer last seen: {ex.Message}");
+                LogHelper.LogToConsole($"Error updating peer last seen: {ex.Message}");
                 return false;
             }
         }
@@ -1475,7 +1475,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error checking peer keys changed: {ex.Message}");
+                LogHelper.LogToConsole($"Error checking peer keys changed: {ex.Message}");
                 return (false, null, null);
             }
         }
@@ -1495,10 +1495,10 @@ namespace ChatP2P.Client
                     await LogSecurityEvent(peerName, "KEY_CHANGE_DETECTED",
                         $"SECURITY ALERT: {peerName} keys changed! Old: {oldFp} → New: {newFp} Context: {context}");
 
-                    Console.WriteLine($"🚨 [SECURITY] Peer {peerName} keys changed!");
-                    Console.WriteLine($"   Old FP: {oldFp}");
-                    Console.WriteLine($"   New FP: {newFp}");
-                    Console.WriteLine($"   Context: {context}");
+                    LogHelper.LogToConsole($"🚨 [SECURITY] Peer {peerName} keys changed!");
+                    LogHelper.LogToConsole($"   Old FP: {oldFp}");
+                    LogHelper.LogToConsole($"   New FP: {newFp}");
+                    LogHelper.LogToConsole($"   Context: {context}");
 
                     // Marquer comme non-vérifié jusqu'à validation manuelle
                     await SetPeerVerified(peerName, false);
@@ -1512,7 +1512,7 @@ namespace ChatP2P.Client
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error handling peer key change: {ex.Message}");
+                LogHelper.LogToConsole($"Error handling peer key change: {ex.Message}");
                 return false;
             }
         }

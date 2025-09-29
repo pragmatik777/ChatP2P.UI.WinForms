@@ -36,7 +36,15 @@
       "Bash(dotnet add:*)",
       "Bash(powershell.exe:*)",
       "Bash(move:*)",
-      "WebFetch(domain:reqrypt.org)"
+      "WebFetch(domain:reqrypt.org)",
+      "Bash(dotnet restore:*)",
+      "Bash(Stop-Process -Name \"ChatP2P.Client\" -Force)",
+      "Bash(ChatP2P.Server.exe)",
+      "Bash(\"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\ChatP2P.Server\\bin\\Debug\\net8.0\\ChatP2P.Server.exe\")",
+      "Bash(timeout:*)",
+      "Bash(netstat:*)",
+      "Bash(dotnet search:*)",
+      "Bash(sed:*)"
     ],
     "deny": [],
     "ask": []

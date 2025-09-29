@@ -14,9 +14,16 @@ namespace ChatP2P.Server
         private static TcpListener? _tcpListener;
         private static RelayHub? _relayHub;
         private static VOIPRelayService? _voipRelay;
+        private static VOIPAudioRelayService? _audioRelay;
+        private static VOIPVideoRelayService? _videoRelay;
 
         // Getter public pour le RelayHub
         public static RelayHub? GetRelayHub() => _relayHub;
+
+        // ✅ NOUVEAU: Getters pour les services VOIP
+        public static VOIPRelayService? GetVOIPRelay() => _voipRelay;
+        public static VOIPAudioRelayService? GetAudioRelay() => _audioRelay;
+        public static VOIPVideoRelayService? GetVideoRelay() => _videoRelay;
         private static bool _isRunning = false;
         private static bool _p2pInitialized = false;
         private static string? _displayName = null;
@@ -68,7 +75,15 @@ namespace ChatP2P.Server
             {
                 Console.WriteLine($"Erreur fatale: {ex.Message}");
                 Console.WriteLine("Appuyez sur une touche pour quitter...");
-                Console.ReadKey();
+                try
+                {
+                    Console.ReadKey();
+                }
+                catch
+                {
+                    // Ignore console input error in background execution
+                    await Task.Delay(1000);
+                }
             }
             finally
             {
@@ -335,11 +350,49 @@ namespace ChatP2P.Server
 
                 await _voipRelay.StartAsync();
                 Console.WriteLine("✅ VOIP Relay Service started on port 8892");
+
+                // ✅ NOUVEAU: Démarrer les canaux dédiés audio/vidéo
+                await StartDedicatedAudioVideoRelays();
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ Failed to start VOIP Relay Service: {ex.Message}");
                 LogToFile($"[VOIP-RELAY] Failed to start: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 🚀 NOUVEAU: Démarrer canaux dédiés audio/vidéo pure binary
+        /// </summary>
+        private static async Task StartDedicatedAudioVideoRelays()
+        {
+            try
+            {
+                // ✅ Démarrer Audio Relay Service (port 8893)
+                _audioRelay = new VOIPAudioRelayService();
+                _audioRelay.LogEvent += (message) =>
+                {
+                    Console.WriteLine(message);
+                    LogToFile($"[AUDIO-RELAY] {message}");
+                };
+                await _audioRelay.StartAsync();
+
+                // ✅ Démarrer Video Relay Service (port 8894)
+                _videoRelay = new VOIPVideoRelayService();
+                _videoRelay.LogEvent += (message) =>
+                {
+                    Console.WriteLine(message);
+                    LogToFile($"[VIDEO-RELAY] {message}");
+                };
+                await _videoRelay.StartAsync();
+
+                Console.WriteLine("✅ Dedicated Audio/Video Relays started (8893/8894)");
+                LogToFile("[DEDICATED-RELAY] Pure binary audio/video relays started");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Failed to start dedicated relays: {ex.Message}");
+                LogToFile($"[DEDICATED-RELAY] Failed to start: {ex.Message}");
             }
         }
 
@@ -2390,11 +2443,22 @@ namespace ChatP2P.Server
         {
             await Task.Run(() =>
             {
-                while (true)
+                while (_isRunning)
                 {
-                    var key = Console.ReadKey(true);
-                    if (key.KeyChar == 'q' || key.KeyChar == 'Q')
-                        break;
+                    try
+                    {
+                        var key = Console.ReadKey(true);
+                        if (key.KeyChar == 'q' || key.KeyChar == 'Q')
+                        {
+                            _isRunning = false;
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // Console not available, run indefinitely until _isRunning = false
+                        Thread.Sleep(1000);
+                    }
                 }
             });
         }
@@ -2416,6 +2480,19 @@ namespace ChatP2P.Server
             {
                 _voipRelay.Stop();
                 Console.WriteLine("VOIP Relay arrêté");
+            }
+
+            // ✅ NOUVEAU: Arrêter les canaux dédiés audio/vidéo
+            if (_audioRelay != null)
+            {
+                await _audioRelay.StopAsync();
+                Console.WriteLine("Audio Relay arrêté");
+            }
+
+            if (_videoRelay != null)
+            {
+                await _videoRelay.StopAsync();
+                Console.WriteLine("Video Relay arrêté");
             }
             
             await Task.Delay(100); // Laisser le temps aux tâches de se terminer

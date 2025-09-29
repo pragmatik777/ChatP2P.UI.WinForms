@@ -36,7 +36,16 @@
       <Value Profile="(Default)">True</Value>
     </Setting>
     <Setting Name="RelayServerIP" Type="System.String" Scope="User">
-      <Value Profile="(Default)">192.168.1.152</Value>
+      <Value Profile="(Default)"></Value>
+    </Setting>
+    <Setting Name="SelectedMicrophoneDevice" Type="System.String" Scope="User">
+      <Value Profile="(Default)"></Value>
+    </Setting>
+    <Setting Name="SelectedSpeakerDevice" Type="System.String" Scope="User">
+      <Value Profile="(Default)"></Value>
+    </Setting>
+    <Setting Name="SelectedVideoDevice" Type="System.String" Scope="User">
+      <Value Profile="(Default)"></Value>
     </Setting>
   </Settings>
 </SettingsFile>

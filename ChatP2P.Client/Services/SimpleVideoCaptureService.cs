@@ -80,7 +80,12 @@ namespace ChatP2P.Client.Services
                 }
                 else
                 {
-                    LogEvent?.Invoke("[VideoCapture] ✅ Video capture started (no camera - receiving only)");
+                    LogEvent?.Invoke("[VideoCapture] ✅ Video capture started (simulation mode - no camera)");
+
+                    // ✅ FIX: Démarrer simulation vidéo pour VMs sans caméra
+                    _isPlayingFile = true;
+                    _currentVideoFile = "simulation"; // Fake file pour activer la simulation
+                    _ = Task.Run(async () => await SimulateVideoFilePlayback());
                 }
 
                 CaptureStateChanged?.Invoke(true);
@@ -135,35 +140,131 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// Simuler la lecture de fichier vidéo (envoi de frames fictives)
+        /// Simuler la lecture de fichier vidéo (envoi de frames fictives ou réelles)
         /// </summary>
         private async Task SimulateVideoFilePlayback()
         {
             try
             {
+                LogEvent?.Invoke($"[VideoCapture] 📹 Starting video simulation - File: {_currentVideoFile ?? "Built-in sample"}");
+
                 int frameCount = 0;
                 while (_isPlayingFile && !string.IsNullOrEmpty(_currentVideoFile))
                 {
-                    // Simuler une frame vidéo (couleur qui change)
-                    var frameData = GenerateTestVideoFrame(frameCount);
-                    var videoFrame = new VideoFrame
+                    if (_currentVideoFile == "simulation")
                     {
-                        Width = VIDEO_WIDTH,
-                        Height = VIDEO_HEIGHT,
-                        // Note: VideoFrame peut avoir différentes propriétés selon la version SipSorcery
-                        // Pour l'instant, on passe juste la frame
-                    };
+                        // Générer frame de test avec pattern animé
+                        var frameData = GenerateTestVideoFrame(frameCount);
+                        var videoFrame = new VideoFrame
+                        {
+                            Width = VIDEO_WIDTH,
+                            Height = VIDEO_HEIGHT,
+                            Data = frameData,
+                            PixelFormat = VideoPixelFormatsEnum.Rgb,
+                            Timestamp = DateTime.Now.Ticks
+                        };
 
-                    VideoFrameReady?.Invoke(videoFrame);
+                        VideoFrameReady?.Invoke(videoFrame);
+                    }
+                    else if (File.Exists(_currentVideoFile))
+                    {
+                        // TODO: Lire vraies frames du fichier vidéo
+                        var frameData = await ReadVideoFileSample(_currentVideoFile, frameCount);
+                        if (frameData != null && frameData.Length > 0)
+                        {
+                            var videoFrame = new VideoFrame
+                            {
+                                Width = VIDEO_WIDTH,
+                                Height = VIDEO_HEIGHT,
+                                Data = frameData,
+                                PixelFormat = VideoPixelFormatsEnum.Rgb,
+                                Timestamp = DateTime.Now.Ticks
+                            };
+
+                            VideoFrameReady?.Invoke(videoFrame);
+                        }
+                    }
+                    else
+                    {
+                        // Fallback vers test pattern
+                        var frameData = GenerateTestVideoFrame(frameCount);
+                        var videoFrame = new VideoFrame
+                        {
+                            Width = VIDEO_WIDTH,
+                            Height = VIDEO_HEIGHT,
+                            Data = frameData,
+                            PixelFormat = VideoPixelFormatsEnum.Rgb,
+                            Timestamp = DateTime.Now.Ticks
+                        };
+
+                        VideoFrameReady?.Invoke(videoFrame);
+                    }
 
                     frameCount++;
-                    await Task.Delay(1000 / VIDEO_FPS); // Respecter le framerate
+                    await Task.Delay(1000 / VIDEO_FPS); // Respecter le framerate (15 FPS)
                 }
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[VideoCapture] ❌ Error during video file playback simulation: {ex.Message}");
+                LogEvent?.Invoke($"[VideoCapture] ❌ Error during video simulation: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Lire frame d'un fichier vidéo (placeholder pour vraie implémentation)
+        /// </summary>
+        private async Task<byte[]?> ReadVideoFileSample(string filePath, int frameNumber)
+        {
+            try
+            {
+                // TODO: Implémenter vraie lecture vidéo avec FFMpeg.NET ou équivalent
+                // Pour l'instant, retourner pattern différent pour indiquer qu'on "lit" un fichier
+                LogEvent?.Invoke($"[VideoCapture] 📁 Reading video file frame {frameNumber}: {Path.GetFileName(filePath)}");
+
+                // Générer pattern différent pour files vs simulation
+                return GenerateFileVideoFrame(frameNumber);
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoCapture] ❌ Error reading video file: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Générer frame spéciale pour simulation de lecture fichier
+        /// </summary>
+        private byte[] GenerateFileVideoFrame(int frameNumber)
+        {
+            var frameSize = VIDEO_WIDTH * VIDEO_HEIGHT * 3; // RGB24
+            var frameData = new byte[frameSize];
+
+            // Pattern différent pour les "files" - grille avec mouvement
+            for (int y = 0; y < VIDEO_HEIGHT; y++)
+            {
+                for (int x = 0; x < VIDEO_WIDTH; x++)
+                {
+                    int index = (y * VIDEO_WIDTH + x) * 3;
+
+                    // Créer pattern grille avec animation
+                    bool isGrid = ((x + frameNumber / 5) % 40 < 5) || ((y + frameNumber / 5) % 30 < 3);
+
+                    if (isGrid)
+                    {
+                        frameData[index] = 255;     // R (blanc pour grille)
+                        frameData[index + 1] = 255; // G
+                        frameData[index + 2] = 255; // B
+                    }
+                    else
+                    {
+                        frameData[index] = (byte)(64 + frameNumber % 128);     // R (bleu animé)
+                        frameData[index + 1] = (byte)(32);                     // G
+                        frameData[index + 2] = (byte)(128 + frameNumber % 127); // B
+                    }
+                }
+            }
+
+            return frameData;
         }
 
         /// <summary>
@@ -221,11 +322,21 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                return new[] { "Default Camera (Simulated)" };
+                // En VM, lister les périphériques simulés pour debugging
+                var devices = new List<string>();
+
+                // TODO: En production, énumérer DirectShow devices ou MediaFoundation
+                devices.Add("📹 Default Camera (VM Simulation)");
+                devices.Add("🖥️ Screen Capture (VM Desktop)");
+                devices.Add("📁 Video File Playback (Test Mode)");
+                devices.Add("🎨 Test Pattern Generator");
+
+                return devices.ToArray();
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return Array.Empty<string>();
+                // En cas d'erreur, retourner au moins le mode simulation
+                return new[] { $"⚠️ Error detecting video: {ex.Message}", "📹 Simulation Mode Available" };
             }
         }
 

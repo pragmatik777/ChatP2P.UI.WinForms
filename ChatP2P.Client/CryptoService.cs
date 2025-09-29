@@ -16,15 +16,7 @@ namespace ChatP2P.Client
         /// </summary>
         public static async Task LogCrypto(string message)
         {
-            try
-            {
-                var logDir = @"C:\Users\User\Desktop\ChatP2P_Logs";
-                Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "crypto.log");
-                var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
-                await File.AppendAllTextAsync(logFile, logEntry);
-            }
-            catch { /* Ignore log errors */ }
+            await LogHelper.LogToCryptoAsync(message);
         }
         /// <summary>
         /// Paire de clés ECDH P-384 (temporaire - migration ML-KEM-768 prévue)

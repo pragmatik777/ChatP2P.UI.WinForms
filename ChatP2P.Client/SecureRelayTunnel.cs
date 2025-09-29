@@ -347,10 +347,10 @@ namespace ChatP2P.Client
                 {
                     await LogTunnel($"✅ [TUNNEL-RELAY] Successfully decrypted friend request from {sender}");
 
-                    Console.WriteLine($"🎉 [TUNNEL-RELAY] Decrypted friend request: {sender} → {_localDisplayName}");
-                    Console.WriteLine($"📋 [TUNNEL-RELAY] Ed25519: {ed25519Key.Substring(0, 20)}...");
-                    Console.WriteLine($"📋 [TUNNEL-RELAY] PQC: {pqcKey.Substring(0, 20)}...");
-                    Console.WriteLine($"💬 [TUNNEL-RELAY] Message: {message}");
+                    LogHelper.LogToConsole($"🎉 [TUNNEL-RELAY] Decrypted friend request: {sender} → {_localDisplayName}");
+                    LogHelper.LogToConsole($"📋 [TUNNEL-RELAY] Ed25519: {ed25519Key.Substring(0, 20)}...");
+                    LogHelper.LogToConsole($"📋 [TUNNEL-RELAY] PQC: {pqcKey.Substring(0, 20)}...");
+                    LogHelper.LogToConsole($"💬 [TUNNEL-RELAY] Message: {message}");
 
                     // Déclencher l'événement pour notifier l'interface utilisateur
                     SecureFriendRequestReceived?.Invoke(sender, _localDisplayName, ed25519Key, pqcKey, message);
@@ -380,16 +380,8 @@ namespace ChatP2P.Client
 
         private async Task LogTunnel(string message)
         {
-            try
-            {
-                var logDir = @"C:\Users\User\Desktop\ChatP2P_Logs";
-                Directory.CreateDirectory(logDir);
-                var logFile = Path.Combine(logDir, "secure_tunnel.log");
-                var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}";
-                await File.AppendAllTextAsync(logFile, logEntry);
-                Console.WriteLine(message);
-            }
-            catch { /* Ignore log errors */ }
+            await LogHelper.LogToGeneralAsync(message);
+            LogHelper.LogToConsole(message);
         }
     }
 }

@@ -157,3 +157,38 @@ var decrypted = await CryptoService.DecryptMessage(encrypted, ownerPrivateKey);
 - **Message Fragmentation** : ✅ System validated anti-corruption
 - **SCTP Issue** : VM environments confirmed, fallback ready
 - **Status** : ✅ Infrastructure testée production ready
+
+## 📋 **CENTRALIZED LOGGING SYSTEM (30/09/2025)**
+**🎯 System Goal**: Unified logging control via VerboseLogging checkbox + specialized log files
+
+### ✅ **Architecture Implémentée**:
+- **LogHelper.cs** : Central logging hub pour application principale
+- **ServiceLogHelper.cs** : Logging isolé pour services (évite références circulaires)
+- **Intelligent Routing** : Auto-dispatch par keywords vers fichiers spécialisés
+- **VerboseLogging Control** : TOUS les logs dépendants de la checkbox (si décoché = AUCUN log)
+
+### 📁 **Fichiers Log Spécialisés**:
+- **client_audio.log** : VOIP, Opus, Spectrum, Microphone testing
+- **client_crypto.log** : PQC encryption/decryption, key exchange
+- **client_relay.log** : Server communications, WebRTC signaling
+- **client_p2p.log** : Direct P2P transfers, file streaming
+- **client_ice.log** : ICE candidates, connection states
+- **client_general.log** : Autres logs système
+
+### 🔧 **Files Updated**:
+- **MainWindow.xaml.cs** : Intelligent log routing par keywords
+- **RelayClient.cs** : LogHelper.LogToRelayAsync + LogToConsole
+- **CryptoService.cs** : LogHelper.LogToCryptoAsync centralized
+- **P2PDirectClient.cs** : LogHelper.LogToP2PAsync integration
+- **DatabaseService.cs** : Console.WriteLine → LogHelper.LogToConsole
+- **SecureRelayTunnel.cs** : LogHelper.LogToGeneralAsync routing
+- **VOIPCallManager.cs** : ServiceLogHelper.LogToAudioAsync (évite circular ref)
+
+### ✅ **Features Clés**:
+- **Conditional Logging** : Tout dépend de VerboseLogging checkbox
+- **Service Isolation** : ServiceLogHelper pour éviter dépendances circulaires
+- **Keyword Intelligence** : Auto-routing AUDIO/VOIP/OPUS → client_audio.log
+- **Backwards Compatibility** : Maintient interfaces existantes
+- **Zero Performance Impact** : Early return si VerboseLogging disabled
+
+**🎯 Status** : ✅ Logging centralisé production ready (build successful)
