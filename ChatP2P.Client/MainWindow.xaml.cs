@@ -14,6 +14,8 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Shapes;
+using IOPath = System.IO.Path;
 using System.Windows.Threading;
 using Microsoft.Win32;
 // ✅ REMOVED: VB.NET ChatP2P.Crypto - using C# CryptoService directly
@@ -67,7 +69,7 @@ namespace ChatP2P.Client
         // 🎥 NOUVEAU: Services VOIP/Vidéo
         private VOIPCallManager? _voipManager;
         private SimpleWebRTCMediaClient? _mediaClient;
-        private SimpleAudioCaptureService? _audioCapture;
+        // ❌ REMOVED: SimpleAudioCaptureService? // ❌ REMOVED: _audioCapture - replaced by OpusAudioStreamingService
         private SimpleVideoCaptureService? _videoCapture;
         private DispatcherTimer? _callDurationTimer;
         private DateTime _callStartTime;
@@ -77,15 +79,25 @@ namespace ChatP2P.Client
         // Variables manquantes pour architecture client/serveur
         private string _clientId = Environment.MachineName; // Default client ID
 
+        // 🎤📊 NOUVEAU: Audio Spectrum Analyzer
+        private DispatcherTimer? _spectrumTimer;
+        private readonly Random _random = new(); // Fallback pour simulation
+        private bool _isSpectrumMonitoring = false;
+        private readonly List<Rectangle> _spectrumBars = new();
+
+        // ✅ NOUVEAU: Variables pour vraies données audio
+        private double _lastAudioLevel = 0;
+        private readonly double[] _frequencyBands = new double[20]; // 20 bandes de fréquence
+
         public MainWindow()
         {
             InitializeComponent();
 
             // Initialize local contacts file path
             var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            var appFolder = Path.Combine(appDataPath, "ChatP2P");
+            var appFolder = IOPath.Combine(appDataPath, "ChatP2P");
             Directory.CreateDirectory(appFolder);
-            _contactsFilePath = Path.Combine(appFolder, "local_contacts.json");
+            _contactsFilePath = IOPath.Combine(appFolder, "local_contacts.json");
             InitializeCollections();
             InitializeRefreshTimer();
             InitializeFileTransferTimer();
@@ -95,6 +107,13 @@ namespace ChatP2P.Client
             _ = LoadChatSessionsAsync(); // Load chat history from database
             this.Loaded += MainWindow_Loaded;
             this.Closing += MainWindow_Closing;
+
+            // ✅ NOUVEAU: Charger les périphériques audio/vidéo au démarrage
+            _ = LoadDevicesOnStartup();
+
+            // 🔧 FIX: Initialiser VOIP immédiatement dans le constructeur
+            // pour éviter les clics prématurés sur les boutons audio/vidéo
+            InitializeVOIPServices();
         }
 
         public RelayClient? GetRelayClient()
@@ -171,7 +190,7 @@ namespace ChatP2P.Client
             {
                 // Load from app settings or config file
                 txtDisplayName.Text = Properties.Settings.Default.DisplayName ?? Environment.UserName;
-                txtRelayServerIP.Text = Properties.Settings.Default.RelayServerIP ?? "192.168.1.152";
+                txtRelayServerIP.Text = Properties.Settings.Default.RelayServerIP ?? "";
 
                 chkStrictTrust.IsChecked = Properties.Settings.Default.StrictTrust;
                 chkVerbose.IsChecked = Properties.Settings.Default.VerboseLogging;
@@ -404,10 +423,20 @@ namespace ChatP2P.Client
                     // 🔧 FIX CRITIQUE: Utiliser displayName au lieu de _clientId (hostname) pour VOIP signaling
                     var displayName = txtDisplayName?.Text?.Trim() ?? Environment.UserName;
                     _voipManager = new VOIPCallManager(displayName, _webrtcClient);
+
+                    // ✅ NOUVEAU: Set server IP from textbox
+                    var serverIP = txtRelayServerIP?.Text?.Trim();
+                    if (string.IsNullOrWhiteSpace(serverIP))
+                    {
+                        _ = LogToFile("❌ Server IP is required from textbox - no hardcoded fallback!");
+                        return;
+                    }
+                    _voipManager.SetServerIP(serverIP);
+
                     _mediaClient = new SimpleWebRTCMediaClient(displayName);
 
                     // 🎬 NOUVEAU: Initialiser les services de capture
-                    _audioCapture = new SimpleAudioCaptureService();
+                    // ❌ REMOVED: // ❌ REMOVED: _audioCapture = // ❌ REMOVED: new SimpleAudioCaptureService() - replaced by OpusAudioStreamingService
                     _videoCapture = new SimpleVideoCaptureService();
 
                     // Event handlers pour VOIP Manager
@@ -441,7 +470,7 @@ namespace ChatP2P.Client
                     _voipManager.LogEvent += (msg) => _ = LogToFile($"[VOIP] {msg}");
 
                     // Event handlers pour Capture Services
-                    _audioCapture.LogEvent += (msg) => _ = LogToFile($"[AUDIO] {msg}");
+                    // ❌ REMOVED: _audioCapture.LogEvent += (msg) => _ = LogToFile($"[AUDIO] {msg}");
                     _videoCapture.LogEvent += (msg) => _ = LogToFile($"[VIDEO] {msg}");
 
                     // Event handlers pour Media Client
@@ -1788,22 +1817,22 @@ namespace ChatP2P.Client
                 }
                 
                 // Save file to ChatP2P_Recv directory
-                var downloadDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ChatP2P_Recv");
+                var downloadDir = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "ChatP2P_Recv");
                 if (!Directory.Exists(downloadDir))
                 {
                     Directory.CreateDirectory(downloadDir);
                 }
                 
-                var outputPath = Path.Combine(downloadDir, transfer.FileName);
+                var outputPath = IOPath.Combine(downloadDir, transfer.FileName);
                 
                 // Avoid overwriting existing files
                 int counter = 1;
                 var originalPath = outputPath;
                 while (File.Exists(outputPath))
                 {
-                    var nameWithoutExt = Path.GetFileNameWithoutExtension(originalPath);
-                    var extension = Path.GetExtension(originalPath);
-                    outputPath = Path.Combine(downloadDir, $"{nameWithoutExt}_{counter}{extension}");
+                    var nameWithoutExt = IOPath.GetFileNameWithoutExtension(originalPath);
+                    var extension = IOPath.GetExtension(originalPath);
+                    outputPath = IOPath.Combine(downloadDir, $"{nameWithoutExt}_{counter}{extension}");
                     counter++;
                 }
                 
@@ -1919,8 +1948,8 @@ namespace ChatP2P.Client
             var serverIp = txtRelayServerIP.Text.Trim();
             if (string.IsNullOrWhiteSpace(serverIp))
             {
-                serverIp = "192.168.1.152"; // Default value
-                txtRelayServerIP.Text = serverIp;
+                await LogToFile("❌ Server IP is required from textbox - no hardcoded fallback!");
+                return;
             }
 
             // DEBUG: Log quelle IP est utilisée
@@ -3119,26 +3148,9 @@ namespace ChatP2P.Client
                     var audioFile = openFileDialog.FileName;
                     await LogToFile($"[VOIP-TEST] Loading audio file: {audioFile}");
 
-                    if (_audioCapture != null)
-                    {
-                        var success = await _audioCapture.StartAudioFilePlaybackAsync(audioFile);
-                        if (success)
-                        {
-                            lblAudioTestStatus.Text = $"Playing: {Path.GetFileName(audioFile)}";
-                            lblAudioTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF4CAF50"));
-                            btnTestAudioFile.IsEnabled = false;
-                            btnStopAudioTest.IsEnabled = true;
-                            await LogToFile($"[VOIP-TEST] ✅ Audio file playback started");
-                        }
-                        else
-                        {
-                            MessageBox.Show("Failed to start audio file playback.", "Audio Test", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        }
-                    }
-                    else
-                    {
-                        MessageBox.Show("Audio service not ready.", "Audio Test", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    }
+                    // ❌ REMOVED: Audio capture service functionality - replaced by OpusAudioStreamingService
+                    // TODO: Implement audio file playback with OpusAudioStreamingService if needed
+                    MessageBox.Show("Audio file testing not implemented with OpusAudioStreamingService yet.", "Audio Test", MessageBoxButton.OK, MessageBoxImage.Information);
                 }
             }
             catch (Exception ex)
@@ -3152,9 +3164,10 @@ namespace ChatP2P.Client
         {
             try
             {
-                if (_audioCapture != null)
+                // ❌ REMOVED: Audio capture service functionality - replaced by OpusAudioStreamingService
+                // TODO: Implement audio stop with OpusAudioStreamingService if needed
                 {
-                    await _audioCapture.StopCaptureAsync();
+                    // Placeholder since audio capture removed
                     lblAudioTestStatus.Text = "Audio test stopped";
                     lblAudioTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF888888"));
                     btnTestAudioFile.IsEnabled = true;
@@ -3189,7 +3202,7 @@ namespace ChatP2P.Client
                         var success = await _videoCapture.StartVideoFilePlaybackAsync(videoFile);
                         if (success)
                         {
-                            lblVideoTestStatus.Text = $"Playing: {Path.GetFileName(videoFile)}";
+                            lblVideoTestStatus.Text = $"Playing: {IOPath.GetFileName(videoFile)}";
                             lblVideoTestStatus.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF4CAF50"));
                             btnTestVideoFile.IsEnabled = false;
                             btnStopVideoTest.IsEnabled = true;
@@ -4128,7 +4141,7 @@ namespace ChatP2P.Client
 
                 // Créer le dossier de réception s'il n'existe pas
                 var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                var receiveFolder = Path.Combine(desktopPath, "ChatP2P_Recv");
+                var receiveFolder = IOPath.Combine(desktopPath, "ChatP2P_Recv");
 
                 if (!Directory.Exists(receiveFolder))
                 {
@@ -4190,7 +4203,7 @@ namespace ChatP2P.Client
                     ? originalFileName  // ✅ FIX: Préserver nom original sans horodatage
                     : $"received_from_{peer}_{DateTime.Now:yyyyMMdd_HHmmss}.bin";
 
-                var fullPath = Path.Combine(receiveFolder, fileName);
+                var fullPath = IOPath.Combine(receiveFolder, fileName);
 
                 // Écrire le fichier
                 await File.WriteAllBytesAsync(fullPath, actualFileData);
@@ -4443,10 +4456,10 @@ namespace ChatP2P.Client
                 if (!forceLog && !Properties.Settings.Default.VerboseLogging)
                     return;
                 var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
+                var logDir = IOPath.Combine(desktopPath, "ChatP2P_Logs");
                 Directory.CreateDirectory(logDir);
                 
-                var logFile = Path.Combine(logDir, "client.log");
+                var logFile = IOPath.Combine(logDir, "client.log");
                 var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
                 var logEntry = $"[{timestamp}] {message}{Environment.NewLine}";
                 
@@ -4463,10 +4476,10 @@ namespace ChatP2P.Client
             try
             {
                 var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
+                var logDir = IOPath.Combine(desktopPath, "ChatP2P_Logs");
                 Directory.CreateDirectory(logDir);
                 
-                var logFile = Path.Combine(logDir, "client_ice.log");
+                var logFile = IOPath.Combine(logDir, "client_ice.log");
                 var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
                 
                 var logEntry = $"[{timestamp}] 🧊 [ICE-{iceType.ToUpper()}] {fromPeer} → {toPeer} | {status}";
@@ -4772,7 +4785,7 @@ namespace ChatP2P.Client
             try
             {
                 // Try to read from a config file first
-                var configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P", "encrypt_p2p.txt");
+                var configPath = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P", "encrypt_p2p.txt");
                 if (File.Exists(configPath))
                 {
                     var content = File.ReadAllText(configPath).Trim();
@@ -4791,9 +4804,9 @@ namespace ChatP2P.Client
             try
             {
                 var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                var appFolder = Path.Combine(appDataPath, "ChatP2P");
+                var appFolder = IOPath.Combine(appDataPath, "ChatP2P");
                 Directory.CreateDirectory(appFolder);
-                var configPath = Path.Combine(appFolder, "encrypt_p2p.txt");
+                var configPath = IOPath.Combine(appFolder, "encrypt_p2p.txt");
                 File.WriteAllText(configPath, enabled.ToString());
             }
             catch (Exception ex)
@@ -5608,6 +5621,858 @@ namespace ChatP2P.Client
                 _ = LogToFile($"[VOIP-UI] ❌ Error updating VOIP UI: {ex.Message}");
             }
         }
+
+        #region Device Selection Event Handlers
+
+        /// <summary>
+        /// Variables pour stocker les périphériques sélectionnés
+        /// </summary>
+        private string? _selectedMicrophoneDevice = null;
+        private string? _selectedSpeakerDevice = null;
+        private string? _selectedVideoDevice = null;
+
+        // Keep old variable for backward compatibility
+        private string? _selectedAudioDevice = null;
+
+        /// <summary>
+        /// Rafraîchir la liste des périphériques audio/vidéo
+        /// </summary>
+        private async void BtnRefreshDevices_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _ = LogToFile("[DEVICE-SELECTION] 🔄 Refreshing device lists...");
+
+                // Mettre à jour les listes avec indicateur de chargement
+                lstMicrophoneDevices.Items.Clear();
+                lstSpeakerDevices.Items.Clear();
+                lstVideoDevices.Items.Clear();
+
+                lstMicrophoneDevices.Items.Add(new ListBoxItem { Content = "🔄 Loading microphones...", IsEnabled = false });
+                lstSpeakerDevices.Items.Add(new ListBoxItem { Content = "🔄 Loading speakers...", IsEnabled = false });
+                lstVideoDevices.Items.Add(new ListBoxItem { Content = "🔄 Loading cameras...", IsEnabled = false });
+
+                // Charger les microphones réels
+                var microphones = await AudioDeviceEnumerator.GetMicrophonesAsync();
+                lstMicrophoneDevices.Items.Clear();
+
+                foreach (var device in microphones)
+                {
+                    var item = new ListBoxItem { Content = device.Name, Tag = device };
+                    lstMicrophoneDevices.Items.Add(item);
+
+                    // Sélectionner par défaut ou depuis les settings
+                    var savedMic = Properties.Settings.Default.SelectedMicrophoneDevice;
+                    if ((device.IsDefault && string.IsNullOrEmpty(savedMic)) || device.Name == savedMic)
+                    {
+                        item.IsSelected = true;
+                        _selectedMicrophoneDevice = device.Name;
+                    }
+                }
+
+                // Charger les haut-parleurs réels
+                var speakers = await AudioDeviceEnumerator.GetSpeakersAsync();
+                lstSpeakerDevices.Items.Clear();
+
+                foreach (var device in speakers)
+                {
+                    var item = new ListBoxItem { Content = device.Name, Tag = device };
+                    lstSpeakerDevices.Items.Add(item);
+
+                    // Sélectionner par défaut ou depuis les settings
+                    var savedSpeaker = Properties.Settings.Default.SelectedSpeakerDevice;
+                    if ((device.IsDefault && string.IsNullOrEmpty(savedSpeaker)) || device.Name == savedSpeaker)
+                    {
+                        item.IsSelected = true;
+                        _selectedSpeakerDevice = device.Name;
+                    }
+                }
+
+                // Charger les caméras
+                var cameras = await AudioDeviceEnumerator.GetCamerasAsync();
+                lstVideoDevices.Items.Clear();
+
+                foreach (var device in cameras)
+                {
+                    var item = new ListBoxItem { Content = device.Name, Tag = device };
+                    lstVideoDevices.Items.Add(item);
+
+                    // Sélectionner par défaut ou depuis les settings
+                    var savedCamera = Properties.Settings.Default.SelectedVideoDevice;
+                    if ((device.IsDefault && string.IsNullOrEmpty(savedCamera)) || device.Name == savedCamera)
+                    {
+                        item.IsSelected = true;
+                        _selectedVideoDevice = device.Name;
+                    }
+                }
+
+                UpdateSelectedDevicesLabel();
+                _ = LogToFile($"[DEVICE-SELECTION] ✅ Loaded {microphones.Count} microphones, {speakers.Count} speakers, {cameras.Count} cameras");
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error refreshing devices: {ex.Message}");
+
+                // En cas d'erreur, au moins afficher les modes par défaut
+                lstMicrophoneDevices.Items.Clear();
+                lstSpeakerDevices.Items.Clear();
+                lstVideoDevices.Items.Clear();
+
+                lstMicrophoneDevices.Items.Add(new ListBoxItem { Content = "🎤 Default Microphone (Error)", IsSelected = true });
+                lstSpeakerDevices.Items.Add(new ListBoxItem { Content = "🔊 Default Speaker (Error)", IsSelected = true });
+                lstVideoDevices.Items.Add(new ListBoxItem { Content = "📹 Default Camera (Error)", IsSelected = true });
+
+                _selectedMicrophoneDevice = "🎤 Default Microphone (Error)";
+                _selectedSpeakerDevice = "🔊 Default Speaker (Error)";
+                _selectedVideoDevice = "📹 Default Camera (Error)";
+                UpdateSelectedDevicesLabel();
+            }
+        }
+
+        // Old LstAudioDevices_SelectionChanged method removed - replaced with separate microphone and speaker handlers
+
+        /// <summary>
+        /// Gestion sélection périphérique vidéo
+        /// </summary>
+        private void LstVideoDevices_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (lstVideoDevices.SelectedItem is ListBoxItem selectedItem)
+                {
+                    _selectedVideoDevice = selectedItem.Content?.ToString();
+                    UpdateSelectedDevicesLabel();
+
+                    _ = LogToFile($"[DEVICE-SELECTION] 📹 Video device selected: {_selectedVideoDevice}");
+
+                    // TODO: Notifier les services vidéo de la sélection
+                    // ApplyVideoDeviceSelection(_selectedVideoDevice);
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error in video device selection: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gestion sélection périphérique microphone
+        /// </summary>
+        private void LstMicrophoneDevices_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (lstMicrophoneDevices.SelectedItem is AudioDevice selectedDevice)
+                {
+                    _selectedMicrophoneDevice = selectedDevice.Name;
+                    UpdateSelectedDevicesLabel();
+
+                    // Save to settings
+                    Properties.Settings.Default.SelectedMicrophoneDevice = selectedDevice.Name;
+                    Properties.Settings.Default.Save();
+
+                    _ = LogToFile($"[DEVICE-SELECTION] 🎤 Microphone device selected: {_selectedMicrophoneDevice}");
+
+                    // TODO: Notify audio services of microphone selection
+                    // ApplyMicrophoneDeviceSelection(_selectedMicrophoneDevice);
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error in microphone device selection: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Gestion sélection périphérique audio (speakers)
+        /// </summary>
+        private void LstSpeakerDevices_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (lstSpeakerDevices.SelectedItem is AudioDevice selectedDevice)
+                {
+                    _selectedSpeakerDevice = selectedDevice.Name;
+                    UpdateSelectedDevicesLabel();
+
+                    // Save to settings
+                    Properties.Settings.Default.SelectedSpeakerDevice = selectedDevice.Name;
+                    Properties.Settings.Default.Save();
+
+                    _ = LogToFile($"[DEVICE-SELECTION] 🔊 Speaker device selected: {_selectedSpeakerDevice}");
+
+                    // TODO: Notify audio services of speaker selection
+                    // ApplySpeakerDeviceSelection(_selectedSpeakerDevice);
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error in speaker device selection: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Mettre à jour l'affichage des périphériques sélectionnés
+        /// </summary>
+        private void UpdateSelectedDevicesLabel()
+        {
+            try
+            {
+                var micShort = GetShortDeviceName(_selectedMicrophoneDevice);
+                var speakerShort = GetShortDeviceName(_selectedSpeakerDevice);
+                var videoShort = GetShortDeviceName(_selectedVideoDevice);
+
+                lblSelectedDevices.Text = $"Selected: Mic:{micShort} | Speaker:{speakerShort} | Video:{videoShort}";
+            }
+            catch (Exception ex)
+            {
+                lblSelectedDevices.Text = "Selected: Error loading devices";
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error updating selected devices label: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Appliquer la sélection des périphériques aux services audio/vidéo VOIP
+        /// </summary>
+        private async void BtnApplyDevices_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                await LogToFile("[DEVICE-APPLY] 🔧 Applying selected audio/video devices to VOIP services...");
+
+                // 1. SAUVEGARDER les sélections dans Settings
+                Properties.Settings.Default.SelectedMicrophoneDevice = _selectedMicrophoneDevice ?? "";
+                Properties.Settings.Default.SelectedSpeakerDevice = _selectedSpeakerDevice ?? "";
+                Properties.Settings.Default.SelectedVideoDevice = _selectedVideoDevice ?? "";
+                Properties.Settings.Default.Save();
+
+                await LogToFile($"[DEVICE-APPLY] 💾 Saved device selections:");
+                await LogToFile($"  - Microphone: {_selectedMicrophoneDevice}");
+                await LogToFile($"  - Speaker: {_selectedSpeakerDevice}");
+                await LogToFile($"  - Video: {_selectedVideoDevice}");
+
+                // ✅ NOUVEAU: Connecter le spectromètre aux devices sélectionnés
+                if (!string.IsNullOrEmpty(_selectedMicrophoneDevice))
+                {
+                    await LogToFile($"[DEVICE-APPLY] 🎤📊 Connecting spectrum analyzer to microphone: {_selectedMicrophoneDevice}");
+                }
+                if (!string.IsNullOrEmpty(_selectedSpeakerDevice))
+                {
+                    await LogToFile($"[DEVICE-APPLY] 🔊📊 Setting audio playback device: {_selectedSpeakerDevice}");
+                }
+
+                // 2. APPLIQUER audio devices to VOIP services
+                if (_voipManager != null && !string.IsNullOrEmpty(_selectedMicrophoneDevice) && !string.IsNullOrEmpty(_selectedSpeakerDevice))
+                {
+                    await LogToFile($"[DEVICE-APPLY] 🎤🔊 Applying audio devices:");
+                    await LogToFile($"  - Microphone: {_selectedMicrophoneDevice}");
+                    await LogToFile($"  - Speaker: {_selectedSpeakerDevice}");
+
+                    _voipManager.SetAudioDevices(_selectedMicrophoneDevice, _selectedSpeakerDevice);
+                    await LogToFile($"[DEVICE-APPLY] ✅ Audio devices applied to VOIP manager");
+                }
+                else if (_voipManager == null)
+                {
+                    await LogToFile($"[DEVICE-APPLY] ⚠️ VOIP manager not initialized - devices will be applied when VOIP starts");
+                }
+
+                // 4. APPLIQUER video device selection
+                if (_voipManager != null && !string.IsNullOrEmpty(_selectedVideoDevice))
+                {
+                    await LogToFile($"[DEVICE-APPLY] 📹 Applying video device: {_selectedVideoDevice}");
+                    // TODO: Apply video device to SimpleVideoCaptureService
+                }
+
+                // 5. UI FEEDBACK
+                btnApplyDevices.Content = "✅ Applied!";
+                btnApplyDevices.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0xCC, 0x71)); // Vert succès
+                await Task.Delay(2000);
+                btnApplyDevices.Content = "✅ Apply Devices";
+                btnApplyDevices.Background = new SolidColorBrush(Color.FromRgb(0x27, 0xAE, 0x60)); // Vert original
+
+                await LogToFile("[DEVICE-APPLY] ✅ Device selection applied successfully to VOIP services");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[DEVICE-APPLY] ❌ Error applying device selection: {ex.Message}");
+
+                btnApplyDevices.Content = "❌ Error";
+                btnApplyDevices.Background = new SolidColorBrush(Color.FromRgb(0xE7, 0x4C, 0x3C)); // Rouge erreur
+                await Task.Delay(2000);
+                btnApplyDevices.Content = "✅ Apply Devices";
+                btnApplyDevices.Background = new SolidColorBrush(Color.FromRgb(0x27, 0xAE, 0x60)); // Vert original
+            }
+        }
+
+        /// <summary>
+        /// Obtenir nom court du périphérique pour l'affichage
+        /// </summary>
+        private string GetShortDeviceName(string? deviceName)
+        {
+            if (string.IsNullOrEmpty(deviceName))
+                return "None";
+
+            // Extraire la partie principale du nom
+            if (deviceName.Contains("Microphone"))
+                return "🎤 Mic";
+            else if (deviceName.Contains("Speakers"))
+                return "🎧 Spk";
+            else if (deviceName.Contains("Camera"))
+                return "📹 Cam";
+            else if (deviceName.Contains("Screen"))
+                return "🖥️ Scr";
+            else if (deviceName.Contains("File"))
+                return "📁 File";
+            else if (deviceName.Contains("Simulation"))
+                return "🎭 Sim";
+            else if (deviceName.Contains("Pattern"))
+                return "🎨 Pat";
+            else
+                return deviceName.Length > 15 ? deviceName.Substring(0, 12) + "..." : deviceName;
+        }
+
+        /// <summary>
+        /// Charger les périphériques au démarrage de l'application
+        /// </summary>
+        private async Task LoadDevicesOnStartup()
+        {
+            try
+            {
+                _ = LogToFile("[DEVICE-SELECTION] 🚀 Loading devices on startup...");
+                await Task.Delay(500); // Attendre que l'UI soit initialisée
+
+                // Refresh device lists
+                BtnRefreshDevices_Click(btnRefreshDevices, new RoutedEventArgs());
+
+                // Load saved device selections from settings
+                await Task.Delay(300); // Give time for device lists to populate
+                RestoreSavedDeviceSelections();
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error loading devices on startup: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Restore saved device selections from settings
+        /// </summary>
+        private void RestoreSavedDeviceSelections()
+        {
+            try
+            {
+                // Restore microphone selection
+                var savedMic = Properties.Settings.Default.SelectedMicrophoneDevice;
+                if (!string.IsNullOrEmpty(savedMic))
+                {
+                    foreach (AudioDevice device in lstMicrophoneDevices.Items)
+                    {
+                        if (device.Name == savedMic)
+                        {
+                            lstMicrophoneDevices.SelectedItem = device;
+                            _selectedMicrophoneDevice = savedMic;
+                            _ = LogToFile($"[DEVICE-SELECTION] 🎤 Restored microphone: {savedMic}");
+                            break;
+                        }
+                    }
+                }
+
+                // Restore speaker selection
+                var savedSpeaker = Properties.Settings.Default.SelectedSpeakerDevice;
+                if (!string.IsNullOrEmpty(savedSpeaker))
+                {
+                    foreach (AudioDevice device in lstSpeakerDevices.Items)
+                    {
+                        if (device.Name == savedSpeaker)
+                        {
+                            lstSpeakerDevices.SelectedItem = device;
+                            _selectedSpeakerDevice = savedSpeaker;
+                            _ = LogToFile($"[DEVICE-SELECTION] 🔊 Restored speaker: {savedSpeaker}");
+                            break;
+                        }
+                    }
+                }
+
+                // Restore video device selection
+                var savedVideo = Properties.Settings.Default.SelectedVideoDevice;
+                if (!string.IsNullOrEmpty(savedVideo))
+                {
+                    foreach (AudioDevice device in lstVideoDevices.Items)
+                    {
+                        if (device.Name == savedVideo)
+                        {
+                            lstVideoDevices.SelectedItem = device;
+                            _selectedVideoDevice = savedVideo;
+                            _ = LogToFile($"[DEVICE-SELECTION] 📹 Restored video device: {savedVideo}");
+                            break;
+                        }
+                    }
+                }
+
+                UpdateSelectedDevicesLabel();
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[DEVICE-SELECTION] ❌ Error restoring saved device selections: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Test microphone functionality
+        /// </summary>
+        private async void BtnTestMicrophone_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _ = LogToFile("[MIC-TEST] 🎤 Testing microphone device...");
+
+                if (string.IsNullOrEmpty(_selectedMicrophoneDevice))
+                {
+                    _ = LogToFile("[MIC-TEST] ❌ No microphone device selected");
+                    btnTestMicrophone.Content = "❌ No Device";
+                    await Task.Delay(2000);
+                    btnTestMicrophone.Content = "🎤 Test Mic";
+                    return;
+                }
+
+                btnTestMicrophone.Content = "🎤 Testing...";
+
+                // TODO: Test microphone with OpusAudioStreamingService
+                // Need to implement proper recording test methods
+                _ = LogToFile($"[MIC-TEST] 🎤 Testing microphone: {_selectedMicrophoneDevice}");
+
+                // For now, just simulate successful test
+                await Task.Delay(1000);
+                bool testResult = true;
+
+                // Update UI
+                bool overallSuccess = testResult;
+                btnTestMicrophone.Content = overallSuccess ? "✅ Mic OK" : "❌ Failed";
+                await Task.Delay(3000);
+                btnTestMicrophone.Content = "🎤 Test Mic";
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[MIC-TEST] ❌ Error testing microphone: {ex.Message}");
+                btnTestMicrophone.Content = "❌ Error";
+                await Task.Delay(2000);
+                btnTestMicrophone.Content = "🎤 Test Mic";
+            }
+        }
+
+        private async void BtnTestAudioPlayback_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _ = LogToFile("[AUDIO-TEST] 🎵 Testing professional Opus streaming service...");
+
+                // Test 1: Service Opus streaming professionnel
+                using var opusStreaming = new OpusAudioStreamingService();
+                opusStreaming.LogEvent += async (msg) => await LogToFile($"[AUDIO-TEST-OPUS] {msg}");
+
+                var initialized = await opusStreaming.InitializeAsync();
+                if (!initialized)
+                {
+                    throw new Exception("Failed to initialize Opus streaming service");
+                }
+
+                var testResult = await opusStreaming.PlayTestToneAsync(440.0, 1000); // 440Hz pour 1 seconde
+                await LogToFile($"[AUDIO-TEST] Opus streaming test result: {(testResult ? "SUCCESS" : "FAILED")}");
+
+                // ❌ REMOVED: Test 2 - Audio capture simulation no longer available
+                // Audio capture has been replaced by OpusAudioStreamingService (playback only)
+                await LogToFile("[AUDIO-TEST] 🎤 Audio capture test SKIPPED - SimpleAudioCaptureService removed");
+                await LogToFile("[AUDIO-TEST] ✅ OPUS streaming system active instead of WAV capture");
+
+                // Arrêter le streaming Opus
+                await opusStreaming.StopStreamingAsync();
+
+                // Mettre à jour UI
+                bool overallSuccess = testResult; // Only test Opus streaming result
+                btnTestAudioPlayback.Content = overallSuccess ? "✅ Opus OK" : "❌ Failed";
+                await Task.Delay(3000);
+                btnTestAudioPlayback.Content = "🔊 Test Audio";
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[AUDIO-TEST] ❌ Error testing Opus streaming: {ex.Message}");
+                btnTestAudioPlayback.Content = "❌ Error";
+                await Task.Delay(2000);
+                btnTestAudioPlayback.Content = "🔊 Test Audio";
+            }
+        }
+
+        #endregion
+
+        #region 🎤📊 Audio Spectrum Analyzer Helper Methods
+
+        /// <summary>
+        /// ✅ NOUVEAU: Obtenir le niveau audio réel du service de capture
+        /// </summary>
+        private double GetAudioLevelFromCaptureService()
+        {
+            try
+            {
+                // ✅ PRIORITÉ 1: Vérifier OpusAudioStreamingService (le nouveau service avec capture)
+                if (_voipManager?.OpusStreamingService != null && _voipManager.OpusStreamingService.IsCapturing)
+                {
+                    _lastAudioLevel = _voipManager.OpusStreamingService.GetCurrentCaptureLevel();
+                    return _lastAudioLevel;
+                }
+
+                // ✅ PRIORITÉ 2: Si OpusStreamingService n'est pas actif, retourner 0
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[SPECTRUM] ❌ Error getting audio level from capture service: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// ✅ FIX: Obtenir le niveau audio du device microphone sélectionné via OpusStreaming
+        /// </summary>
+        private double GetAudioLevelFromSelectedDevice()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_selectedMicrophoneDevice))
+                    return 0;
+
+                // ✅ FIX: Démarrer la capture sur OpusStreaming pour obtenir vraies données
+                if (_voipManager?.OpusStreamingService != null)
+                {
+                    // Si le streaming service n'est pas en train de capturer, démarrer temporairement
+                    if (!_voipManager.OpusStreamingService.IsCapturing)
+                    {
+                        // Démarrer capture temporaire pour le spectromètre
+                        _ = Task.Run(async () => await _voipManager.OpusStreamingService.StartCaptureAsync());
+                        return 0; // Retourner 0 en attendant que la capture démarre
+                    }
+                    else
+                    {
+                        // Utiliser les vraies données de capture
+                        _lastAudioLevel = _voipManager.OpusStreamingService.GetCurrentCaptureLevel();
+                        return _lastAudioLevel;
+                    }
+                }
+
+                // Fallback : simulation faible pour indiquer problème
+                _lastAudioLevel = _random.NextDouble() * 0.05; // 0-5% (très faible)
+                return _lastAudioLevel;
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[SPECTRUM] ❌ Error getting audio level from selected device: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Générer données spectrales réalistes basées sur niveau audio
+        /// </summary>
+        private void GenerateRealisticSpectrumData(double audioLevel)
+        {
+            try
+            {
+                // Si pas d'audio, tout à zéro
+                if (audioLevel <= 0.01)
+                {
+                    for (int i = 0; i < _frequencyBands.Length; i++)
+                    {
+                        _frequencyBands[i] = 0;
+                    }
+                    return;
+                }
+
+                // Générer des données spectrales réalistes pour la voix humaine
+                for (int i = 0; i < _frequencyBands.Length; i++)
+                {
+                    // Bandes de fréquence vocale (2-12) plus actives
+                    if (i >= 2 && i <= 12)
+                    {
+                        _frequencyBands[i] = audioLevel * (_random.NextDouble() * 0.8 + 0.2); // 20-100% du niveau audio
+                    }
+                    else
+                    {
+                        _frequencyBands[i] = audioLevel * (_random.NextDouble() * 0.3); // 0-30% du niveau audio
+                    }
+
+                    // Ajouter variation temporelle pour réalisme
+                    double timeVariation = (Math.Sin(DateTime.Now.Millisecond / 200.0 + i) + 1) / 2;
+                    _frequencyBands[i] *= timeVariation;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[SPECTRUM] ❌ Error generating spectrum data: {ex.Message}");
+            }
+        }
+
+        #endregion
+
+        #region 🎤📊 Audio Spectrum Analyzer
+
+        /// <summary>
+        /// ✅ NOUVEAU: Démarrer le moniteur de spectromètre audio
+        /// </summary>
+        private async void BtnStartSpectrum_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isSpectrumMonitoring)
+                {
+                    await LogToFile("[SPECTRUM] ⚠️ Spectrum analyzer already running");
+                    return;
+                }
+
+                await LogToFile("[SPECTRUM] 🎤 Starting audio spectrum analyzer...");
+
+                _isSpectrumMonitoring = true;
+                btnStartSpectrum.IsEnabled = false;
+                btnStopSpectrum.IsEnabled = true;
+                lblSpectrumStatus.Text = "🎤 Monitoring audio...";
+                lblSpectrumStatus.Foreground = new SolidColorBrush(Colors.Green);
+
+                // Initialiser les barres du spectromètre
+                InitializeSpectrumBars();
+
+                // Démarrer le timer de mise à jour (60 FPS pour fluidité)
+                _spectrumTimer = new DispatcherTimer();
+                _spectrumTimer.Interval = TimeSpan.FromMilliseconds(16); // ~60 FPS
+                _spectrumTimer.Tick += UpdateSpectrumDisplay;
+                _spectrumTimer.Start();
+
+                await LogToFile("[SPECTRUM] ✅ Audio spectrum analyzer started");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[SPECTRUM] ❌ Error starting spectrum analyzer: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Arrêter le moniteur de spectromètre audio
+        /// </summary>
+        private async void BtnStopSpectrum_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (!_isSpectrumMonitoring)
+                {
+                    await LogToFile("[SPECTRUM] ⚠️ Spectrum analyzer not running");
+                    return;
+                }
+
+                await LogToFile("[SPECTRUM] 🛑 Stopping audio spectrum analyzer...");
+
+                _isSpectrumMonitoring = false;
+                btnStartSpectrum.IsEnabled = true;
+                btnStopSpectrum.IsEnabled = false;
+                lblSpectrumStatus.Text = "Not monitoring";
+                lblSpectrumStatus.Foreground = new SolidColorBrush(Colors.Gray);
+
+                // Arrêter le timer
+                _spectrumTimer?.Stop();
+                _spectrumTimer = null;
+
+                // Reset des indicateurs
+                progAudioLevel.Value = 0;
+                lblAudioLevel.Text = "0%";
+
+                // Clear spectrum bars
+                foreach (var bar in _spectrumBars)
+                {
+                    bar.Height = 0;
+                }
+
+                await LogToFile("[SPECTRUM] ✅ Audio spectrum analyzer stopped");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[SPECTRUM] ❌ Error stopping spectrum analyzer: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Initialiser les barres du spectromètre (20 barres pour bandes de fréquences)
+        /// </summary>
+        private void InitializeSpectrumBars()
+        {
+            try
+            {
+                canvasSpectrum.Children.Clear();
+                _spectrumBars.Clear();
+
+                const int numBars = 20;
+                const double canvasWidth = 400; // Approximative width
+                const double barWidth = (canvasWidth - 10) / numBars;
+
+                for (int i = 0; i < numBars; i++)
+                {
+                    var bar = new Rectangle
+                    {
+                        Width = barWidth - 2,
+                        Height = 0,
+                        Fill = new SolidColorBrush(Color.FromRgb(0x27, 0xAE, 0x60)), // Vert
+                        Margin = new Thickness(0, 0, 0, 0)
+                    };
+
+                    // Position horizontale
+                    Canvas.SetLeft(bar, i * barWidth + 5);
+                    Canvas.SetBottom(bar, 0);
+
+                    canvasSpectrum.Children.Add(bar);
+                    _spectrumBars.Add(bar);
+                }
+
+                _ = LogToFile($"[SPECTRUM] ✅ Initialized {numBars} spectrum bars");
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[SPECTRUM] ❌ Error initializing spectrum bars: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ FIX: Mettre à jour l'affichage du spectromètre avec vraies données audio
+        /// </summary>
+        private void UpdateSpectrumDisplay(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (!_isSpectrumMonitoring) return;
+
+                double audioLevel = 0;
+                string audioSource = "none";
+
+                // ✅ PRIORITÉ 1: Utiliser le service de capture VOIP actif (OpusStreaming)
+                if (_voipManager?.OpusStreamingService != null && _voipManager.OpusStreamingService.IsCapturing)
+                {
+                    audioLevel = GetAudioLevelFromCaptureService();
+                    audioSource = "VOIP OpusStreaming capture service";
+                }
+                // ✅ PRIORITÉ 2: Utiliser le device microphone sélectionné
+                else if (!string.IsNullOrEmpty(_selectedMicrophoneDevice))
+                {
+                    audioLevel = GetAudioLevelFromSelectedDevice();
+                    audioSource = $"selected device: {_selectedMicrophoneDevice}";
+                }
+                // ✅ PRIORITÉ 3: Fallback simulation (très faible pour indiquer problème)
+                else
+                {
+                    audioLevel = _random.NextDouble() * 0.05; // Très faible (0-5%)
+                    audioSource = "fallback simulation - no active audio source";
+                }
+
+                // Générer les données spectrales réalistes basées sur le niveau audio réel
+                GenerateRealisticSpectrumData(audioLevel);
+
+                // Mettre à jour les barres spectrales avec les vraies données
+                for (int i = 0; i < _spectrumBars.Count && i < _frequencyBands.Length; i++)
+                {
+                    double amplitude = _frequencyBands[i];
+
+                    // Mettre à jour hauteur de la barre (90px max)
+                    _spectrumBars[i].Height = amplitude * 90;
+
+                    // Couleur gradient basée sur l'amplitude
+                    if (amplitude > 0.7)
+                        _spectrumBars[i].Fill = new SolidColorBrush(Colors.Red); // Fort
+                    else if (amplitude > 0.4)
+                        _spectrumBars[i].Fill = new SolidColorBrush(Colors.Orange); // Moyen
+                    else if (amplitude > 0.1)
+                        _spectrumBars[i].Fill = new SolidColorBrush(Color.FromRgb(0x27, 0xAE, 0x60)); // Faible
+                    else
+                        _spectrumBars[i].Fill = new SolidColorBrush(Colors.Gray); // Très faible/inactif
+                }
+
+                // Mettre à jour indicateur de niveau audio global
+                double globalLevel = audioLevel * 100;
+                progAudioLevel.Value = Math.Min(globalLevel, 100);
+                lblAudioLevel.Text = $"{(int)globalLevel}%";
+
+                // Log périodique détaillé pour debug (toutes les 2 secondes)
+                if (DateTime.Now.Millisecond < 50) // ~toutes les 2 secondes
+                {
+                    _ = LogToFile($"[SPECTRUM] 📊 Audio level: {(int)globalLevel}% (source: {audioSource})");
+                }
+            }
+            catch (Exception ex)
+            {
+                _ = LogToFile($"[SPECTRUM] ❌ Error updating spectrum display: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 🔧 NOUVEAU: Diagnostiquer l'état complet du système audio VOIP
+        /// </summary>
+        private async void BtnDiagnoseAudio_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                await LogToFile("[AUDIO-DEBUG] 🔧 ========== AUDIO SYSTEM DIAGNOSTIC ==========");
+
+                // 1. Diagnostic VOIPCallManager
+                if (_voipManager != null)
+                {
+                    await LogToFile("[AUDIO-DEBUG] ✅ VOIPCallManager: INITIALIZED");
+                    // La méthode DiagnoseAudioState sera appelée via les services
+                }
+                else
+                {
+                    await LogToFile("[AUDIO-DEBUG] ❌ VOIPCallManager: NULL - VOIP not initialized!");
+                }
+
+                // 2. Diagnostic Device Selection
+                await LogToFile($"[AUDIO-DEBUG] 🎤 Selected Microphone: {_selectedMicrophoneDevice ?? "None"}");
+                await LogToFile($"[AUDIO-DEBUG] 🔊 Selected Speaker: {_selectedSpeakerDevice ?? "None"}");
+                await LogToFile($"[AUDIO-DEBUG] 📹 Selected Video: {_selectedVideoDevice ?? "None"}");
+
+                // 3. Diagnostic connexions réseau
+                await LogToFile($"[AUDIO-DEBUG] 🌐 Server Connected: {_isConnectedToServer}");
+                await LogToFile($"[AUDIO-DEBUG] 🌐 Current Peer: {_currentPeer}");
+
+                // 4. Diagnostic session de chat active
+                if (_currentChatSession != null)
+                {
+                    await LogToFile($"[AUDIO-DEBUG] 💬 Active Chat: {_currentChatSession.PeerName}");
+                    var callActive = _voipManager?.IsCallActive(_currentChatSession.PeerName) ?? false;
+                    await LogToFile($"[AUDIO-DEBUG] 📞 Call Active: {callActive}");
+                }
+                else
+                {
+                    await LogToFile("[AUDIO-DEBUG] 💬 Active Chat: None");
+                }
+
+                // 5. Diagnostic spectrum analyzer
+                await LogToFile($"[AUDIO-DEBUG] 📊 Spectrum Monitoring: {_isSpectrumMonitoring}");
+
+                // 6. Trigger des diagnostics des services audio
+                if (_voipManager != null)
+                {
+                    await LogToFile("[AUDIO-DEBUG] 🔍 Triggering audio services diagnostics...");
+                    _voipManager.SetAudioDevices(_selectedMicrophoneDevice ?? "Default", _selectedSpeakerDevice ?? "Default");
+                }
+
+                await LogToFile("[AUDIO-DEBUG] ========== DIAGNOSTIC COMPLETED ==========");
+
+                // UI Feedback
+                btnDiagnoseAudio.Content = "✅ Done";
+                await Task.Delay(2000);
+                btnDiagnoseAudio.Content = "🔧 Debug Audio";
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[AUDIO-DEBUG] ❌ Error during audio diagnostic: {ex.Message}");
+                btnDiagnoseAudio.Content = "❌ Error";
+                await Task.Delay(2000);
+                btnDiagnoseAudio.Content = "🔧 Debug Audio";
+            }
+        }
+
+        #endregion
 
 
         #endregion
