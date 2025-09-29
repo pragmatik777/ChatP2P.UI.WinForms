@@ -6476,5 +6476,47 @@ namespace ChatP2P.Client
 
 
         #endregion
+
+        #region Custom Title Bar Events
+
+        private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ClickCount == 2)
+            {
+                // Double-click to maximize/restore
+                BtnMaximize_Click(sender, e);
+            }
+            else
+            {
+                // Single-click to drag
+                this.DragMove();
+            }
+        }
+
+        private void BtnMinimize_Click(object sender, RoutedEventArgs e)
+        {
+            this.WindowState = WindowState.Minimized;
+        }
+
+        private void BtnMaximize_Click(object sender, RoutedEventArgs e)
+        {
+            if (this.WindowState == WindowState.Maximized)
+            {
+                this.WindowState = WindowState.Normal;
+                btnMaximize.Content = "⬜";
+            }
+            else
+            {
+                this.WindowState = WindowState.Maximized;
+                btnMaximize.Content = "❐";
+            }
+        }
+
+        private void BtnClose_Click(object sender, RoutedEventArgs e)
+        {
+            this.Close();
+        }
+
+        #endregion
     }
 }

@@ -5,17 +5,109 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:ChatP2P.Client"
         mc:Ignorable="d"
-        Title="ChatP2P Client" Height="900" Width="1400" 
+        Title="ChatP2P Client" Height="900" Width="1400"
         MinHeight="700" MinWidth="1000"
         WindowStartupLocation="CenterScreen"
-        Background="#FF2B2B2B">
+        Background="#FF2B2B2B"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="CanResize">
 
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
     </Window.Resources>
 
     <Grid>
-        <TabControl Name="mainTabControl" Background="#FF1E1E1E" BorderBrush="#FF333333" SelectionChanged="MainTabControl_SelectionChanged">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="35"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Custom Title Bar -->
+        <Border Grid.Row="0" Background="#FF1A1A1A" BorderBrush="#FF333333" BorderThickness="0,0,0,1"
+                MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- App Icon and Title -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0">
+                    <TextBlock Text="🔗" FontSize="16" Foreground="#FF0D7377" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="ChatP2P Client" FontSize="13" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Window Controls -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button Name="btnMinimize" Content="−" Width="35" Height="35"
+                            Background="Transparent" Foreground="#FFCCCCCC" BorderBrush="Transparent"
+                            FontSize="16" FontWeight="Bold" Click="BtnMinimize_Click"
+                            Style="{x:Null}">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border Background="{TemplateBinding Background}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#FF333333"/>
+                                    </Trigger>
+                                    <Trigger Property="IsPressed" Value="True">
+                                        <Setter Property="Background" Value="#FF444444"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                    <Button Name="btnMaximize" Content="⬜" Width="35" Height="35"
+                            Background="Transparent" Foreground="#FFCCCCCC" BorderBrush="Transparent"
+                            FontSize="12" Click="BtnMaximize_Click"
+                            Style="{x:Null}">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border Background="{TemplateBinding Background}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#FF333333"/>
+                                    </Trigger>
+                                    <Trigger Property="IsPressed" Value="True">
+                                        <Setter Property="Background" Value="#FF444444"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                    <Button Name="btnClose" Content="✕" Width="35" Height="35"
+                            Background="Transparent" Foreground="#FFCCCCCC" BorderBrush="Transparent"
+                            FontSize="12" FontWeight="Bold" Click="BtnClose_Click"
+                            Style="{x:Null}">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border Background="{TemplateBinding Background}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter Property="Background" Value="#FFFF4444"/>
+                                        <Setter Property="Foreground" Value="White"/>
+                                    </Trigger>
+                                    <Trigger Property="IsPressed" Value="True">
+                                        <Setter Property="Background" Value="#FFCC3333"/>
+                                        <Setter Property="Foreground" Value="White"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <TabControl Name="mainTabControl" Grid.Row="1" Background="#FF1E1E1E" BorderBrush="#FF333333" SelectionChanged="MainTabControl_SelectionChanged">
             <TabControl.Resources>
                 <Style TargetType="TabItem">
                     <Setter Property="Foreground" Value="White"/>
@@ -58,7 +150,6 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     
                     <!-- Configuration Section -->
@@ -85,7 +176,7 @@
                             <Label Grid.Row="0" Grid.Column="2" Content="Relay Server IP:" Foreground="White" Margin="15,0,0,0"/>
                             <TextBox Grid.Row="0" Grid.Column="3" Name="txtRelayServerIP" Margin="5,0"
                                      Background="#FF404040" Foreground="White" BorderBrush="#FF666666"
-                                     Text="192.168.1.145"/>
+                                     Text=""/>
 
                             <CheckBox Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Name="chkAutoConnect"
                                       Content="Auto-connect on startup" Margin="0,15,0,0"
@@ -119,45 +210,9 @@
                         </StackPanel>
                     </GroupBox>
 
-                    <!-- 🎬 NOUVEAU: VOIP Test Section -->
-                    <GroupBox Header="🎬 VOIP Testing" Grid.Row="2" Margin="0,0,0,20"
-                              Foreground="White" BorderBrush="#FF4ECDC4">
-                        <Grid Margin="15">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="Auto"/>
-                            </Grid.RowDefinitions>
-
-                            <!-- Audio Testing -->
-                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-                                <Label Content="🎤 Audio Test:" Foreground="White" Width="100" VerticalAlignment="Center"/>
-                                <Button Name="btnTestAudioFile" Content="📁 Load Audio File" Width="120" Height="30"
-                                        Margin="5,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
-                                        Click="BtnTestAudioFile_Click"/>
-                                <Button Name="btnStopAudioTest" Content="🛑 Stop Audio" Width="100" Height="30"
-                                        Margin="5,0" Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
-                                        Click="BtnStopAudioTest_Click" IsEnabled="False"/>
-                                <TextBlock Name="lblAudioTestStatus" Text="No test audio" Foreground="#FF888888"
-                                           VerticalAlignment="Center" Margin="10,0"/>
-                            </StackPanel>
-
-                            <!-- Video Testing -->
-                            <StackPanel Grid.Row="1" Orientation="Horizontal">
-                                <Label Content="📹 Video Test:" Foreground="White" Width="100" VerticalAlignment="Center"/>
-                                <Button Name="btnTestVideoFile" Content="📁 Load Video File" Width="120" Height="30"
-                                        Margin="5,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
-                                        Click="BtnTestVideoFile_Click"/>
-                                <Button Name="btnStopVideoTest" Content="🛑 Stop Video" Width="100" Height="30"
-                                        Margin="5,0" Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
-                                        Click="BtnStopVideoTest_Click" IsEnabled="False"/>
-                                <TextBlock Name="lblVideoTestStatus" Text="No test video" Foreground="#FF888888"
-                                           VerticalAlignment="Center" Margin="10,0"/>
-                            </StackPanel>
-                        </Grid>
-                    </GroupBox>
                     
                     <!-- Status -->
-                    <GroupBox Header="Network Status" Grid.Row="3" Margin="0,0,0,20"
+                    <GroupBox Header="Network Status" Grid.Row="2" Margin="0,0,0,20"
                               Foreground="White" BorderBrush="#FF0D7377">
                         <Grid Margin="15">
                             <Grid.ColumnDefinitions>
@@ -176,7 +231,7 @@
                     </GroupBox>
                     
                     <!-- Friends List -->
-                    <GroupBox Header="Friends Online" Grid.Row="4" Margin="0,0,0,20"
+                    <GroupBox Header="Friends Online" Grid.Row="3" Margin="0,0,0,20"
                               Foreground="White" BorderBrush="#FF0D7377">
                         <Grid Margin="15">
                             <Grid.RowDefinitions>
@@ -226,22 +281,20 @@
                                     </GridView>
                                 </ListView.View>
                             </ListView>
-                            <!-- Removed btnSendFile - using btnSendFileChat in chat tab instead -->
+                            <!-- Action Buttons -->
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                                <Button Name="btnTestCrypto" Content="🔐 Test Crypto" Width="120" Height="35"
+                                        Margin="0,0,15,0" Background="#FF9C27B0" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestCrypto_Click"/>
+                                <Button Name="btnSecurityCenter" Content="🛡 Security Center" Width="150" Height="35"
+                                        Margin="0,0,15,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnSecurityCenter_Click"/>
+                                <Button Name="btnP2PAdvanced" Content="⚙ P2P Config" Width="120" Height="35"
+                                        Background="#FF666666" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnP2PAdvanced_Click"/>
+                            </StackPanel>
                         </Grid>
                     </GroupBox>
-                    
-                    <!-- Action Buttons -->
-                    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Name="btnTestCrypto" Content="🔐 Test Crypto" Width="120" Height="35"
-                                Margin="0,0,15,0" Background="#FF9C27B0" Foreground="White" BorderBrush="Transparent"
-                                Click="BtnTestCrypto_Click"/>
-                        <Button Name="btnSecurityCenter" Content="🛡 Security Center" Width="150" Height="35"
-                                Margin="0,0,15,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
-                                Click="BtnSecurityCenter_Click"/>
-                        <Button Name="btnP2PAdvanced" Content="⚙ P2P Config" Width="120" Height="35"
-                                Background="#FF666666" Foreground="White" BorderBrush="Transparent"
-                                Click="BtnP2PAdvanced_Click"/>
-                    </StackPanel>
                 </Grid>
             </TabItem>
             
@@ -609,6 +662,163 @@
             </Grid>
             </TabItem>
             
+            <!-- Settings Tab -->
+            <TabItem Header="Settings" Name="settingsTab">
+                <Grid Margin="20" Background="#FF2B2B2B">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 🎤📹🔊 Device Selection Section -->
+                    <GroupBox Header="🎤📹🔊 Device Selection" Grid.Row="0" Margin="0,0,0,20"
+                              Foreground="White" BorderBrush="#FF9B59B6">
+                        <Grid Margin="15">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="15"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="15"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="120"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Microphones -->
+                            <Label Grid.Row="0" Grid.Column="0" Content="🎤 Microphones:"
+                                   Foreground="White" FontWeight="SemiBold"/>
+                            <ListBox Name="lstMicrophoneDevices" Grid.Row="1" Grid.Column="0"
+                                     Background="#FF404040" Foreground="White" BorderBrush="#FF666666"
+                                     SelectionChanged="LstMicrophoneDevices_SelectionChanged">
+                                <ListBoxItem Content="🔄 Loading microphones..." IsEnabled="False"/>
+                            </ListBox>
+
+                            <!-- Speakers -->
+                            <Label Grid.Row="0" Grid.Column="2" Content="🔊 Speakers:"
+                                   Foreground="White" FontWeight="SemiBold"/>
+                            <ListBox Name="lstSpeakerDevices" Grid.Row="1" Grid.Column="2"
+                                     Background="#FF404040" Foreground="White" BorderBrush="#FF666666"
+                                     SelectionChanged="LstSpeakerDevices_SelectionChanged">
+                                <ListBoxItem Content="🔄 Loading speakers..." IsEnabled="False"/>
+                            </ListBox>
+
+                            <!-- Video Devices -->
+                            <Label Grid.Row="0" Grid.Column="4" Content="📹 Cameras:"
+                                   Foreground="White" FontWeight="SemiBold"/>
+                            <ListBox Name="lstVideoDevices" Grid.Row="1" Grid.Column="4"
+                                     Background="#FF404040" Foreground="White" BorderBrush="#FF666666"
+                                     SelectionChanged="LstVideoDevices_SelectionChanged">
+                                <ListBoxItem Content="🔄 Loading cameras..." IsEnabled="False"/>
+                            </ListBox>
+
+                            <!-- Buttons -->
+                            <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="5"
+                                        Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+                                <Button Name="btnRefreshDevices" Content="🔄 Refresh Devices" Width="120" Height="30"
+                                        Background="#FF9B59B6" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnRefreshDevices_Click"/>
+                                <Button Name="btnApplyDevices" Content="✅ Apply Devices" Width="120" Height="30"
+                                        Background="#FF27AE60" Foreground="White" BorderBrush="Transparent"
+                                        Margin="10,0,0,0" Click="BtnApplyDevices_Click"/>
+                                <Button Name="btnTestAudioPlayback" Content="🔊 Test Audio" Width="100" Height="30" Margin="10,0,0,0"
+                                        Background="#FF4ECDC4" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestAudioPlayback_Click"/>
+                                <Button Name="btnTestMicrophone" Content="🎤 Test Mic" Width="100" Height="30" Margin="10,0,0,0"
+                                        Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestMicrophone_Click"/>
+                                <TextBlock Name="lblSelectedDevices" Text="Selected: Loading..."
+                                           Foreground="#FFCCCCCC" VerticalAlignment="Center" Margin="20,0,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- 🎤📊 Audio Spectrum Analyzer -->
+                    <GroupBox Header="🎤📊 Audio Spectrum Analyzer" Grid.Row="1" Margin="0,0,0,20"
+                              Foreground="White" BorderBrush="#FFFF6B6B">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="100"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Controls -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                                <Button Name="btnStartSpectrum" Content="🎤 Start Mic Monitor" Width="130" Height="30"
+                                        Background="#FF27AE60" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnStartSpectrum_Click"/>
+                                <Button Name="btnStopSpectrum" Content="⏹️ Stop Monitor" Width="110" Height="30" Margin="10,0,0,0"
+                                        Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnStopSpectrum_Click" IsEnabled="False"/>
+                                <TextBlock Name="lblSpectrumStatus" Text="Not monitoring" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="20,0,0,0"/>
+                                <Button Name="btnDiagnoseAudio" Content="🔧 Debug Audio" Width="110" Height="30" Margin="20,0,0,0"
+                                        Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnDiagnoseAudio_Click"/>
+                            </StackPanel>
+
+                            <!-- Spectrum Display -->
+                            <Border Grid.Row="1" Background="#FF2C2C2C" BorderBrush="#FF666666" BorderThickness="1" CornerRadius="5">
+                                <Canvas Name="canvasSpectrum" Background="Transparent">
+                                    <!-- Spectrum bars will be added dynamically -->
+                                </Canvas>
+                            </Border>
+
+                            <!-- Audio Level Indicator -->
+                            <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
+                                <Label Content="Audio Level:" Foreground="White" Width="80"/>
+                                <ProgressBar Name="progAudioLevel" Width="200" Height="20" Minimum="0" Maximum="100"
+                                            Background="#FF404040" Foreground="#FF27AE60" BorderBrush="#FF666666"/>
+                                <TextBlock Name="lblAudioLevel" Text="0%" Foreground="White"
+                                          VerticalAlignment="Center" Margin="10,0,0,0" Width="40"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- 🎬 VOIP Testing -->
+                    <GroupBox Header="🎬 VOIP Testing" Grid.Row="2" Margin="0,0,0,20"
+                              Foreground="White" BorderBrush="#FF4ECDC4">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Audio Testing -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                                <Label Content="🎤 Audio Test:" Foreground="White" Width="100" VerticalAlignment="Center"/>
+                                <Button Name="btnTestAudioFile" Content="📁 Load Audio File" Width="120" Height="30"
+                                        Margin="5,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestAudioFile_Click"/>
+                                <Button Name="btnStopAudioTest" Content="🛑 Stop Audio" Width="100" Height="30"
+                                        Margin="5,0" Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnStopAudioTest_Click" IsEnabled="False"/>
+                                <TextBlock Name="lblAudioTestStatus" Text="No test audio" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="10,0"/>
+                            </StackPanel>
+
+                            <!-- Video Testing -->
+                            <StackPanel Grid.Row="1" Orientation="Horizontal">
+                                <Label Content="📹 Video Test:" Foreground="White" Width="100" VerticalAlignment="Center"/>
+                                <Button Name="btnTestVideoFile" Content="📁 Load Video File" Width="120" Height="30"
+                                        Margin="5,0" Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnTestVideoFile_Click"/>
+                                <Button Name="btnStopVideoTest" Content="🛑 Stop Video" Width="100" Height="30"
+                                        Margin="5,0" Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnStopVideoTest_Click" IsEnabled="False"/>
+                                <TextBlock Name="lblVideoTestStatus" Text="No test video" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="10,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+                </Grid>
+            </TabItem>
+
             <!-- Contacts Tab -->
             <TabItem Header="Contacts" Name="contactsTab">
                 <Grid Margin="20" Background="#FF2B2B2B">
