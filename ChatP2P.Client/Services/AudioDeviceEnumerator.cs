@@ -190,6 +190,15 @@ namespace ChatP2P.Client.Services
                     DeviceType = AudioDeviceType.Camera
                 });
 
+                // Ajouter notre caméra virtuelle
+                cameras.Add(new AudioDevice
+                {
+                    Id = 2,
+                    Name = "🎬 Virtual Camera (File Simulation)",
+                    IsDefault = false,
+                    DeviceType = AudioDeviceType.Camera
+                });
+
                 return cameras;
             });
         }

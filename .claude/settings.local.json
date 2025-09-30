@@ -44,7 +44,9 @@
       "Bash(timeout:*)",
       "Bash(netstat:*)",
       "Bash(dotnet search:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "WebFetch(domain:www.gyan.dev)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

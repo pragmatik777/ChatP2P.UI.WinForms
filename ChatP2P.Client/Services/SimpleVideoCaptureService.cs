@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using ChatP2P.Client.Services;
 
 namespace ChatP2P.Client.Services
 {
@@ -16,6 +17,8 @@ namespace ChatP2P.Client.Services
         private bool _isPlayingFile = false;
         private readonly object _lock = new object();
         private string? _currentVideoFile;
+        private SimpleVirtualCameraService? _simpleVirtualCamera;
+        private FFmpegVideoDecoderService? _ffmpegDecoder;
 
         // Events pour notifier de la disponibilité des frames vidéo
         public event Action<VideoFrame>? VideoFrameReady;
@@ -100,7 +103,7 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// 🎬 NOUVEAU: Démarrer la lecture d'un fichier vidéo pour tests
+        /// 🎬 AMÉLIORÉ: Démarrer la lecture d'un fichier vidéo réel avec FFMediaToolkit
         /// </summary>
         public async Task<bool> StartVideoFilePlaybackAsync(string videoFilePath)
         {
@@ -112,23 +115,54 @@ namespace ChatP2P.Client.Services
                     return false;
                 }
 
+                // Vérifier si c'est un format supporté
+                if (!SimpleVirtualCameraService.IsSupportedVideoFile(videoFilePath))
+                {
+                    LogEvent?.Invoke($"[VideoCapture] ❌ Unsupported video format: {Path.GetExtension(videoFilePath)}");
+                    return false;
+                }
+
+                // Arrêter la lecture précédente
+                await StopCaptureAsync();
+
                 lock (_lock)
                 {
-                    if (_isCapturing || _isPlayingFile)
-                    {
-                        LogEvent?.Invoke("[VideoCapture] Already capturing/playing, stopping first");
-                        StopCaptureAsync().Wait(1000);
-                    }
                     _isPlayingFile = true;
                     _currentVideoFile = videoFilePath;
                 }
 
-                LogEvent?.Invoke($"[VideoCapture] ✅ Started video file playback: {Path.GetFileName(videoFilePath)}");
-                CaptureStateChanged?.Invoke(true);
+                // Initialiser le décodeur FFmpeg réel
+                _ffmpegDecoder = new FFmpegVideoDecoderService();
+                _ffmpegDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[FFmpegDecoder] {msg}");
 
-                // TODO: Implémenter la lecture réelle du fichier MP4/AVI
-                // Pour l'instant, simuler l'envoi de frames vidéo
-                _ = Task.Run(async () => await SimulateVideoFilePlayback());
+                // Charger le fichier vidéo avec FFmpeg
+                var loaded = await _ffmpegDecoder.LoadVideoFileAsync(videoFilePath);
+                if (!loaded)
+                {
+                    LogEvent?.Invoke($"[VideoCapture] ❌ Failed to load video file with FFmpeg: {Path.GetFileName(videoFilePath)}");
+
+                    // Fallback vers la caméra virtuelle simulée
+                    LogEvent?.Invoke($"[VideoCapture] 🔄 Falling back to simulation mode...");
+                    _simpleVirtualCamera = new SimpleVirtualCameraService();
+                    _simpleVirtualCamera.VideoFrameReady += OnVirtualCameraFrameReady;
+                    _simpleVirtualCamera.LogEvent += (msg) => LogEvent?.Invoke($"[VirtualCamera] {msg}");
+                    _simpleVirtualCamera.PlaybackStateChanged += (playing) => CaptureStateChanged?.Invoke(playing);
+
+                    var simLoaded = await _simpleVirtualCamera.LoadVideoFileAsync(videoFilePath);
+                    if (!simLoaded) return false;
+
+                    var simStarted = await _simpleVirtualCamera.StartPlaybackAsync();
+                    if (!simStarted) return false;
+
+                    LogEvent?.Invoke($"[VideoCapture] ✅ Fallback to simulation mode successful");
+                    return true;
+                }
+
+                // Démarrer la capture de frames FFmpeg
+                await StartFFmpegCaptureAsync();
+
+                LogEvent?.Invoke($"[VideoCapture] ✅ Real video file playback started with FFmpeg: {Path.GetFileName(videoFilePath)}");
+                LogEvent?.Invoke($"[VideoCapture] 📊 Video Info: {_ffmpegDecoder.GetVideoInfo()}");
 
                 return true;
             }
@@ -136,6 +170,105 @@ namespace ChatP2P.Client.Services
             {
                 LogEvent?.Invoke($"[VideoCapture] ❌ Failed to start video file playback: {ex.Message}");
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Callback pour frames de la caméra virtuelle
+        /// </summary>
+        private void OnVirtualCameraFrameReady(VideoFrame frame)
+        {
+            VideoFrameReady?.Invoke(frame);
+        }
+
+        /// <summary>
+        /// Démarrer la capture de frames FFmpeg avec lecture en boucle
+        /// </summary>
+        private async Task StartFFmpegCaptureAsync()
+        {
+            try
+            {
+                if (_ffmpegDecoder == null || !_ffmpegDecoder.IsInitialized)
+                {
+                    LogEvent?.Invoke("[VideoCapture] ❌ FFmpeg decoder not initialized");
+                    return;
+                }
+
+                LogEvent?.Invoke("[VideoCapture] 🎬 Starting FFmpeg frame capture loop");
+
+                // Démarrer la boucle de lecture FFmpeg en arrière-plan
+                _ = Task.Run(async () => await FFmpegCaptureLoopAsync());
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoCapture] ❌ Error starting FFmpeg capture: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Boucle de lecture de frames FFmpeg
+        /// </summary>
+        private async Task FFmpegCaptureLoopAsync()
+        {
+            try
+            {
+                var frameCount = 0;
+                var frameInterval = TimeSpan.FromMilliseconds(1000.0 / VIDEO_FPS);
+
+                LogEvent?.Invoke($"[VideoCapture] 🎬 FFmpeg capture loop started at {VIDEO_FPS} FPS");
+
+                while (_isPlayingFile && _ffmpegDecoder?.IsInitialized == true)
+                {
+                    try
+                    {
+                        // Lire frame depuis FFmpeg
+                        var frameData = await _ffmpegDecoder.ReadFrameAsync(frameCount);
+
+                        if (frameData != null && frameData.Length > 0)
+                        {
+                            var videoFrame = new VideoFrame
+                            {
+                                Width = VIDEO_WIDTH,
+                                Height = VIDEO_HEIGHT,
+                                Data = frameData,
+                                PixelFormat = VideoPixelFormatsEnum.Rgb,
+                                Timestamp = DateTime.UtcNow.Ticks
+                            };
+
+                            VideoFrameReady?.Invoke(videoFrame);
+                        }
+                        else
+                        {
+                            // Si pas de frame (fin de vidéo), recommencer depuis le début
+                            frameCount = 0;
+                            LogEvent?.Invoke("[VideoCapture] 🔄 Video reached end, restarting loop");
+                            continue;
+                        }
+
+                        frameCount++;
+
+                        // Log périodique
+                        if (frameCount % (VIDEO_FPS * 10) == 0) // Toutes les 10 secondes
+                        {
+                            var position = TimeSpan.FromSeconds(frameCount / (double)VIDEO_FPS);
+                            LogEvent?.Invoke($"[VideoCapture] 📹 FFmpeg frame {frameCount}, Position: {position:mm\\:ss}");
+                        }
+
+                        await Task.Delay(frameInterval);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogEvent?.Invoke($"[VideoCapture] ⚠️ Error reading FFmpeg frame {frameCount}: {ex.Message}");
+                        frameCount++;
+                        await Task.Delay(frameInterval);
+                    }
+                }
+
+                LogEvent?.Invoke("[VideoCapture] 🛑 FFmpeg capture loop ended");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoCapture] ❌ FFmpeg capture loop error: {ex.Message}");
             }
         }
 
@@ -306,6 +439,22 @@ namespace ChatP2P.Client.Services
                     _currentVideoFile = null;
                 }
 
+                // Arrêter la caméra virtuelle si active
+                if (_simpleVirtualCamera != null)
+                {
+                    await _simpleVirtualCamera.StopPlaybackAsync();
+                    _simpleVirtualCamera.Dispose();
+                    _simpleVirtualCamera = null;
+                }
+
+                // Arrêter le décodeur FFmpeg si actif
+                if (_ffmpegDecoder != null)
+                {
+                    await _ffmpegDecoder.CloseVideoAsync();
+                    _ffmpegDecoder.Dispose();
+                    _ffmpegDecoder = null;
+                }
+
                 LogEvent?.Invoke("[VideoCapture] ✅ Video capture/playback stopped");
                 CaptureStateChanged?.Invoke(false);
             }
@@ -362,6 +511,8 @@ namespace ChatP2P.Client.Services
             try
             {
                 StopCaptureAsync().Wait(1000);
+                _simpleVirtualCamera?.Dispose();
+                _ffmpegDecoder?.Dispose();
                 LogEvent?.Invoke("[VideoCapture] Service disposed");
             }
             catch (Exception ex)

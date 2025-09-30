@@ -16,6 +16,7 @@ namespace ChatP2P.Server
         private static VOIPRelayService? _voipRelay;
         private static VOIPAudioRelayService? _audioRelay;
         private static VOIPVideoRelayService? _videoRelay;
+        private static UDPAudioRelayService? _udpAudioRelay;
 
         // Getter public pour le RelayHub
         public static RelayHub? GetRelayHub() => _relayHub;
@@ -24,6 +25,7 @@ namespace ChatP2P.Server
         public static VOIPRelayService? GetVOIPRelay() => _voipRelay;
         public static VOIPAudioRelayService? GetAudioRelay() => _audioRelay;
         public static VOIPVideoRelayService? GetVideoRelay() => _videoRelay;
+        public static UDPAudioRelayService? GetUDPAudioRelay() => _udpAudioRelay;
         private static bool _isRunning = false;
         private static bool _p2pInitialized = false;
         private static string? _displayName = null;
@@ -386,8 +388,17 @@ namespace ChatP2P.Server
                 };
                 await _videoRelay.StartAsync();
 
-                Console.WriteLine("✅ Dedicated Audio/Video Relays started (8893/8894)");
-                LogToFile("[DEDICATED-RELAY] Pure binary audio/video relays started");
+                // ✅ NOUVEAU: Démarrer UDP Audio Relay Service (port 8895)
+                _udpAudioRelay = new UDPAudioRelayService();
+                _udpAudioRelay.LogEvent += (message) =>
+                {
+                    Console.WriteLine(message);
+                    LogToFile($"[UDP-AUDIO] {message}");
+                };
+                await _udpAudioRelay.StartAsync();
+
+                Console.WriteLine("✅ Dedicated Audio/Video Relays started (8893/8894/8895-UDP)");
+                LogToFile("[DEDICATED-RELAY] Pure binary audio/video relays + UDP audio started");
             }
             catch (Exception ex)
             {
@@ -1289,6 +1300,29 @@ namespace ChatP2P.Server
                 }
                 
                 P2PService.HandleOffer(fromPeer, sdp);
+                // ✅ NOUVEAU: Récupérer le destinataire pour sessions VOIP
+                offerData.TryGetValue("toPeer", out var toPeer);
+
+                if (!_p2pInitialized)
+                {
+                    return CreateErrorResponse("P2P service not initialized");
+                }
+
+                // ✅ NOUVEAU: Détecter les calls VOIP et démarrer les sessions relay correspondantes
+                var isAudioCall = sdp.Contains("m=audio") || sdp.Contains("opus") || sdp.Contains("PCMU") || sdp.Contains("PCMA");
+                var isVideoCall = sdp.Contains("m=video") || sdp.Contains("H264") || sdp.Contains("VP8") || sdp.Contains("VP9");
+
+                if (isAudioCall && !string.IsNullOrEmpty(toPeer))
+                {
+                    _audioRelay?.StartAudioSession(fromPeer, toPeer);
+                    Console.WriteLine($"🎤 [VOIP-SESSION] Audio session started: {fromPeer} ↔ {toPeer}");
+                }
+
+                if (isVideoCall && !string.IsNullOrEmpty(toPeer))
+                {
+                    _videoRelay?.StartVideoSession(fromPeer, toPeer);
+                    Console.WriteLine($"📹 [VOIP-SESSION] Video session started: {fromPeer} ↔ {toPeer}");
+                }
                 Console.WriteLine($"P2P offer handled from {fromPeer}");
                 return CreateSuccessResponse("Offer handled");
             }
@@ -2493,6 +2527,12 @@ namespace ChatP2P.Server
             {
                 await _videoRelay.StopAsync();
                 Console.WriteLine("Video Relay arrêté");
+            }
+
+            if (_udpAudioRelay != null)
+            {
+                await _udpAudioRelay.StopAsync();
+                Console.WriteLine("UDP Audio Relay arrêté");
             }
             
             await Task.Delay(100); // Laisser le temps aux tâches de se terminer

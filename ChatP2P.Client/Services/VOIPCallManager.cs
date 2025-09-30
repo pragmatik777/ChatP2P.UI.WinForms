@@ -24,11 +24,12 @@ namespace ChatP2P.Client.Services
         private volatile bool _videoEncoderInitialized = false; // ✅ FIX: Track encoder initialization state
         private readonly WebRTCDirectClient _webRtcClient;
         private VOIPRelayClient? _voipRelay;
-        private PureAudioRelayClient? _pureAudioRelay; // ✅ NOUVEAU: Canal audio pur
+        private PureAudioRelayClient? _pureAudioRelay; // ✅ ANCIEN: Canal audio pur TCP
+        private UDPAudioRelayClient? _udpAudioRelay; // ✅ NOUVEAU: Canal audio UDP temps réel
         private PureVideoRelayClient? _pureVideoRelay; // ✅ NOUVEAU: Canal vidéo pur (port 8894)
 
         // ✅ NOUVEAU: Mode caméra (physique ou virtuelle)
-        public bool UseVirtualCamera { get; set; } = true; // ✅ DEFAULT: Use virtual camera for testing
+        public bool UseVirtualCamera { get; set; } = false; // ✅ DEFAULT: Use real video capture with FFmpeg first
 
         // Events pour l'interface utilisateur
         public event Action<string, CallState>? CallStateChanged;
@@ -48,20 +49,24 @@ namespace ChatP2P.Client.Services
         public event Func<string, string, string, string, Task>? SendVOIPSignal; // signalType, fromPeer, toPeer, data
 
         private string? _serverIP; // ✅ NOUVEAU: Store server IP
+        private bool _audioCaptureEventWired = false; // ✅ FIX: Track event wiring to prevent duplicates
 
         // ✅ NOUVEAU: Exposer OpusStreamingService pour l'interface utilisateur
         public OpusAudioStreamingService OpusStreamingService => _opusStreaming;
 
-        public VOIPCallManager(string clientId, WebRTCDirectClient webRtcClient)
+        public VOIPCallManager(string clientId, WebRTCDirectClient webRtcClient, SimpleVideoCaptureService? sharedVideoCapture = null)
         {
             _clientId = clientId;
             _webRtcClient = webRtcClient;
             // ❌ REMOVED: _audioCapture = new SimpleAudioCaptureService() - replaced by OpusAudioStreamingService
-            _videoCapture = new SimpleVideoCaptureService();
+
+            // ✅ FIX: Utiliser le service de capture vidéo partagé depuis MainWindow si disponible
+            _videoCapture = sharedVideoCapture ?? new SimpleVideoCaptureService();
             _virtualCamera = new SimpleVirtualCameraService(); // ✅ NOUVEAU: Caméra virtuelle
             _opusStreaming = new OpusAudioStreamingService(); // ✅ OPUS: Initialiser streaming professionnel
             _videoEncoder = new VideoEncodingService(); // ✅ NOUVEAU: Encodeur vidéo professionnel
-            _pureAudioRelay = new PureAudioRelayClient(); // ✅ NOUVEAU: Canal audio pur
+            _pureAudioRelay = new PureAudioRelayClient(); // ✅ ANCIEN: Canal audio pur TCP
+            _udpAudioRelay = new UDPAudioRelayClient(); // ✅ NOUVEAU: Canal audio UDP temps réel
             _pureVideoRelay = new PureVideoRelayClient(); // ✅ NOUVEAU: Canal vidéo pur
 
             // ✅ FIX: Wire les events des services de capture ET VIDÉO
@@ -72,8 +77,10 @@ namespace ChatP2P.Client.Services
             _virtualCamera.EncodedVideoReady += OnEncodedVideoReady; // ✅ NOUVEAU: H.264 direct depuis caméra virtuelle
             _opusStreaming.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Opus] {msg}"); // ✅ OPUS
             _videoEncoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Encoder] {msg}"); // ✅ NOUVEAU
-            _pureAudioRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-AUDIO] {msg}"); // ✅ NOUVEAU
-            _pureAudioRelay.AudioDataReceived += OnPureAudioReceived; // ✅ NOUVEAU
+            _pureAudioRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-AUDIO-TCP] {msg}"); // ✅ ANCIEN
+            _pureAudioRelay.AudioDataReceived += OnPureAudioReceived; // ✅ ANCIEN
+            _udpAudioRelay.LogEvent += (msg) => LogEvent?.Invoke($"[UDP-AUDIO] {msg}"); // ✅ NOUVEAU
+            _udpAudioRelay.AudioDataReceived += OnUDPAudioReceived; // ✅ NOUVEAU
             _pureVideoRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-VIDEO] {msg}"); // ✅ NOUVEAU
             _pureVideoRelay.VideoDataReceived += OnPureVideoReceived; // ✅ NOUVEAU
 
@@ -118,6 +125,14 @@ namespace ChatP2P.Client.Services
         {
             _serverIP = serverIP;
             LogEvent?.Invoke($"[VOIP-Manager] 🔧 Server IP set to: {serverIP}");
+        }
+
+        /// <summary>
+        /// Get the current server IP
+        /// </summary>
+        private string GetServerIP()
+        {
+            return _serverIP ?? "192.168.1.145"; // Fallback to default if not set
         }
 
         /// <summary>
@@ -402,7 +417,14 @@ namespace ChatP2P.Client.Services
                     videoStarted = await _videoCapture.StartCaptureAsync();
                 }
 
-                var audioStarted = audioStreamStarted && audioCaptureStarted;
+                // ✅ FIX RECEIVE-ONLY: Audio OK si playback marche, même sans capture (VMs sans micro)
+                var audioStarted = audioStreamStarted; // Capture optionnelle pour receive-only
+
+                // Diagnostic du mode audio
+                if (audioStreamStarted && audioCaptureStarted)
+                    LogEvent?.Invoke($"[VOIP-Manager] 🎤 Audio bidirectional (capture + playback)");
+                else if (audioStreamStarted)
+                    LogEvent?.Invoke($"[VOIP-Manager] 👂 Audio receive-only mode (no microphone)");
 
                 if (!audioStarted || !videoStarted)
                 {
@@ -492,7 +514,8 @@ namespace ChatP2P.Client.Services
                     }
                 }
 
-                var audioStarted = audioStreamStarted && audioCaptureStarted;
+                // ✅ FIX RECEIVE-ONLY: Audio OK si playback marche, même sans capture (VMs sans micro)
+                var audioStarted = audioStreamStarted; // Capture optionnelle pour receive-only
 
                 if (!audioStarted || (isVideo && !videoStarted))
                 {
@@ -635,6 +658,13 @@ namespace ChatP2P.Client.Services
                         await _opusStreaming.StopStreamingAsync();
                         LogEvent?.Invoke($"[VOIP-Manager] 🎵 Opus streaming stopped - no active calls");
                     }
+                }
+
+                // ✅ NOUVEAU: Terminer session UDP audio
+                if (_udpAudioRelay?.IsConnected == true)
+                {
+                    await _udpAudioRelay.EndSessionAsync(peer);
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ UDP audio session ended with {peer}");
                 }
 
                 // Envoyer signal de fin d'appel
@@ -944,6 +974,30 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Pure audio relay already connected");
                 }
 
+                // ✅ NOUVEAU: Se connecter au canal UDP audio pour performance maximale
+                LogEvent?.Invoke($"[VOIP-Manager] 🚀 Attempting UDP audio relay connection: serverIP={serverIP}, clientId={_clientId}");
+                if (_udpAudioRelay != null && !_udpAudioRelay.IsConnected)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 🚀 Trying to connect to UDP audio relay {serverIP}:8895...");
+                    var udpConnected = await _udpAudioRelay.ConnectAsync(serverIP, _clientId);
+                    if (udpConnected)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to UDP audio relay channel (port 8895)");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Failed to connect to UDP audio relay, using TCP fallback");
+                    }
+                }
+                else if (_udpAudioRelay == null)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _udpAudioRelay is null!");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ℹ️ UDP audio relay already connected");
+                }
+
                 // ✅ NOUVEAU: Se connecter au canal vidéo pur si appel vidéo
                 if (includeVideo && _pureVideoRelay != null && !_pureVideoRelay.IsConnected)
                 {
@@ -972,6 +1026,13 @@ namespace ChatP2P.Client.Services
                 if (callStarted)
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ VOIP relay call started to {targetPeer}");
+
+                    // ✅ NOUVEAU: Démarrer session UDP audio
+                    if (_udpAudioRelay?.IsConnected == true)
+                    {
+                        await _udpAudioRelay.StartSessionAsync(targetPeer);
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ UDP audio session started with {targetPeer}");
+                    }
 
                     // Setup audio relay
                     await SetupAudioRelayForPeer(targetPeer);
@@ -1062,6 +1123,29 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Pure audio relay already connected for incoming call");
                 }
 
+                // ✅ NOUVEAU: Se connecter au canal UDP audio pour performance maximale
+                if (_udpAudioRelay != null && !_udpAudioRelay.IsConnected)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 🚀 Trying to connect to UDP audio relay {serverIP}:8895 for incoming call...");
+                    var udpConnected = await _udpAudioRelay.ConnectAsync(serverIP, _clientId);
+                    if (udpConnected)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to UDP audio relay channel for incoming call (port 8895)");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Failed to connect to UDP audio relay for incoming call, using TCP fallback");
+                    }
+                }
+                else if (_udpAudioRelay == null)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _udpAudioRelay is null for incoming call!");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ℹ️ UDP audio relay already connected for incoming call");
+                }
+
                 // ✅ NOUVEAU: Se connecter au canal vidéo pur pour appels entrants aussi
                 if (_pureVideoRelay != null && !_pureVideoRelay.IsConnected)
                 {
@@ -1096,25 +1180,63 @@ namespace ChatP2P.Client.Services
 
         private async Task SetupAudioRelayForPeer(string targetPeer)
         {
-            // Setup audio streaming to relay server
-            // ❌ REMOVED: _audioCapture.AudioSampleReady - OpusAudioStreamingService doesn't capture, only plays
-            // TODO: If audio capture needed, implement proper audio capture for VOIP
-            /*
-            _audioCapture.AudioSampleReady += async (format, sample) =>
+            try
             {
-                LogEvent?.Invoke($"[VOIP-Manager] 🎵 Audio sample ready: {sample?.Length ?? 0} bytes");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔧 Setting up audio relay for peer: {targetPeer}");
 
-                if (_voipRelay == null)
+                // ✅ CRITICAL FIX: S'assurer que l'audio relay écoute pour l'audio entrant
+                if (_pureAudioRelay != null && _pureAudioRelay.IsConnected)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ VOIP relay is null!");
-                    return;
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Pure audio relay already connected and listening");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 🔧 Starting pure audio relay listening for incoming audio...");
+
+                    // S'assurer que le pure audio relay est connecté et écoute
+                    var serverIP = GetServerIP();
+                    if (!string.IsNullOrEmpty(serverIP))
+                    {
+                        var connected = await _pureAudioRelay.ConnectAsync(_clientId, serverIP, 8893);
+                        if (connected)
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ✅ Pure audio relay connected for receiving audio from {targetPeer}");
+                        }
+                        else
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to connect pure audio relay for receiving");
+                        }
+                    }
                 }
 
-                if (!_voipRelay.IsConnected)
+                // ✅ CRITICAL FIX: S'assurer que l'opus streaming est prêt pour la playback
+                if (!_opusStreaming.IsStreaming)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ VOIP relay not connected, state: {_voipRelay.IsConnected}");
-                    return;
+                    LogEvent?.Invoke($"[VOIP-Manager] 🔧 Starting opus streaming for audio playback...");
+                    var streamingStarted = await _opusStreaming.StartStreamingAsync();
+                    if (streamingStarted)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Opus streaming started for audio playback");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to start opus streaming for playback");
+                    }
                 }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Opus streaming already active for playback");
+                }
+
+                LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio relay setup completed for {targetPeer}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error setting up audio relay: {ex.Message}");
+            }
+
+            // ❌ REMOVED OLD CODE: _audioCapture.AudioSampleReady - OpusAudioStreamingService doesn't capture, only plays
+            /*
 
                 LogEvent?.Invoke($"[VOIP-Manager] 🚀 Sending PURE audio: {sample?.Length ?? 0} bytes (no JSON overhead!)");
 
@@ -1140,13 +1262,25 @@ namespace ChatP2P.Client.Services
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio capture started for relay to {targetPeer}");
 
-                    // ✅ FIX CRITIQUE: Connecter l'event AudioCaptured à la transmission relay !
-                    _opusStreaming.AudioCaptured += async (audioData) =>
+                    // ✅ FIX CRITIQUE: Connecter l'event AudioCaptured une seule fois !
+                    if (!_audioCaptureEventWired)
                     {
-                        await HandleCapturedAudioData(targetPeer, audioData);
-                    };
-
-                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio capture event connected to relay transmission");
+                        _opusStreaming.AudioCaptured += async (audioData) =>
+                        {
+                            // ✅ FIX: Trouver le peer actif dynamiquement au lieu d'utiliser closure
+                            var activePeer = GetActiveCallPeer();
+                            if (!string.IsNullOrEmpty(activePeer))
+                            {
+                                await HandleCapturedAudioData(activePeer, audioData);
+                            }
+                        };
+                        _audioCaptureEventWired = true;
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio capture event connected to relay transmission");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Audio capture event already wired, skipping duplicate");
+                    }
                 }
                 else
                 {
@@ -1159,6 +1293,40 @@ namespace ChatP2P.Client.Services
             }
 
             LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio relay setup completed for {targetPeer}");
+        }
+
+        /// <summary>
+        /// ✅ FIX: Obtenir le peer actuellement en appel actif
+        /// </summary>
+        private string GetActiveCallPeer()
+        {
+            try
+            {
+                // Chercher un call en état Connected
+                foreach (var kvp in _activeCalls)
+                {
+                    if (kvp.Value.State == CallState.Connected)
+                    {
+                        return kvp.Key;
+                    }
+                }
+
+                // Si aucun call Connected, chercher Ringing/Calling
+                foreach (var kvp in _activeCalls)
+                {
+                    if (kvp.Value.State == CallState.Ringing || kvp.Value.State == CallState.Calling)
+                    {
+                        return kvp.Key;
+                    }
+                }
+
+                return "";
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error getting active call peer: {ex.Message}");
+                return "";
+            }
         }
 
         /// <summary>
@@ -1182,17 +1350,24 @@ namespace ChatP2P.Client.Services
                     return;
                 }
 
-                LogEvent?.Invoke($"[VOIP-Manager] 🚀 Sending audio to relay: {audioData?.Length ?? 0} bytes (no JSON overhead!)");
+                LogEvent?.Invoke($"[VOIP-Manager] 🚀 Sending audio to relay: {audioData?.Length ?? 0} bytes");
 
-                // ✅ PRIORITÉ: Utiliser canal audio pur pour performance maximale !
-                if (_pureAudioRelay != null && _pureAudioRelay.IsConnected)
+                // ✅ PRIORITÉ 1: Utiliser canal UDP pour latence minimale !
+                if (_udpAudioRelay != null && _udpAudioRelay.IsConnected)
+                {
+                    await _udpAudioRelay.SendAudioDataAsync(targetPeer, audioData);
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio sent via UDP relay channel ({audioData?.Length ?? 0} bytes) - ULTRA LOW LATENCY!");
+                }
+                // ✅ PRIORITÉ 2: Fallback vers canal TCP pur (sans JSON)
+                else if (_pureAudioRelay != null && _pureAudioRelay.IsConnected)
                 {
                     await _pureAudioRelay.SendAudioDataAsync(audioData);
-                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio sent via PURE relay channel ({audioData?.Length ?? 0} bytes)");
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio sent via TCP PURE relay channel ({audioData?.Length ?? 0} bytes)");
                 }
+                // ✅ PRIORITÉ 3: Dernier fallback vers JSON relay
                 else
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Pure audio relay not connected, falling back to JSON relay");
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ UDP and TCP pure audio relays not connected, falling back to JSON relay");
                     await _voipRelay.SendAudioDataAsync(targetPeer, audioData);
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio sent via JSON relay fallback ({audioData?.Length ?? 0} bytes)");
                 }
@@ -1284,6 +1459,37 @@ namespace ChatP2P.Client.Services
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing pure audio: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Traiter audio reçu du canal UDP (port 8895) - Latence minimale !
+        /// </summary>
+        private async void OnUDPAudioReceived(byte[] audioData)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🚀 UDP Audio received: {audioData.Length} bytes (ultra low latency!)");
+
+                // ✅ OPUS: Professional real-time streaming via UDP - Performance optimale !
+                if (_opusStreaming.IsStreaming)
+                {
+                    _opusStreaming.StreamAudioData(audioData);
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ UDP audio streamed to Opus buffer ({audioData.Length} bytes, buffer: {_opusStreaming.BufferLevel})");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Opus streaming not active for UDP audio, starting...");
+                    await _opusStreaming.StartStreamingAsync();
+                    _opusStreaming.StreamAudioData(audioData);
+                }
+
+                // Notifier l'UI (UDP audio en temps réel)
+                RemoteAudioReceived?.Invoke("UDP-Audio-Relay", audioData);
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing UDP audio: {ex.Message}");
             }
         }
 
@@ -1612,7 +1818,8 @@ namespace ChatP2P.Client.Services
                 _virtualCamera?.Dispose(); // ✅ NOUVEAU: Nettoyer caméra virtuelle
                 _videoEncoder?.Dispose(); // ✅ NOUVEAU: Nettoyer video encoder
                 // ❌ DUPLICATE REMOVED: _opusStreaming?.Dispose() already called above
-                _pureAudioRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal audio pur
+                _pureAudioRelay?.Dispose(); // ✅ ANCIEN: Nettoyer canal audio pur TCP
+                _udpAudioRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal audio UDP
                 _pureVideoRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal vidéo pur
                 _voipRelay?.Disconnect();
 

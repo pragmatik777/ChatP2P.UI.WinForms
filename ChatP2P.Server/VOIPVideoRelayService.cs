@@ -110,18 +110,57 @@ namespace ChatP2P.Server
                     }
                 }
 
-                // Boucle de traitement des données vidéo binaires pures
+                // Boucle de traitement des données vidéo avec protocol LENGTH-prefixed
+                var lengthBuffer = new byte[4];
                 while (_isRunning && tcpClient.Connected)
                 {
-                    bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                    if (bytesRead > 0)
+                    try
                     {
-                        // Relayer directement les données vidéo binaires
-                        await RelayPureVideoData(peerName, buffer, bytesRead);
+                        // Lire la taille de la frame (4 bytes)
+                        var totalBytesRead = 0;
+                        while (totalBytesRead < 4)
+                        {
+                            var bytesReadLen = await stream.ReadAsync(lengthBuffer, totalBytesRead, 4 - totalBytesRead);
+                            if (bytesReadLen == 0) break; // Connexion fermée
+                            totalBytesRead += bytesReadLen;
+                        }
+
+                        if (totalBytesRead < 4) break;
+
+                        var dataLength = BitConverter.ToInt32(lengthBuffer, 0);
+
+                        // Validation taille raisonnable (max 5MB par frame)
+                        if (dataLength <= 0 || dataLength > 5 * 1024 * 1024)
+                        {
+                            LogEvent?.Invoke($"[VIDEO-RELAY] ❌ Invalid frame size from {peerName}: {dataLength} bytes");
+                            continue;
+                        }
+
+                        // Lire les données vidéo de la taille exacte
+                        var videoBuffer = new byte[dataLength];
+                        totalBytesRead = 0;
+                        while (totalBytesRead < dataLength)
+                        {
+                            var bytesReadData = await stream.ReadAsync(videoBuffer, totalBytesRead, dataLength - totalBytesRead);
+                            if (bytesReadData == 0) break; // Connexion fermée
+                            totalBytesRead += bytesReadData;
+                        }
+
+                        if (totalBytesRead == dataLength)
+                        {
+                            // Créer frame complète avec header LENGTH pour relay
+                            var completeFrame = new byte[4 + dataLength];
+                            Array.Copy(lengthBuffer, 0, completeFrame, 0, 4);
+                            Array.Copy(videoBuffer, 0, completeFrame, 4, dataLength);
+
+                            // Relayer frame complète avec protocole correct
+                            await RelayPureVideoData(peerName, completeFrame, completeFrame.Length);
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        break; // Connexion fermée
+                        LogEvent?.Invoke($"[VIDEO-RELAY] ❌ Protocol error for {peerName}: {ex.Message}");
+                        break;
                     }
                 }
             }

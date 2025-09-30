@@ -183,6 +183,10 @@ namespace ChatP2P.Server
                         await HandleCallStart(message);
                         break;
 
+                    case "call_invite":
+                        await HandleCallInvite(message);
+                        break;
+
                     case "call_accept":
                         await HandleCallAccept(message);
                         break;
@@ -249,7 +253,7 @@ namespace ChatP2P.Server
             _activeSessions.TryAdd(sessionId, session);
             LogEvent?.Invoke($"[VOIP-RELAY] 📞 Call started: {message.From} → {message.To}");
 
-            // ✅ NOUVEAU: Synchroniser avec le canal audio pur
+            // ✅ NOUVEAU: Synchroniser avec les canaux audio/vidéo purs
             try
             {
                 var audioRelay = ChatP2P.Server.Program.GetAudioRelay();
@@ -259,6 +263,17 @@ namespace ChatP2P.Server
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to sync audio session: {ex.Message}");
+            }
+
+            try
+            {
+                var videoRelay = ChatP2P.Server.Program.GetVideoRelay();
+                videoRelay?.StartVideoSession(message.From, message.To);
+                LogEvent?.Invoke($"[VOIP-RELAY] 📹 Pure video session synchronized: {message.From} ↔ {message.To}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to sync video session: {ex.Message}");
             }
 
             // ✅ FIX CRITIQUE: Vérifier si le destinataire est connecté au relay
@@ -290,9 +305,64 @@ namespace ChatP2P.Server
             }
         }
 
+        private async Task HandleCallInvite(VOIPMessage message)
+        {
+            LogEvent?.Invoke($"[VOIP-RELAY] 📞 Call invite: {message.From} → {message.To}");
+
+            // ✅ NOUVEAU: Synchroniser les sessions des relays purs lors de l'invite
+            try
+            {
+                var audioRelay = ChatP2P.Server.Program.GetAudioRelay();
+                audioRelay?.StartAudioSession(message.From, message.To);
+                LogEvent?.Invoke($"[VOIP-RELAY] 🎵 Pure audio session started on invite: {message.From} ↔ {message.To}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to start audio session on invite: {ex.Message}");
+            }
+
+            try
+            {
+                var videoRelay = ChatP2P.Server.Program.GetVideoRelay();
+                videoRelay?.StartVideoSession(message.From, message.To);
+                LogEvent?.Invoke($"[VOIP-RELAY] 📹 Pure video session started on invite: {message.From} ↔ {message.To}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to start video session on invite: {ex.Message}");
+            }
+
+            // Relayer l'invitation vers le destinataire
+            await RelayMessageToPeer(message.To, message);
+        }
+
         private async Task HandleCallAccept(VOIPMessage message)
         {
             LogEvent?.Invoke($"[VOIP-RELAY] ✅ Call accepted: {message.From} ← {message.To}");
+
+            // ✅ NOUVEAU: Synchroniser les sessions des relays purs lors de l'accept aussi
+            try
+            {
+                var audioRelay = ChatP2P.Server.Program.GetAudioRelay();
+                audioRelay?.StartAudioSession(message.From, message.To);
+                LogEvent?.Invoke($"[VOIP-RELAY] 🎵 Pure audio session started on accept: {message.From} ↔ {message.To}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to start audio session on accept: {ex.Message}");
+            }
+
+            try
+            {
+                var videoRelay = ChatP2P.Server.Program.GetVideoRelay();
+                videoRelay?.StartVideoSession(message.From, message.To);
+                LogEvent?.Invoke($"[VOIP-RELAY] 📹 Pure video session started on accept: {message.From} ↔ {message.To}");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to start video session on accept: {ex.Message}");
+            }
+
             await RelayMessageToPeer(message.To, message);
         }
 
@@ -308,6 +378,29 @@ namespace ChatP2P.Server
                 LogEvent?.Invoke($"[VOIP-RELAY] 📴 Call ended: {session.Caller} ↔ {session.Callee} " +
                                $"(Duration: {duration:mm\\:ss}, Audio: {session.AudioBytesRelayed / 1024}KB, " +
                                $"Video: {session.VideoBytesRelayed / 1024}KB)");
+
+                // ✅ NOUVEAU: Nettoyer les sessions des relays purs
+                try
+                {
+                    var audioRelay = ChatP2P.Server.Program.GetAudioRelay();
+                    audioRelay?.StopAudioSession(session.Caller, session.Callee);
+                    LogEvent?.Invoke($"[VOIP-RELAY] 🎵 Pure audio session ended: {session.Caller} ↔ {session.Callee}");
+                }
+                catch (Exception ex)
+                {
+                    LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to end audio session: {ex.Message}");
+                }
+
+                try
+                {
+                    var videoRelay = ChatP2P.Server.Program.GetVideoRelay();
+                    videoRelay?.StopVideoSession(session.Caller, session.Callee);
+                    LogEvent?.Invoke($"[VOIP-RELAY] 📹 Pure video session ended: {session.Caller} ↔ {session.Callee}");
+                }
+                catch (Exception ex)
+                {
+                    LogEvent?.Invoke($"[VOIP-RELAY] ⚠️ Failed to end video session: {ex.Message}");
+                }
             }
 
             // Relayer vers l'autre peer

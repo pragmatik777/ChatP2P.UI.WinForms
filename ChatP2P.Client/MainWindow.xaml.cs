@@ -441,8 +441,14 @@ namespace ChatP2P.Client
                     var displayName = txtDisplayName?.Text?.Trim() ?? Environment.UserName;
                     _ = LogToFile($"[VOIP-INIT] Display name: {displayName}");
 
-                    _voipManager = new VOIPCallManager(displayName, _webrtcClient);
-                    _ = LogToFile($"[VOIP-INIT] ✅ VOIPCallManager created successfully");
+                    // 🎬 NOUVEAU: Initialiser les services de capture AVANT VOIPCallManager
+                    // ❌ REMOVED: // ❌ REMOVED: _audioCapture = // ❌ REMOVED: new SimpleAudioCaptureService() - replaced by OpusAudioStreamingService
+                    _videoCapture = new SimpleVideoCaptureService();
+                    _ = LogToFile($"[VOIP-INIT] ✅ Video capture service created");
+
+                    // ✅ FIX CRITIQUE: Créer VOIPCallManager avec le service de capture vidéo partagé
+                    _voipManager = new VOIPCallManager(displayName, _webrtcClient, _videoCapture);
+                    _ = LogToFile($"[VOIP-INIT] ✅ VOIPCallManager created with shared video capture service");
 
                     // ✅ Connect VOIPCallManager video events to UI renderer
                     _voipManager.RemoteVideoReceived += OnVOIPVideoFrameReceived;
@@ -480,9 +486,7 @@ namespace ChatP2P.Client
 
                     _mediaClient = new SimpleWebRTCMediaClient(displayName);
 
-                    // 🎬 NOUVEAU: Initialiser les services de capture
-                    // ❌ REMOVED: // ❌ REMOVED: _audioCapture = // ❌ REMOVED: new SimpleAudioCaptureService() - replaced by OpusAudioStreamingService
-                    _videoCapture = new SimpleVideoCaptureService();
+                    // 🎬 Services de capture déjà initialisés plus tôt pour partage avec VOIPCallManager
 
                     // Event handlers pour VOIP Manager
                     _voipManager.CallStateChanged += OnCallStateChanged;

@@ -1,0 +1,109 @@
+🔧 FIX OPUS CORRUPTION - OpusAudioStreamingService.cs
+
+PROBLÈME IDENTIFIÉ:
+- PlayAudioFrameOptimized (ligne ~251) reçoit des données Opus-encoded
+- Mais ConvertToWavFormatOptimized assume des données PCM brutes
+- Résultat: WAV corrompu → "The wave header is corrupt"
+
+SOLUTION:
+1. Ajouter détection Opus dans PlayAudioFrameOptimized
+2. Skip lecture Opus jusqu'à implémentation décodeur
+3. Méthodes d'entropie pour distinguer Opus vs PCM
+
+CODE À INSÉRER AVANT PlayAudioFrameOptimized:
+
+        /// <summary>
+        /// ✅ FIX OPUS CORRUPTION: Détecter si les données audio sont Opus-encoded
+        /// </summary>
+        private bool IsOpusEncodedData(byte[] audioData)
+        {
+            try
+            {
+                if (audioData == null || audioData.Length < 8)
+                    return false;
+
+                // Heuristiques pour détecter du contenu Opus vs PCM brut:
+
+                // 1. Vérifier si la taille correspond aux frames Opus typiques (240-2880 bytes)
+                if (audioData.Length >= 240 && audioData.Length <= 4000)
+                {
+                    // 2. Vérifier entropie: données Opus ont plus d'entropie que PCM
+                    var entropy = CalculateEntropy(audioData);
+                    if (entropy > 6.0) // Opus a généralement > 6.0, PCM < 4.0
+                    {
+                        return true;
+                    }
+                }
+
+                // 3. Vérifier modèles PCM: données PCM brutes ont souvent des valeurs répétitives
+                var isLikelyPCM = IsLikelyPCMData(audioData);
+                return !isLikelyPCM;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[OpusStreaming] ❌ Error detecting Opus data: {ex.Message}");
+                return false; // En cas de doute, traiter comme PCM
+            }
+        }
+
+        /// <summary>
+        /// Calculer l'entropie Shannon des données audio
+        /// </summary>
+        private double CalculateEntropy(byte[] data)
+        {
+            var frequencies = new int[256];
+            foreach (byte b in data)
+                frequencies[b]++;
+
+            double entropy = 0.0;
+            int length = data.Length;
+
+            for (int i = 0; i < 256; i++)
+            {
+                if (frequencies[i] > 0)
+                {
+                    double probability = (double)frequencies[i] / length;
+                    entropy -= probability * Math.Log2(probability);
+                }
+            }
+
+            return entropy;
+        }
+
+        /// <summary>
+        /// Vérifier si les données ressemblent à du PCM brut
+        /// </summary>
+        private bool IsLikelyPCMData(byte[] data)
+        {
+            if (data.Length < 100) return false;
+
+            // PCM 16-bit a souvent beaucoup de zéros dans l'octet de poids fort
+            int zeroCount = 0;
+            for (int i = 1; i < data.Length; i += 2)
+            {
+                if (data[i] == 0) zeroCount++;
+            }
+
+            double zeroRatio = (double)zeroCount / (data.Length / 2);
+            return zeroRatio > 0.3; // PCM a souvent > 30% de zéros dans l'octet haut
+        }
+
+MODIFIER PlayAudioFrameOptimized:
+
+                // ✅ FIX OPUS CORRUPTION: Détecter si les données sont Opus-encoded
+                if (IsOpusEncodedData(audioData))
+                {
+                    LogEvent?.Invoke($"[OpusStreaming] 🔧 Detected Opus-encoded data ({audioData.Length} bytes) - skipping WAV conversion to prevent corruption");
+                    // Pour l'instant, on skip la lecture des données Opus jusqu'à ce qu'on implémente un décodeur
+                    // TODO: Implémenter décodage Opus vers PCM
+                    return;
+                }
+
+                // Convertir les données raw PCM en format WAV jouable (optimisé)
+                var wavData = ConvertToWavFormatOptimized(audioData);
+
+RÉSULTAT:
+- Plus d'erreurs "wave header is corrupt"
+- Audio PCM continue à fonctionner
+- Log clair quand Opus détecté
+- Prêt pour futur décodeur Opus

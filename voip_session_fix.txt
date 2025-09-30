@@ -1,0 +1,33 @@
+🎯 FIX AUDIO SESSION MANQUANT DANS HandleP2POffer()
+
+Ligne ~1280: Ajouter après la récupération de "fromPeer" et "sdp":
+
+// ✅ NOUVEAU: Récupérer le destinataire pour sessions VOIP
+offerData.TryGetValue("toPeer", out var toPeer);
+
+Ligne ~1291: Remplacer le bloc P2PService.HandleOffer par:
+
+// ✅ NOUVEAU: Détecter les calls VOIP et démarrer les sessions relay correspondantes
+var isAudioCall = sdp.Contains("m=audio") || sdp.Contains("opus") || sdp.Contains("PCMU") || sdp.Contains("PCMA");
+var isVideoCall = sdp.Contains("m=video") || sdp.Contains("H264") || sdp.Contains("VP8") || sdp.Contains("VP9");
+
+if (isAudioCall && !string.IsNullOrEmpty(toPeer))
+{
+    _audioRelay?.StartAudioSession(fromPeer, toPeer);
+    Console.WriteLine($"🎤 [VOIP-SESSION] Audio session started: {fromPeer} ↔ {toPeer}");
+}
+
+if (isVideoCall && !string.IsNullOrEmpty(toPeer))
+{
+    _videoRelay?.StartVideoSession(fromPeer, toPeer);
+    Console.WriteLine($"📹 [VOIP-SESSION] Video session started: {fromPeer} ↔ {toPeer}");
+}
+
+P2PService.HandleOffer(fromPeer, sdp);
+Console.WriteLine($"P2P offer handled from {fromPeer} to {toPeer ?? "unknown"}");
+
+🎯 PROBLÈME RÉSOLU:
+- Ton ami ne recevait pas d'audio car aucune session audio n'était créée côté serveur
+- Le relay audio fonctionnait mais ne savait pas où router les données (FindAudioTarget retournait vide)
+- Ce fix créera automatiquement les sessions audio/vidéo quand des offers VOIP arrivent
+- Les données audio pourront maintenant être relayées correctement entre les peers
