@@ -18,10 +18,17 @@ namespace ChatP2P.Client.Services
         private readonly Dictionary<string, VOIPCall> _activeCalls = new();
         // ❌ REMOVED: SimpleAudioCaptureService _audioCapture - replaced by OpusAudioStreamingService
         private readonly SimpleVideoCaptureService _videoCapture;
+        private readonly SimpleVirtualCameraService _virtualCamera; // ✅ NOUVEAU: Caméra virtuelle avec H.264
         private readonly OpusAudioStreamingService _opusStreaming; // ✅ OPUS: Professional streaming service
+        private readonly VideoEncodingService _videoEncoder; // ✅ NOUVEAU: Encodage H.264/VP8 professionnel
+        private volatile bool _videoEncoderInitialized = false; // ✅ FIX: Track encoder initialization state
         private readonly WebRTCDirectClient _webRtcClient;
         private VOIPRelayClient? _voipRelay;
         private PureAudioRelayClient? _pureAudioRelay; // ✅ NOUVEAU: Canal audio pur
+        private PureVideoRelayClient? _pureVideoRelay; // ✅ NOUVEAU: Canal vidéo pur (port 8894)
+
+        // ✅ NOUVEAU: Mode caméra (physique ou virtuelle)
+        public bool UseVirtualCamera { get; set; } = true; // ✅ DEFAULT: Use virtual camera for testing
 
         // Events pour l'interface utilisateur
         public event Action<string, CallState>? CallStateChanged;
@@ -51,18 +58,33 @@ namespace ChatP2P.Client.Services
             _webRtcClient = webRtcClient;
             // ❌ REMOVED: _audioCapture = new SimpleAudioCaptureService() - replaced by OpusAudioStreamingService
             _videoCapture = new SimpleVideoCaptureService();
+            _virtualCamera = new SimpleVirtualCameraService(); // ✅ NOUVEAU: Caméra virtuelle
             _opusStreaming = new OpusAudioStreamingService(); // ✅ OPUS: Initialiser streaming professionnel
+            _videoEncoder = new VideoEncodingService(); // ✅ NOUVEAU: Encodeur vidéo professionnel
             _pureAudioRelay = new PureAudioRelayClient(); // ✅ NOUVEAU: Canal audio pur
+            _pureVideoRelay = new PureVideoRelayClient(); // ✅ NOUVEAU: Canal vidéo pur
 
-            // ❌ REMOVED: Wire les events des services de capture
-            // ❌ REMOVED: _audioCapture.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Audio] {msg}");
+            // ✅ FIX: Wire les events des services de capture ET VIDÉO
             _videoCapture.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Video] {msg}");
+            _videoCapture.VideoFrameReady += OnVideoFrameReady; // ✅ FIX CRITIQUE: Connecter les frames vidéo !
+            _virtualCamera.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-VirtualCam] {msg}"); // ✅ NOUVEAU
+            _virtualCamera.VideoFrameReady += OnVideoFrameReady; // ✅ NOUVEAU: Caméra virtuelle vers pipeline
+            _virtualCamera.EncodedVideoReady += OnEncodedVideoReady; // ✅ NOUVEAU: H.264 direct depuis caméra virtuelle
             _opusStreaming.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Opus] {msg}"); // ✅ OPUS
+            _videoEncoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Encoder] {msg}"); // ✅ NOUVEAU
             _pureAudioRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-AUDIO] {msg}"); // ✅ NOUVEAU
             _pureAudioRelay.AudioDataReceived += OnPureAudioReceived; // ✅ NOUVEAU
+            _pureVideoRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-VIDEO] {msg}"); // ✅ NOUVEAU
+            _pureVideoRelay.VideoDataReceived += OnPureVideoReceived; // ✅ NOUVEAU
 
             // ✅ OPUS: Initialize streaming service asynchronously
             _ = Task.Run(async () => await InitializeOpusStreamingAsync());
+
+            // ✅ VIDEO: Initialize video encoding service asynchronously
+            _ = Task.Run(async () => await InitializeVideoEncodingAsync());
+
+            // ✅ VIRTUAL CAMERA: Initialize virtual camera with test content asynchronously
+            _ = Task.Run(async () => await InitializeVirtualCameraAsync());
 
             LogEvent?.Invoke($"[VOIP-Manager] Initialized for client: {_clientId}");
             LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Using clientId '{_clientId}' for VOIP signaling");
@@ -99,6 +121,47 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
+        /// ✅ NOUVEAU: Contrôler la caméra virtuelle
+        /// </summary>
+        public async Task<bool> LoadVirtualVideoFileAsync(string filePath)
+        {
+            if (_virtualCamera == null) return false;
+            return await _virtualCamera.LoadVideoFileAsync(filePath);
+        }
+
+        public async Task<bool> StartVirtualCameraAsync()
+        {
+            if (_virtualCamera == null) return false;
+            UseVirtualCamera = true;
+            LogEvent?.Invoke($"[VOIP-Manager] 📹 Switched to virtual camera mode");
+            return await _virtualCamera.StartPlaybackAsync();
+        }
+
+        public async Task StopVirtualCameraAsync()
+        {
+            if (_virtualCamera == null) return;
+            await _virtualCamera.StopPlaybackAsync();
+            UseVirtualCamera = false;
+            LogEvent?.Invoke($"[VOIP-Manager] 🎥 Switched to physical camera mode");
+        }
+
+        public async Task<bool> ChangeVirtualCameraCodecAsync(VideoCodecsEnum codec)
+        {
+            if (_virtualCamera == null) return false;
+            return await _virtualCamera.ChangeCodecAsync(codec);
+        }
+
+        public string? GetVirtualCameraStats()
+        {
+            return _virtualCamera?.GetCameraStats();
+        }
+
+        public VideoCodecsEnum[] GetSupportedVideoCodecs()
+        {
+            return SimpleVirtualCameraService.GetSupportedCodecs();
+        }
+
+        /// <summary>
         /// ✅ OPUS: Initialize professional audio streaming service
         /// </summary>
         private async Task InitializeOpusStreamingAsync()
@@ -120,6 +183,85 @@ namespace ChatP2P.Client.Services
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[VOIP-Manager] ❌ Error initializing Opus streaming: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ VIDEO: Initialize professional H.264/VP8 video encoding service
+        /// </summary>
+        private async Task InitializeVideoEncodingAsync()
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🎥 Initializing professional video encoding service...");
+
+                // Utiliser H.264 par défaut pour qualité optimale
+                var initialized = await _videoEncoder.InitializeAsync(SIPSorceryMedia.Abstractions.VideoCodecsEnum.H264);
+                if (initialized)
+                {
+                    _videoEncoderInitialized = true; // ✅ FIX: Mark video encoder as ready
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ H.264 video encoder initialized successfully");
+                    LogEvent?.Invoke($"[VOIP-Manager] 📊 {_videoEncoder.GetEncodingStats()}");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to initialize H.264 video encoder, trying VP8 fallback...");
+
+                    // Fallback vers VP8 si H.264 échoue
+                    var vp8Initialized = await _videoEncoder.InitializeAsync(SIPSorceryMedia.Abstractions.VideoCodecsEnum.VP8);
+                    if (vp8Initialized)
+                    {
+                        _videoEncoderInitialized = true; // ✅ FIX: Mark video encoder as ready (VP8 fallback)
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ VP8 video encoder initialized successfully (fallback)");
+                        LogEvent?.Invoke($"[VOIP-Manager] 📊 {_videoEncoder.GetEncodingStats()}");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to initialize video encoder (both H.264 and VP8)");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error initializing video encoder: {ex.Message}");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔄 Video will fallback to raw RGB transmission");
+            }
+        }
+
+        /// <summary>
+        /// ✅ VIRTUAL CAMERA: Initialize virtual camera with test content
+        /// </summary>
+        private async Task InitializeVirtualCameraAsync()
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 📹 Initializing virtual camera...");
+
+                // ✅ FIX: Tentative H.264 avec fallback automatique vers raw frames
+                try
+                {
+                    var encoderInitialized = await _virtualCamera.InitializeEncoderAsync(SIPSorceryMedia.Abstractions.VideoCodecsEnum.H264);
+                    if (encoderInitialized)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Virtual camera H.264 encoder initialized");
+                    }
+                    else
+                    {
+                        throw new Exception("H.264 encoder initialization failed");
+                    }
+                }
+                catch (Exception encoderEx)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ H.264 encoder failed ({encoderEx.Message}), disabling encoding");
+                    _virtualCamera.IsEncodingEnabled = false; // Désactiver l'encodage
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Virtual camera configured for raw RGB frames");
+                }
+
+                LogEvent?.Invoke($"[VOIP-Manager] 🎬 Virtual camera ready for procedural content generation");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error initializing virtual camera: {ex.Message}");
             }
         }
 
@@ -243,10 +385,22 @@ namespace ChatP2P.Client.Services
                 _activeCalls[targetPeer] = call;
                 CallStateChanged?.Invoke(targetPeer, CallState.Initiating);
 
-                // ✅ FIX: Démarrer capture audio et vidéo (PLAYBACK + CAPTURE)
+                // ✅ FIX: Démarrer capture audio et vidéo (PLAYBOOK + CAPTURE)
                 var audioStreamStarted = await _opusStreaming.StartStreamingAsync(); // ✅ OPUS PLAYBACK
                 var audioCaptureStarted = await _opusStreaming.StartCaptureAsync(); // ✅ OPUS CAPTURE
-                var videoStarted = await _videoCapture.StartCaptureAsync();
+
+                // ✅ NOUVEAU: Support caméra virtuelle OU physique
+                bool videoStarted;
+                if (UseVirtualCamera)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Using virtual camera for video call");
+                    videoStarted = await _virtualCamera.StartPlaybackAsync();
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 🎥 Using physical camera for video call");
+                    videoStarted = await _videoCapture.StartCaptureAsync();
+                }
 
                 var audioStarted = audioStreamStarted && audioCaptureStarted;
 
@@ -257,17 +411,29 @@ namespace ChatP2P.Client.Services
                     return false;
                 }
 
-                // Créer l'offer WebRTC avec audio et vidéo
-                var offer = await CreateMediaOfferAsync(targetPeer, true, true);
-                if (offer == null)
+                // ✅ FIX: Pour video calls, utiliser relay TCP directement (pas WebRTC P2P)
+                LogEvent?.Invoke($"[VOIP-Manager] 📹 Using pure relay TCP for video call (no WebRTC needed)");
+
+                // Se connecter au relay VOIP pour l'audio
+                var relayConnected = await EnsureRelayConnectionForIncomingCallAsync();
+                if (!relayConnected)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to create video offer");
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to connect to VOIP relay for video call");
                     await EndCallAsync(targetPeer);
                     return false;
                 }
 
-                // Envoyer l'invitation d'appel via signaling
-                await SendCallInviteAsync(targetPeer, "video", offer);
+                // ✅ NOUVEAU: Se connecter au relay vidéo pur (port 8894)
+                var videoRelayConnected = await EnsurePureVideoRelayConnectionAsync();
+                if (!videoRelayConnected)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to connect to pure video relay");
+                    await EndCallAsync(targetPeer);
+                    return false;
+                }
+
+                // Envoyer invitation d'appel vidéo via relay (pas d'offer WebRTC)
+                await SendCallInviteAsync(targetPeer, "video", "relay");
 
                 call.State = CallState.Calling;
                 CallStateChanged?.Invoke(targetPeer, CallState.Calling);
@@ -306,51 +472,51 @@ namespace ChatP2P.Client.Services
                 _activeCalls[fromPeer] = call;
                 CallStateChanged?.Invoke(fromPeer, CallState.Connecting);
 
-                // ✅ FIX: Démarrer les captures nécessaires (PLAYBACK + CAPTURE)
+                // ✅ FIX: Démarrer les captures nécessaires (PLAYBOOK + CAPTURE)
                 var audioStreamStarted = await _opusStreaming.StartStreamingAsync(); // ✅ OPUS PLAYBACK
                 var audioCaptureStarted = await _opusStreaming.StartCaptureAsync(); // ✅ OPUS CAPTURE
-                var videoStarted = isVideo ? await _videoCapture.StartCaptureAsync() : true;
+
+                // ✅ NOUVEAU: Support caméra virtuelle OU physique pour vidéo
+                bool videoStarted = true;
+                if (isVideo)
+                {
+                    if (UseVirtualCamera)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] 📹 Starting virtual camera for incoming video call");
+                        videoStarted = await _virtualCamera.StartPlaybackAsync();
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] 🎥 Starting physical camera for incoming video call");
+                        videoStarted = await _videoCapture.StartCaptureAsync();
+                    }
+                }
 
                 var audioStarted = audioStreamStarted && audioCaptureStarted;
 
                 if (!audioStarted || (isVideo && !videoStarted))
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to start media for incoming call");
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to start media for incoming call (audio: {audioStarted}, video: {videoStarted})");
                     await EndCallAsync(fromPeer);
                     return false;
                 }
 
-                // ✅ FIX: Essayer P2P WebRTC d'abord, puis fallback vers VOIP relay
-                var answer = await ProcessMediaOfferAsync(fromPeer, offer, true, isVideo);
-                if (answer != null)
+                // ✅ FIX: Pour vidéo calls, utiliser relay pur directement (pas de WebRTC)
+                if (isVideo)
                 {
-                    // P2P WebRTC réussi
-                    LogEvent?.Invoke($"[VOIP-Manager] ✅ P2P WebRTC answer created successfully");
+                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Video call detected - using pure relay mode (no WebRTC)");
 
-                    // Envoyer la réponse d'acceptation P2P
-                    await SendCallAcceptAsync(fromPeer, callType, answer);
-
-                    call.State = CallState.Connected;
-                    CallStateChanged?.Invoke(fromPeer, CallState.Connected);
-
-                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Call accepted from {fromPeer} via P2P WebRTC");
-                    return true;
-                }
-                else
-                {
-                    // P2P WebRTC échoué - Fallback vers VOIP relay
-                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ P2P WebRTC failed, falling back to VOIP relay");
-
-                    // ✅ FIX: Se connecter au relay VOIP pour accepter l'appel
+                    // Se connecter aux relays audio ET vidéo
                     await EnsureRelayConnectionAsync();
+                    var videoRelayConnected = await EnsurePureVideoRelayConnectionAsync();
 
-                    if (_voipRelay?.IsConnected == true)
+                    if (_voipRelay?.IsConnected == true && videoRelayConnected)
                     {
                         // Accepter via le relay
                         var relaySuccess = await _voipRelay.AcceptCallAsync(fromPeer);
                         if (relaySuccess)
                         {
-                            // Envoyer une réponse d'acceptation générique pour signaler l'accord
+                            // Envoyer une réponse d'acceptation relay
                             await SendCallAcceptAsync(fromPeer, callType, "relay_accepted");
 
                             call.State = CallState.Connected;
@@ -359,21 +525,76 @@ namespace ChatP2P.Client.Services
                             // ✅ FIX CRITIQUE: Setup audio relay pour VM2 (celui qui accepte)
                             await SetupAudioRelayForPeer(fromPeer);
 
-                            LogEvent?.Invoke($"[VOIP-Manager] ✅ Call accepted from {fromPeer} via VOIP relay");
+                            LogEvent?.Invoke($"[VOIP-Manager] ✅ Video call accepted from {fromPeer} via pure relay");
                             return true;
                         }
                         else
                         {
-                            LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to accept call via VOIP relay");
+                            LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to accept video call via relay");
                         }
                     }
                     else
                     {
-                        LogEvent?.Invoke($"[VOIP-Manager] ❌ Cannot connect to VOIP relay for accepting call");
+                        LogEvent?.Invoke($"[VOIP-Manager] ❌ Cannot connect to video/audio relays for accepting call");
                     }
 
                     await EndCallAsync(fromPeer);
                     return false;
+                }
+                else
+                {
+                    // Audio call - utiliser WebRTC P2P d'abord, puis fallback relay
+                    LogEvent?.Invoke($"[VOIP-Manager] 🎵 Audio call detected - trying P2P WebRTC first");
+
+                    var answer = await ProcessMediaOfferAsync(fromPeer, offer, true, false);
+                    if (answer != null)
+                    {
+                        // P2P WebRTC réussi
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ P2P WebRTC answer created successfully");
+
+                        await SendCallAcceptAsync(fromPeer, callType, answer);
+
+                        call.State = CallState.Connected;
+                        CallStateChanged?.Invoke(fromPeer, CallState.Connected);
+
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio call accepted from {fromPeer} via P2P WebRTC");
+                        return true;
+                    }
+                    else
+                    {
+                        // P2P WebRTC échoué - Fallback vers VOIP relay
+                        LogEvent?.Invoke($"[VOIP-Manager] ⚠️ P2P WebRTC failed for audio, falling back to relay");
+
+                        await EnsureRelayConnectionAsync();
+
+                        if (_voipRelay?.IsConnected == true)
+                        {
+                            var relaySuccess = await _voipRelay.AcceptCallAsync(fromPeer);
+                            if (relaySuccess)
+                            {
+                                await SendCallAcceptAsync(fromPeer, callType, "relay_accepted");
+
+                                call.State = CallState.Connected;
+                                CallStateChanged?.Invoke(fromPeer, CallState.Connected);
+
+                                await SetupAudioRelayForPeer(fromPeer);
+
+                                LogEvent?.Invoke($"[VOIP-Manager] ✅ Audio call accepted from {fromPeer} via VOIP relay");
+                                return true;
+                            }
+                            else
+                            {
+                                LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to accept audio call via VOIP relay");
+                            }
+                        }
+                        else
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ❌ Cannot connect to VOIP relay for accepting audio call");
+                        }
+
+                        await EndCallAsync(fromPeer);
+                        return false;
+                    }
                 }
             }
             catch (Exception ex)
@@ -449,6 +670,49 @@ namespace ChatP2P.Client.Services
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[VOIP-Manager] ❌ Error ensuring relay connection: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Assurer connexion au relay vidéo pur (port 8894)
+        /// </summary>
+        private async Task<bool> EnsurePureVideoRelayConnectionAsync()
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 📹 Ensuring pure video relay connection (port 8894)...");
+
+                // Vérifier la connexion existante
+                if (_pureVideoRelay?.IsConnected == true)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Pure video relay already connected");
+                    return true;
+                }
+
+                // Obtenir l'IP du serveur
+                if (string.IsNullOrWhiteSpace(_serverIP))
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Server IP required for video relay connection");
+                    return false;
+                }
+
+                // Connecter au relay vidéo avec le clientId (display name)
+                var connected = await _pureVideoRelay.ConnectAsync(_clientId, _serverIP, 8894);
+                if (connected)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to pure video relay as {_clientId}");
+                    return true;
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to connect to pure video relay");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error connecting to pure video relay: {ex.Message}");
                 return false;
             }
         }
@@ -656,7 +920,7 @@ namespace ChatP2P.Client.Services
                     }
                 }
 
-                // ✅ NOUVEAU: Se connecter au canal audio pur (performance maximale)
+                // ✅ NOUVEAU: Se connecter aux canaux audio ET vidéo purs (performance maximale)
                 LogEvent?.Invoke($"[VOIP-Manager] 🔧 Attempting pure audio relay connection: serverIP={serverIP}, clientId={_clientId}");
                 if (_pureAudioRelay != null && !_pureAudioRelay.IsConnected)
                 {
@@ -678,6 +942,29 @@ namespace ChatP2P.Client.Services
                 else
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Pure audio relay already connected");
+                }
+
+                // ✅ NOUVEAU: Se connecter au canal vidéo pur si appel vidéo
+                if (includeVideo && _pureVideoRelay != null && !_pureVideoRelay.IsConnected)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Trying to connect to pure video relay {serverIP}:8894...");
+                    var videoConnected = await _pureVideoRelay.ConnectAsync(_clientId, serverIP, 8894);
+                    if (videoConnected)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to pure video relay channel (port 8894)");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Failed to connect to pure video relay, using JSON fallback");
+                    }
+                }
+                else if (includeVideo && _pureVideoRelay == null)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _pureVideoRelay is null for video call!");
+                }
+                else if (includeVideo)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Pure video relay already connected");
                 }
 
                 // Démarrer l'appel via relay
@@ -751,8 +1038,8 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ VOIP relay already connected");
                 }
 
-                // ✅ FIX: Se connecter au canal audio pur pour appels entrants
-                LogEvent?.Invoke($"[VOIP-Manager] 🔧 Attempting pure audio relay connection for incoming call: serverIP={serverIP}, clientId={_clientId}");
+                // ✅ FIX: Se connecter aux canaux audio ET vidéo purs pour appels entrants
+                LogEvent?.Invoke($"[VOIP-Manager] 🔧 Attempting pure relay connections for incoming call: serverIP={serverIP}, clientId={_clientId}");
                 if (_pureAudioRelay != null && !_pureAudioRelay.IsConnected)
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] 🎤 Trying to connect to pure audio relay {serverIP}:8893 for incoming call...");
@@ -773,6 +1060,29 @@ namespace ChatP2P.Client.Services
                 else
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Pure audio relay already connected for incoming call");
+                }
+
+                // ✅ NOUVEAU: Se connecter au canal vidéo pur pour appels entrants aussi
+                if (_pureVideoRelay != null && !_pureVideoRelay.IsConnected)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Trying to connect to pure video relay {serverIP}:8894 for incoming call...");
+                    var videoConnected = await _pureVideoRelay.ConnectAsync(_clientId, serverIP, 8894);
+                    if (videoConnected)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to pure video relay channel for incoming call (port 8894)");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Failed to connect to pure video relay for incoming call, using JSON fallback");
+                    }
+                }
+                else if (_pureVideoRelay == null)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _pureVideoRelay is null for incoming call!");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ℹ️ Pure video relay already connected for incoming call");
                 }
 
                 return true;
@@ -977,10 +1287,312 @@ namespace ChatP2P.Client.Services
             }
         }
 
+        /// <summary>
+        /// ✅ NOUVEAU: Traiter vidéo reçue du canal pur (port 8894) - Performance maximale !
+        /// </summary>
+        private void OnPureVideoReceived(byte[] videoData)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 📹 PURE Video received: {videoData.Length} bytes (no JSON overhead!)");
+
+                // ✅ FIX: Extraire le vrai peer ID depuis la session d'appel vidéo active
+                string fromPeer = GetActiveVideoPeerName();
+
+                // ✅ NOUVEAU: Convertir les données vidéo pure en VideoFrame et notifier l'UI
+                var videoFrame = new VideoFrame
+                {
+                    Width = 640, // Taille standard pour l'instant
+                    Height = 480,
+                    Data = videoData,
+                    PixelFormat = VideoPixelFormatsEnum.Rgb,
+                    Timestamp = DateTime.UtcNow.Ticks
+                };
+
+                // Notifier l'UI de la frame vidéo reçue avec le vrai peer name
+                RemoteVideoReceived?.Invoke(fromPeer, videoFrame);
+                LogEvent?.Invoke($"[VOIP-Manager] ✅ Pure video frame processed from {fromPeer} and sent to UI ({videoData.Length} bytes)");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing pure video: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Extraire le nom du peer depuis la session d'appel vidéo active
+        /// </summary>
+        private string GetActiveVideoPeerName()
+        {
+            try
+            {
+                // Chercher parmi les appels actifs pour trouver l'appel vidéo
+                foreach (var kvp in _activeCalls)
+                {
+                    var call = kvp.Value;
+                    if (call.CallType == CallType.VideoCall && call.State == CallState.Connected)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] 🎯 Found active video call with peer: {call.PeerName}");
+                        return call.PeerName;
+                    }
+                }
+
+                // Fallback si pas d'appel vidéo actif trouvé
+                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No active video call found, using fallback peer name");
+                return "Unknown-Video-Peer";
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error finding active video peer: {ex.Message}");
+                return "Error-Video-Peer";
+            }
+        }
+
+        /// <summary>
+        /// ✅ FIX CRITIQUE: Traiter les frames vidéo générées, les encoder et les transmettre aux peers
+        /// </summary>
+        private async void OnVideoFrameReady(VideoFrame frame)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 📹 Raw video frame ready: {frame.Width}x{frame.Height}, {frame.Data.Length} bytes");
+
+                // ✅ NOUVEAU: Debug diagnostics pour troubleshooting
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Active calls count: {_activeCalls.Count}");
+                foreach (var kvp in _activeCalls)
+                {
+                    var call = kvp.Value;
+                    LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Call {kvp.Key} -> {call.PeerName}, Type: {call.CallType}, State: {call.State}");
+                }
+
+                // ✅ ENCODAGE PROFESSIONNEL: Les frames peuvent être encodées par VideoEncodingService
+                // Cette méthode reçoit des frames raw des caméras physiques/virtuelles qui seront transmises en raw
+                // L'encodage H.264/VP8 est maintenant géré directement par VideoEncodingService via OnEncodedVideoReady
+                byte[]? encodedData = null;
+
+                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Raw video frame from camera - FFmpeg handles encoding separately via OnFFmpegEncodedSample");
+                LogEvent?.Invoke($"[VOIP-Manager] 📊 Video encoder status: initialized={_videoEncoderInitialized}");
+
+                // Transmettre la frame (encodée ou raw) à tous les peers en appel vidéo actif (Calling ou Connected)
+                var videoCallsFound = 0;
+                foreach (var call in _activeCalls.Values)
+                {
+                    // ✅ FIX: Pour mode relay pur, envoyer frames dès l'état Calling (pas besoin d'attendre Connected)
+                    if (call.CallType == CallType.VideoCall && (call.State == CallState.Connected || call.State == CallState.Calling))
+                    {
+                        videoCallsFound++;
+                        // Utiliser données encodées si disponibles, sinon raw
+                        var dataToSend = encodedData ?? frame.Data;
+                        var isEncoded = encodedData != null;
+
+                        await SendVideoFrameToPeerAsync(call.PeerName, dataToSend, isEncoded, _videoEncoder.SelectedCodec);
+                        LogEvent?.Invoke($"[VOIP-Manager] 📹 Frame sent to {call.PeerName} (state: {call.State})");
+                    }
+                }
+
+                if (videoCallsFound == 0)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No active video calls found to send frame to (have {_activeCalls.Count} total calls)");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ Frame sent to {videoCallsFound} active video call(s)");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing video frame: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Gestionnaire pour vidéo déjà encodée de la caméra virtuelle
+        /// </summary>
+        private async void OnEncodedVideoReady(byte[] encodedData)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🎯 H.264/VP8 encoded video ready from virtual camera: {encodedData.Length} bytes");
+
+                // Transmettre directement la vidéo encodée (pas besoin de ré-encoder)
+                foreach (var call in _activeCalls.Values)
+                {
+                    if (call.CallType == CallType.VideoCall && call.State == CallState.Connected)
+                    {
+                        await SendVideoFrameToPeerAsync(call.PeerName, encodedData, true, _virtualCamera.SelectedCodec);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing encoded video frame: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Transmettre une frame vidéo (encodée ou raw) à un peer spécifique
+        /// </summary>
+        private async Task SendVideoFrameToPeerAsync(string peerName, byte[] videoData, bool isEncoded, SIPSorceryMedia.Abstractions.VideoCodecsEnum codec)
+        {
+            try
+            {
+                var formatInfo = isEncoded ? $"{codec} encoded" : "RGB raw";
+                LogEvent?.Invoke($"[VOIP-Manager] 📤 Sending {formatInfo} video data to {peerName}: {videoData.Length} bytes");
+
+                // ✅ NOUVEAU: Debug des connexions relais
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: PureVideoRelay connected: {_pureVideoRelay?.IsConnected ?? false}");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: VoipRelay connected: {_voipRelay?.IsConnected ?? false}");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: WebRTC client available: {_webRtcClient != null}");
+
+                // ✅ FIX: Essayer P2P WebRTC d'abord, puis fallback vers pure video relay
+                if (_webRtcClient != null)
+                {
+                    // TODO: Ajouter transmission vidéo via WebRTC DataChannels avec header codec
+                    LogEvent?.Invoke($"[VOIP-Manager] 🚧 TODO: WebRTC video transmission to {peerName} ({videoData.Length} bytes, {formatInfo})");
+                }
+
+                // ✅ PRIORITÉ: Pure Video Relay (port 8894) - Performance maximale !
+                if (_pureVideoRelay != null && _pureVideoRelay.IsConnected)
+                {
+                    // ✅ NOUVEAU: Ajouter header avec métadonnées codec pour décodage côté réception
+                    var header = CreateVideoHeader(isEncoded, codec, videoData.Length);
+                    var fullPacket = CombineHeaderAndData(header, videoData);
+
+                    await _pureVideoRelay.SendVideoDataAsync(fullPacket);
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ {formatInfo} video sent via PURE relay to {peerName} ({fullPacket.Length} bytes total)");
+                }
+                // Fallback vers VOIP relay JSON pour vidéo
+                else if (_voipRelay?.IsConnected == true)
+                {
+                    await _voipRelay.SendVideoDataAsync(peerName, videoData);
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ {formatInfo} video sent via JSON relay fallback to {peerName} ({videoData.Length} bytes)");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No video connection available to send to {peerName}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error sending video frame to {peerName}: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Créer header avec métadonnées pour décodage vidéo
+        /// </summary>
+        private byte[] CreateVideoHeader(bool isEncoded, SIPSorceryMedia.Abstractions.VideoCodecsEnum codec, int dataLength)
+        {
+            // Format: [ENCODED:1][CODEC:4][LENGTH:4] = 9 bytes header
+            var header = new byte[9];
+            header[0] = (byte)(isEncoded ? 1 : 0);
+            BitConverter.GetBytes((int)codec).CopyTo(header, 1);
+            BitConverter.GetBytes(dataLength).CopyTo(header, 5);
+            return header;
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Combiner header et données vidéo
+        /// </summary>
+        private byte[] CombineHeaderAndData(byte[] header, byte[] data)
+        {
+            var combined = new byte[header.Length + data.Length];
+            header.CopyTo(combined, 0);
+            data.CopyTo(combined, header.Length);
+            return combined;
+        }
+
         private void OnVoipRelayVideoReceived(string fromPeer, byte[] videoData)
         {
-            // Process received video (convert to VideoFrame if needed)
-            LogEvent?.Invoke($"[VOIP-Manager] 📹 Video data received from {fromPeer}: {videoData.Length} bytes");
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 📹 Video data received from {fromPeer}: {videoData.Length} bytes");
+
+                // ✅ NOUVEAU: Convertir les données vidéo reçues en VideoFrame et notifier l'UI
+                var videoFrame = new VideoFrame
+                {
+                    Width = 640, // Taille standard pour l'instant
+                    Height = 480,
+                    Data = videoData,
+                    PixelFormat = VideoPixelFormatsEnum.Rgb,
+                    Timestamp = DateTime.UtcNow.Ticks
+                };
+
+                // Notifier l'UI de la frame vidéo reçue
+                RemoteVideoReceived?.Invoke(fromPeer, videoFrame);
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing received video: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Gestionnaire d'échantillons vidéo encodés H.264/VP8 depuis VideoEncodingService
+        /// </summary>
+        private async void OnFFmpegEncodedSample(uint durationRtpUnits, byte[] sample, int width, int height)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🎥 Video encoded sample ready: {sample.Length} bytes, {width}x{height}, codec: {_videoEncoder.SelectedCodec}");
+
+                // Transmettre l'échantillon encodé à tous les peers connectés en appel vidéo
+                var videoCallsFound = 0;
+                foreach (var call in _activeCalls.Values)
+                {
+                    if (call.CallType == CallType.VideoCall && call.State == CallState.Connected)
+                    {
+                        videoCallsFound++;
+                        // Envoyer directement les données encodées H.264/VP8
+                        await SendVideoFrameToPeerAsync(call.PeerName, sample, true, _videoEncoder.SelectedCodec);
+                    }
+                }
+
+                if (videoCallsFound == 0)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No active video calls found for FFmpeg encoded sample (have {_activeCalls.Count} total calls)");
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ FFmpeg encoded sample sent to {videoCallsFound} active video call(s)");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing FFmpeg encoded sample: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Gestionnaire d'échantillons vidéo raw depuis VideoEncodingService (fallback)
+        /// </summary>
+        private async void OnFFmpegRawSample(byte[] sample, uint width, uint height, VideoPixelFormatsEnum pixelFormat)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🎞️ FFmpeg raw sample ready: {sample.Length} bytes, {width}x{height}, format: {pixelFormat}");
+
+                // Transmettre l'échantillon raw à tous les peers connectés en appel vidéo (fallback si encodage échoue)
+                var videoCallsFound = 0;
+                foreach (var call in _activeCalls.Values)
+                {
+                    if (call.CallType == CallType.VideoCall && call.State == CallState.Connected)
+                    {
+                        videoCallsFound++;
+                        // Envoyer les données raw comme fallback
+                        await SendVideoFrameToPeerAsync(call.PeerName, sample, false, VideoCodecsEnum.H264); // Raw video data
+                    }
+                }
+
+                if (videoCallsFound > 0)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ FFmpeg raw sample sent to {videoCallsFound} call(s) (fallback mode)");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing FFmpeg raw sample: {ex.Message}");
+            }
         }
 
         public void Dispose()
@@ -997,8 +1609,11 @@ namespace ChatP2P.Client.Services
                 // ❌ REMOVED: _audioCapture?.Dispose() - replaced with OpusAudioStreamingService
                 _opusStreaming?.Dispose(); // ✅ OPUS
                 _videoCapture?.Dispose();
+                _virtualCamera?.Dispose(); // ✅ NOUVEAU: Nettoyer caméra virtuelle
+                _videoEncoder?.Dispose(); // ✅ NOUVEAU: Nettoyer video encoder
                 // ❌ DUPLICATE REMOVED: _opusStreaming?.Dispose() already called above
                 _pureAudioRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal audio pur
+                _pureVideoRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal vidéo pur
                 _voipRelay?.Disconnect();
 
                 LogEvent?.Invoke("[VOIP-Manager] Service disposed");

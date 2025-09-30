@@ -104,8 +104,8 @@ namespace ChatP2P.Server
                         _videoClients.TryAdd(peerName, connection);
                         LogEvent?.Invoke($"[VIDEO-RELAY] ✅ Video client {peerName} registered");
 
-                        // Confirmer connexion
-                        var confirmBytes = Encoding.UTF8.GetBytes("VIDEO_READY");
+                        // Confirmer connexion avec format attendu par le client
+                        var confirmBytes = Encoding.UTF8.GetBytes($"CONNECTED:{peerName}");
                         await stream.WriteAsync(confirmBytes, 0, confirmBytes.Length);
                     }
                 }

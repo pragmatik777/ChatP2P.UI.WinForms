@@ -549,12 +549,10 @@
                                     <!-- Vidéo distante -->
                                     <Border Grid.Column="0" Background="#FF333333" CornerRadius="8,0,0,8">
                                         <Grid>
-                                            <!-- 🎥 MediaElement pour vidéo distante -->
-                                            <MediaElement Name="mediaRemoteVideo"
-                                                          Stretch="Uniform"
-                                                          LoadedBehavior="Manual"
-                                                          UnloadedBehavior="Manual"
-                                                          Visibility="Collapsed"/>
+                                            <!-- 🎥 Image pour vidéo distante -->
+                                            <Image Name="mediaRemoteVideo"
+                                                   Stretch="Uniform"
+                                                   Visibility="Collapsed"/>
                                             <TextBlock Name="lblRemoteVideoStatus" Text="📹 Connecting video..."
                                                        Foreground="#FF888888" HorizontalAlignment="Center"
                                                        VerticalAlignment="Center" FontSize="16"/>
@@ -566,12 +564,10 @@
                                         <!-- Vidéo locale -->
                                         <Border Background="#FF222222" Height="120" CornerRadius="4" Margin="0,0,0,10">
                                             <Grid>
-                                                <!-- 🎥 MediaElement pour vidéo locale -->
-                                                <MediaElement Name="mediaLocalVideo"
-                                                              Stretch="Uniform"
-                                                              LoadedBehavior="Manual"
-                                                              UnloadedBehavior="Manual"
-                                                              Visibility="Collapsed"/>
+                                                <!-- 🎥 Image pour vidéo locale -->
+                                                <Image Name="mediaLocalVideo"
+                                                       Stretch="Uniform"
+                                                       Visibility="Collapsed"/>
                                                 <TextBlock Name="lblLocalVideoStatus" Text="📹 Your video"
                                                            Foreground="#FF888888" HorizontalAlignment="Center"
                                                            VerticalAlignment="Center" FontSize="12"/>
@@ -666,6 +662,7 @@
             <TabItem Header="Settings" Name="settingsTab">
                 <Grid Margin="20" Background="#FF2B2B2B">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
@@ -814,6 +811,45 @@
                                 <TextBlock Name="lblVideoTestStatus" Text="No test video" Foreground="#FF888888"
                                            VerticalAlignment="Center" Margin="10,0"/>
                             </StackPanel>
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- 🎬 FFmpeg Installation -->
+                    <GroupBox Header="🎬 FFmpeg Video Encoding" Grid.Row="3" Margin="0,0,0,20"
+                              Foreground="White" BorderBrush="#FF8E44AD">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- FFmpeg Status -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+                                <Label Content="🎥 FFmpeg Status:" Foreground="White" Width="120" VerticalAlignment="Center"/>
+                                <TextBlock Name="lblFFmpegStatus" Text="🔍 Checking..." Foreground="#FFFFD700"
+                                          VerticalAlignment="Center" Margin="10,0" FontWeight="SemiBold"/>
+                                <Button Name="btnCheckFFmpeg" Content="🔄 Refresh" Width="80" Height="25"
+                                        Margin="10,0" Background="#FF3498DB" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnCheckFFmpeg_Click"/>
+                            </StackPanel>
+
+                            <!-- FFmpeg Controls -->
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+                                <Button Name="btnInstallFFmpeg" Content="📥 Install FFmpeg" Width="130" Height="30"
+                                        Background="#FF27AE60" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnInstallFFmpeg_Click"/>
+                                <Button Name="btnUninstallFFmpeg" Content="🗑️ Uninstall" Width="100" Height="30" Margin="10,0,0,0"
+                                        Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Click="BtnUninstallFFmpeg_Click"/>
+                                <TextBlock Name="lblFFmpegProgress" Text="" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="20,0,0,0"/>
+                            </StackPanel>
+
+                            <!-- FFmpeg Info -->
+                            <TextBlock Grid.Row="2" Name="txtFFmpegInfo"
+                                      Text="FFmpeg enables H.264/VP8 video compression for efficient video calls. Without FFmpeg, video calls use uncompressed RGB (higher bandwidth)."
+                                      Foreground="#FFAAAAAA" TextWrapping="Wrap" FontSize="11" Margin="0,5,0,0"/>
                         </Grid>
                     </GroupBox>
                 </Grid>

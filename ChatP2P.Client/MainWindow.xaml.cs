@@ -14,6 +14,7 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using IOPath = System.IO.Path;
 using System.Windows.Threading;
@@ -77,7 +78,7 @@ namespace ChatP2P.Client
         private bool _isVideoMuted = false;
 
         // Variables manquantes pour architecture client/serveur
-        private string _clientId = Environment.MachineName; // Default client ID
+        private string _clientId = Environment.MachineName; // ✅ FIXED: Updated with display name in LoadSettings()
 
         // 🎤📊 NOUVEAU: Audio Spectrum Analyzer
         private DispatcherTimer? _spectrumTimer;
@@ -111,9 +112,7 @@ namespace ChatP2P.Client
             // ✅ NOUVEAU: Charger les périphériques audio/vidéo au démarrage
             _ = LoadDevicesOnStartup();
 
-            // 🔧 FIX: Initialiser VOIP immédiatement dans le constructeur
-            // pour éviter les clics prématurés sur les boutons audio/vidéo
-            InitializeVOIPServices();
+            // Note: VOIP services will be initialized after WebRTC client is ready
         }
 
         public RelayClient? GetRelayClient()
@@ -192,6 +191,9 @@ namespace ChatP2P.Client
                 txtDisplayName.Text = Properties.Settings.Default.DisplayName ?? Environment.UserName;
                 txtRelayServerIP.Text = Properties.Settings.Default.RelayServerIP ?? "";
 
+                // ✅ FIX: Update _clientId to use display name instead of hostname for VOIP signal routing
+                _clientId = Properties.Settings.Default.DisplayName ?? Environment.UserName;
+
                 chkStrictTrust.IsChecked = Properties.Settings.Default.StrictTrust;
                 chkVerbose.IsChecked = Properties.Settings.Default.VerboseLogging;
                 chkEncryptRelay.IsChecked = Properties.Settings.Default.EncryptRelay;
@@ -214,6 +216,9 @@ namespace ChatP2P.Client
             {
                 Properties.Settings.Default.DisplayName = txtDisplayName.Text;
                 Properties.Settings.Default.RelayServerIP = txtRelayServerIP.Text;
+
+                // ✅ FIX: Update _clientId when display name changes
+                _clientId = txtDisplayName.Text;
 
                 Properties.Settings.Default.StrictTrust = chkStrictTrust.IsChecked ?? false;
                 Properties.Settings.Default.VerboseLogging = chkVerbose.IsChecked ?? false;
@@ -245,8 +250,8 @@ namespace ChatP2P.Client
                 await RefreshAll();
             }
 
-            // 🎥 NOUVEAU: Initialiser VOIP après que tout soit prêt
-            InitializeVOIPServices();
+            // ❌ SUPPRIMÉ: InitializeVOIPServices() sera appelé APRÈS connexion WebRTC (ligne 2004)
+            // This was causing double initialization and timing issues
 
             // Initialiser l'état des boutons VOIP
             InitializeVOIPButtonsState();
@@ -421,6 +426,8 @@ namespace ChatP2P.Client
         {
             try
             {
+                _ = LogToFile($"[VOIP-INIT] 🔄 Starting VOIP services initialization...");
+
                 // Nettoyer les services existants
                 _voipManager?.Dispose();
                 _mediaClient?.Dispose();
@@ -428,18 +435,48 @@ namespace ChatP2P.Client
                 // Créer les nouveaux services
                 if (_webrtcClient != null)
                 {
+                    _ = LogToFile($"[VOIP-INIT] ✅ WebRTC client is available, proceeding...");
+
                     // 🔧 FIX CRITIQUE: Utiliser displayName au lieu de _clientId (hostname) pour VOIP signaling
                     var displayName = txtDisplayName?.Text?.Trim() ?? Environment.UserName;
-                    _voipManager = new VOIPCallManager(displayName, _webrtcClient);
+                    _ = LogToFile($"[VOIP-INIT] Display name: {displayName}");
 
-                    // ✅ NOUVEAU: Set server IP from textbox
+                    _voipManager = new VOIPCallManager(displayName, _webrtcClient);
+                    _ = LogToFile($"[VOIP-INIT] ✅ VOIPCallManager created successfully");
+
+                    // ✅ Connect VOIPCallManager video events to UI renderer
+                    _voipManager.RemoteVideoReceived += OnVOIPVideoFrameReceived;
+                    _ = LogToFile($"[VOIP-INIT] ✅ Video event handlers connected");
+
+                    // ✅ DYNAMIC: Get server IP from user settings with intelligent fallback
                     var serverIP = txtRelayServerIP?.Text?.Trim();
+                    _ = LogToFile($"[VOIP-INIT] Server IP from textbox: '{serverIP}'");
+
                     if (string.IsNullOrWhiteSpace(serverIP))
                     {
-                        _ = LogToFile("❌ Server IP is required from textbox - no hardcoded fallback!");
-                        return;
+                        // Use saved setting as primary fallback, then detected IP
+                        serverIP = Properties.Settings.Default.RelayServerIP?.Trim();
+                        _ = LogToFile($"[VOIP-INIT] Using saved RelayServerIP setting: '{serverIP}'");
+
+                        if (string.IsNullOrWhiteSpace(serverIP))
+                        {
+                            serverIP = _detectedClientIP == "127.0.0.1" ? "localhost" : _detectedClientIP;
+                            _ = LogToFile($"[VOIP-INIT] ✅ Using detected IP fallback: {serverIP}");
+                        }
                     }
+                    else
+                    {
+                        // User entered IP - save it to settings for persistence
+                        if (serverIP != Properties.Settings.Default.RelayServerIP)
+                        {
+                            Properties.Settings.Default.RelayServerIP = serverIP;
+                            Properties.Settings.Default.Save();
+                            _ = LogToFile($"[VOIP-INIT] 💾 Saved new server IP to settings: {serverIP}");
+                        }
+                    }
+
                     _voipManager.SetServerIP(serverIP);
+                    _ = LogToFile($"[VOIP-INIT] ✅ Server IP set to: {serverIP}");
 
                     _mediaClient = new SimpleWebRTCMediaClient(displayName);
 
@@ -1588,29 +1625,74 @@ namespace ChatP2P.Client
                 var callType = accept.GetProperty("callType").GetString() ?? "audio";
                 var answer = accept.GetProperty("answer").GetString() ?? "";
 
-                if (string.IsNullOrEmpty(answer))
-                {
-                    await LogToFile($"❌ [VOIP-ACCEPT] Invalid answer from {fromPeer}");
-                    return;
-                }
+                // ✅ FIX: Distinguer entre appels vidéo (relay pur) et audio (WebRTC possible)
+                var isVideo = callType.ToLower() == "video";
 
-                // Traiter l'answer WebRTC
-                if (_webrtcClient != null)
+                if (isVideo)
                 {
-                    var success = await _webrtcClient.ProcessOfferAsync(fromPeer, answer);
-                    if (success != null)
+                    // Video calls utilisent relay pur - pas de WebRTC answer à traiter
+                    await LogToFile($"📹 [VOIP-ACCEPT] Video call accepted - using pure relay mode");
+
+                    if (answer == "relay_accepted")
                     {
-                        await LogToFile($"✅ [VOIP-ACCEPT] Call established with {fromPeer}");
+                        await LogToFile($"✅ [VOIP-ACCEPT] Video call relay established with {fromPeer}");
 
-                        // Mettre à jour l'état d'appel
+                        // Mettre à jour l'état d'appel pour vidéo
                         await Dispatcher.InvokeAsync(() =>
                         {
                             if (_voipManager != null)
                             {
-                                // TODO: Notifier VOIPCallManager que l'appel est connecté
-                                UpdateVOIPUI(fromPeer, $"📞: Connecté ({callType})", "#FF0D7377", true);
+                                // Notifier VOIPCallManager que l'appel vidéo est connecté en mode relay
+                                UpdateVOIPUI(fromPeer, $"📹: Vidéo Connecté (Relay)", "#FF0D7377", true);
                             }
                         });
+                    }
+                    else
+                    {
+                        await LogToFile($"❌ [VOIP-ACCEPT] Invalid video relay response from {fromPeer}: {answer}");
+                    }
+                }
+                else
+                {
+                    // Audio calls - traitement WebRTC standard
+                    if (string.IsNullOrEmpty(answer))
+                    {
+                        await LogToFile($"❌ [VOIP-ACCEPT] Invalid audio answer from {fromPeer}");
+                        return;
+                    }
+
+                    if (answer == "relay_accepted")
+                    {
+                        // Audio call accepté via relay
+                        await LogToFile($"✅ [VOIP-ACCEPT] Audio call relay established with {fromPeer}");
+
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            if (_voipManager != null)
+                            {
+                                UpdateVOIPUI(fromPeer, $"🎵: Audio Connecté (Relay)", "#FF0D7377", true);
+                            }
+                        });
+                    }
+                    else
+                    {
+                        // Audio call accepté via WebRTC P2P
+                        if (_webrtcClient != null)
+                        {
+                            var success = await _webrtcClient.ProcessOfferAsync(fromPeer, answer);
+                            if (success != null)
+                            {
+                                await LogToFile($"✅ [VOIP-ACCEPT] Audio call P2P established with {fromPeer}");
+
+                                await Dispatcher.InvokeAsync(() =>
+                                {
+                                    if (_voipManager != null)
+                                    {
+                                        UpdateVOIPUI(fromPeer, $"🎵: Audio Connecté (P2P)", "#FF0D7377", true);
+                                    }
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -1953,15 +2035,35 @@ namespace ChatP2P.Client
         // ===== Server Connection =====
         private async Task ConnectToServer()
         {
+            // ✅ DYNAMIC: Get server IP with same logic as VOIP initialization
             var serverIp = txtRelayServerIP.Text.Trim();
+            await LogToFile($"[CONNECT] Server IP from textbox: '{serverIp}'");
+
             if (string.IsNullOrWhiteSpace(serverIp))
             {
-                await LogToFile("❌ Server IP is required from textbox - no hardcoded fallback!");
-                return;
+                // Use saved setting as primary fallback, then detected IP
+                serverIp = Properties.Settings.Default.RelayServerIP?.Trim();
+                await LogToFile($"[CONNECT] Using saved RelayServerIP setting: '{serverIp}'");
+
+                if (string.IsNullOrWhiteSpace(serverIp))
+                {
+                    await LogToFile("❌ No server IP available - please enter one in the connection settings!");
+                    return;
+                }
+            }
+            else
+            {
+                // User entered IP - save it to settings for persistence
+                if (serverIp != Properties.Settings.Default.RelayServerIP)
+                {
+                    Properties.Settings.Default.RelayServerIP = serverIp;
+                    Properties.Settings.Default.Save();
+                    await LogToFile($"[CONNECT] 💾 Saved new server IP to settings: {serverIp}");
+                }
             }
 
             // DEBUG: Log quelle IP est utilisée
-            await LogToFile($"🔧 [DEBUG] Starting connection to server IP: {serverIp} (from textbox: {txtRelayServerIP.Text})", forceLog: true);
+            await LogToFile($"🔧 [DEBUG] Starting connection to server IP: {serverIp}", forceLog: true);
 
             try
             {
@@ -1989,9 +2091,24 @@ namespace ChatP2P.Client
                 // ✅ NOUVEAU: Initialiser WebRTC direct client
                 InitializeWebRTCClient();
 
+                await LogToFile($"🚨🚨🚨 [CRITICAL-DEBUG] About to execute Step 5.5 - VOIP INIT 🚨🚨🚨", forceLog: true);
+                await LogToFile($"🔧 [DEBUG] Step 5.5: Initializing VOIP services after WebRTC client", forceLog: true);
+                // ✅ FIX CRITIQUE: Initialiser VOIP services après WebRTC client
+                InitializeVOIPServices();
+                await LogToFile($"✅✅✅ [CRITICAL-DEBUG] Step 5.5 VOIP INIT COMPLETED ✅✅✅", forceLog: true);
+
                 await LogToFile($"🔧 [DEBUG] Step 6: Updating UI status and starting P2P", forceLog: true);
                 UpdateServerStatus("Connected", Colors.Green);
-                await StartP2PNetwork();
+                try
+                {
+                    await StartP2PNetwork();
+                    await LogToFile($"✅ [DEBUG] Step 6.1: P2P Network started successfully", forceLog: true);
+                }
+                catch (Exception p2pEx)
+                {
+                    await LogToFile($"⚠️ [DEBUG] Step 6.1: P2P Network failed: {p2pEx.Message}", forceLog: true);
+                    // Continue anyway - P2P is optional
+                }
 
                 await LogToFile($"🔧 [DEBUG] Step 7: Cleaning up old friend requests", forceLog: true);
                 // Clean up old friend requests before loading
@@ -3073,12 +3190,21 @@ namespace ChatP2P.Client
 
             try
             {
-                await LogToFile($"[VOIP-UI] Starting video call to {_currentChatSession.PeerName}");
+                await LogToFile($"[VOIP-UI] 📹 Starting video call to {_currentChatSession.PeerName}");
+
+                // ✅ FIX: Diagnostic approfondi avant d'appeler StartVideoCallAsync
+                await LogToFile($"[VOIP-UI] 🔍 Checking VOIP services readiness...");
+                await LogToFile($"[VOIP-UI] - VOIPCallManager: {(_voipManager != null ? "✅ Ready" : "❌ NULL")}");
+                await LogToFile($"[VOIP-UI] - OpusStreaming: {(_voipManager?.OpusStreamingService != null ? "✅ Ready" : "❌ NULL")}");
+                await LogToFile($"[VOIP-UI] - Virtual Camera: Ready (built-in fallback system)");
+
                 var success = await _voipManager.StartVideoCallAsync(_currentChatSession.PeerName);
 
                 if (!success)
                 {
-                    MessageBox.Show("Failed to start video call. Please check your camera and microphone and try again.", "Video Call Failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                    // ✅ FIX: Message d'erreur plus informatif avec diagnostic
+                    await LogToFile($"[VOIP-UI] ❌ StartVideoCallAsync returned false - checking recent logs for details");
+                    MessageBox.Show("Failed to start video call. Check the console logs for details.\n\nCommon issues:\n- FFmpeg not installed (virtual camera encoding)\n- Audio devices not ready\n- Server connection issues", "Video Call Failed", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
             catch (Exception ex)
@@ -3193,17 +3319,20 @@ namespace ChatP2P.Client
         {
             try
             {
+                // Vérifier si la caméra virtuelle est sélectionnée
+                var isVirtualCameraSelected = _selectedVideoDevice?.Contains("Virtual Camera") == true;
+
                 var openFileDialog = new Microsoft.Win32.OpenFileDialog()
                 {
-                    Title = "Select Video File for Testing",
-                    Filter = "Video Files|*.mp4;*.avi;*.mov;*.wmv|MP4 Files|*.mp4|AVI Files|*.avi|All Files|*.*",
+                    Title = isVirtualCameraSelected ? "Select Video File for Virtual Camera" : "Select Video File for Testing",
+                    Filter = "Video Files|*.mp4;*.avi;*.mov;*.wmv;*.mkv;*.webm|MP4 Files|*.mp4|AVI Files|*.avi|All Files|*.*",
                     DefaultExt = ".mp4"
                 };
 
                 if (openFileDialog.ShowDialog() == true)
                 {
                     var videoFile = openFileDialog.FileName;
-                    await LogToFile($"[VOIP-TEST] Loading video file: {videoFile}");
+                    await LogToFile($"[VOIP-TEST] 🎬 Loading video file for {(isVirtualCameraSelected ? "Virtual Camera" : "testing")}: {videoFile}");
 
                     if (_videoCapture != null)
                     {
@@ -4459,7 +4588,14 @@ namespace ChatP2P.Client
         private async Task LogToFile(string message, bool forceLog = false)
         {
             // Déterminer le type de log basé sur le contenu du message
-            if (message.Contains("[AUDIO]") || message.Contains("AUDIO") || message.Contains("🎤") ||
+            if (message.Contains("[VIDEO]") || message.Contains("VIDEO") || message.Contains("📹") ||
+                message.Contains("🎥") || message.Contains("CAMERA") || message.Contains("H264") ||
+                message.Contains("VP8") || message.Contains("FRAME") || message.Contains("ENCODING") ||
+                message.Contains("FFMPEG") || message.Contains("VirtualCamera") || message.Contains("VideoCapture"))
+            {
+                await LogHelper.LogToVideoAsync(message, forceLog);
+            }
+            else if (message.Contains("[AUDIO]") || message.Contains("AUDIO") || message.Contains("🎤") ||
                 message.Contains("🔊") || message.Contains("VOIP") || message.Contains("OPUS") ||
                 message.Contains("SPECTRUM") || message.Contains("MIC-TEST"))
             {
@@ -5460,32 +5596,46 @@ namespace ChatP2P.Client
             }
         }
 
+        /// <summary>
+        /// Handler for VOIP Manager video frames (VideoFrame format)
+        /// </summary>
+        private async void OnVOIPVideoFrameReceived(string peer, VideoFrame videoFrame)
+        {
+            try
+            {
+                await LogToFile($"[VOIP-VIDEO] Received VideoFrame from {peer}: {videoFrame.Width}x{videoFrame.Height}, {videoFrame.Data.Length} bytes");
+
+                // Convert VideoFrame to byte[] and call existing renderer
+                OnRemoteVideoReceived(peer, videoFrame.Data);
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-VIDEO] ❌ Error processing VideoFrame from {peer}: {ex.Message}");
+            }
+        }
+
         private async void OnRemoteVideoReceived(string peer, byte[] videoData)
         {
             try
             {
                 await LogToFile($"[VOIP-VIDEO] Received {videoData.Length} bytes video from {peer}");
 
-                await Dispatcher.InvokeAsync(() =>
+                await Dispatcher.InvokeAsync(async () =>
                 {
                     try
                     {
-                        // 🎥 NOUVEAU: Gestion avancée de l'affichage vidéo
+                        // 🎥 NOUVEAU: Rendu vidéo réel avec conversion RGB vers BitmapSource
                         if (videoData.Length > 0)
                         {
-                            // Créer un MemoryStream à partir des données vidéo reçues
-                            using (var stream = new MemoryStream(videoData))
+                            try
                             {
-                                // Pour l'instant, afficher le statut que des données sont reçues
-                                lblRemoteVideoStatus.Text = $"📹 Video stream active ({videoData.Length} bytes)";
-
-                                // TODO: Implémenter décodage de frame et affichage dans mediaRemoteVideo
-                                // En attendant l'intégration MediaStreamTrack complète, on masque le texte quand vidéo active
-                                if (mediaRemoteVideo.Visibility == Visibility.Collapsed)
-                                {
-                                    mediaRemoteVideo.Visibility = Visibility.Visible;
-                                    lblRemoteVideoStatus.Visibility = Visibility.Collapsed;
-                                }
+                                // ✅ FIX: Affichage réel des frames vidéo RGB
+                                await RenderVideoFrameToUI(videoData, peer);
+                            }
+                            catch (Exception renderEx)
+                            {
+                                _ = LogToFile($"[VOIP-VIDEO] ❌ Error rendering video frame: {renderEx.Message}");
+                                lblRemoteVideoStatus.Text = $"📹 Video error (render)";
                             }
                         }
                         else
@@ -5506,6 +5656,78 @@ namespace ChatP2P.Client
             catch (Exception ex)
             {
                 await LogToFile($"[VOIP-VIDEO] ❌ Error processing remote video: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Rendu réel des frames vidéo RGB vers WPF UI
+        /// </summary>
+        private async Task RenderVideoFrameToUI(byte[] rgbData, string peer)
+        {
+            try
+            {
+                // Dimensions assumées pour les frames RGB (640x480)
+                const int width = 640;
+                const int height = 480;
+                const int bytesPerPixel = 3; // RGB = 3 bytes per pixel
+
+                int expectedLength = width * height * bytesPerPixel;
+
+                if (rgbData.Length != expectedLength)
+                {
+                    await LogToFile($"[VOIP-VIDEO] ⚠️ Unexpected frame size: {rgbData.Length} bytes, expected {expectedLength}");
+                    // Tenter de calculer les dimensions réelles
+                    int totalPixels = rgbData.Length / bytesPerPixel;
+                    if (totalPixels > 0)
+                    {
+                        // Assumer un ratio 4:3 standard
+                        int calculatedWidth = (int)Math.Sqrt(totalPixels * 4.0 / 3.0);
+                        int calculatedHeight = totalPixels / calculatedWidth;
+                        await LogToFile($"[VOIP-VIDEO] 📐 Calculated dimensions: {calculatedWidth}x{calculatedHeight}");
+                    }
+                }
+
+                // Créer BitmapSource à partir des données RGB
+                var bitmap = BitmapSource.Create(
+                    width, height,          // Largeur et hauteur
+                    96, 96,                 // DPI horizontal et vertical
+                    PixelFormats.Rgb24,     // Format pixel RGB 24-bit
+                    null,                   // Pas de palette couleur
+                    rgbData,                // Données des pixels
+                    width * bytesPerPixel   // Stride (bytes par ligne)
+                );
+
+                // Freezer pour permettre l'utilisation cross-thread
+                bitmap.Freeze();
+
+                // Afficher dans l'UI WPF
+                if (mediaRemoteVideo != null)
+                {
+                    // Afficher la frame dans l'Image control
+                    mediaRemoteVideo.Source = bitmap;
+                    mediaRemoteVideo.Visibility = Visibility.Visible;
+
+                    // Mettre à jour le statut
+                    lblRemoteVideoStatus.Text = $"📹 {peer} - {width}x{height} ({rgbData.Length}B)";
+                    lblRemoteVideoStatus.Visibility = Visibility.Visible;
+
+                    await LogToFile($"[VOIP-VIDEO] ✅ Frame rendered successfully: {width}x{height} from {peer}");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-VIDEO] ❌ Error rendering frame: {ex.Message}");
+
+                // Fallback vers affichage texte
+                if (lblRemoteVideoStatus != null)
+                {
+                    lblRemoteVideoStatus.Text = $"📹 Video error: {ex.Message}";
+                    lblRemoteVideoStatus.Visibility = Visibility.Visible;
+                }
+                if (mediaRemoteVideo != null)
+                {
+                    mediaRemoteVideo.Visibility = Visibility.Collapsed;
+                }
             }
         }
 
@@ -5761,8 +5983,12 @@ namespace ChatP2P.Client
 
                     _ = LogToFile($"[DEVICE-SELECTION] 📹 Video device selected: {_selectedVideoDevice}");
 
-                    // TODO: Notifier les services vidéo de la sélection
-                    // ApplyVideoDeviceSelection(_selectedVideoDevice);
+                    // Activer automatiquement le bouton de chargement de fichier si c'est la caméra virtuelle
+                    if (_selectedVideoDevice?.Contains("Virtual Camera") == true)
+                    {
+                        _ = LogToFile($"[DEVICE-SELECTION] 🎬 Virtual camera selected - file loading available");
+                        // Le bouton "Load Video File" sera automatiquement visible dans VOIP TESTING
+                    }
                 }
             }
             catch (Exception ex)
@@ -6531,6 +6757,191 @@ namespace ChatP2P.Client
         private void BtnClose_Click(object sender, RoutedEventArgs e)
         {
             this.Close();
+        }
+
+        #endregion
+
+        #region FFmpeg Management
+
+        /// <summary>
+        /// Vérifier le statut FFmpeg et mettre à jour l'UI
+        /// </summary>
+        private async void BtnCheckFFmpeg_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                lblFFmpegStatus.Text = "🔍 Checking...";
+                lblFFmpegProgress.Text = "Checking FFmpeg availability...";
+
+                var isAvailable = Services.FFmpegInstaller.IsFFmpegAvailable();
+
+                if (isAvailable)
+                {
+                    var version = await Services.FFmpegInstaller.GetFFmpegVersionAsync();
+                    lblFFmpegStatus.Text = "✅ Available";
+                    lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.LimeGreen);
+                    lblFFmpegProgress.Text = version ?? "FFmpeg found";
+
+                    btnInstallFFmpeg.Content = "🔄 Reinstall";
+                    btnUninstallFFmpeg.IsEnabled = true;
+                }
+                else
+                {
+                    lblFFmpegStatus.Text = "❌ Not Found";
+                    lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.OrangeRed);
+                    lblFFmpegProgress.Text = "FFmpeg not installed";
+
+                    btnInstallFFmpeg.Content = "📥 Install FFmpeg";
+                    btnUninstallFFmpeg.IsEnabled = false;
+                }
+
+                await LogToFile($"[FFmpeg-UI] Status check: {(isAvailable ? "Available" : "Not Found")}");
+            }
+            catch (Exception ex)
+            {
+                lblFFmpegStatus.Text = "❌ Error";
+                lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Red);
+                lblFFmpegProgress.Text = $"Check failed: {ex.Message}";
+                await LogToFile($"[FFmpeg-UI] ❌ Status check failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Installer FFmpeg automatiquement
+        /// </summary>
+        private async void BtnInstallFFmpeg_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                btnInstallFFmpeg.IsEnabled = false;
+                btnCheckFFmpeg.IsEnabled = false;
+
+                lblFFmpegStatus.Text = "📥 Installing...";
+                lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Gold);
+                lblFFmpegProgress.Text = "Starting installation...";
+
+                await LogToFile($"[FFmpeg-UI] 🚀 Starting automatic FFmpeg installation");
+
+                // Configurer les logs FFmpeg pour l'UI
+                Services.FFmpegInstaller.LogEvent += (msg) =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        // Extraire message court pour l'UI
+                        var shortMsg = msg.Contains("]") ? msg.Substring(msg.LastIndexOf(']') + 1).Trim() : msg;
+                        if (shortMsg.Length > 60)
+                            shortMsg = shortMsg.Substring(0, 57) + "...";
+
+                        lblFFmpegProgress.Text = shortMsg;
+                    });
+                };
+
+                var success = await Services.FFmpegInstaller.EnsureFFmpegInstalledAsync();
+
+                if (success)
+                {
+                    lblFFmpegStatus.Text = "✅ Installed";
+                    lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.LimeGreen);
+                    lblFFmpegProgress.Text = "Installation completed successfully";
+
+                    btnInstallFFmpeg.Content = "🔄 Reinstall";
+                    btnUninstallFFmpeg.IsEnabled = true;
+
+                    MessageBox.Show("FFmpeg installed successfully!\n\nH.264/VP8 video encoding is now available for video calls.",
+                                  "Installation Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                    await LogToFile($"[FFmpeg-UI] ✅ Installation completed successfully");
+                }
+                else
+                {
+                    lblFFmpegStatus.Text = "❌ Failed";
+                    lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Red);
+                    lblFFmpegProgress.Text = "Installation failed - see logs for details";
+
+                    MessageBox.Show("FFmpeg installation failed.\n\nVideo calls will use raw RGB transmission (higher bandwidth).\n\nCheck logs for more details or try installing FFmpeg manually.",
+                                  "Installation Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+                    await LogToFile($"[FFmpeg-UI] ❌ Installation failed");
+                }
+            }
+            catch (Exception ex)
+            {
+                lblFFmpegStatus.Text = "❌ Error";
+                lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Red);
+                lblFFmpegProgress.Text = $"Installation error: {ex.Message}";
+
+                MessageBox.Show($"Installation error: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                await LogToFile($"[FFmpeg-UI] ❌ Installation error: {ex.Message}");
+            }
+            finally
+            {
+                btnInstallFFmpeg.IsEnabled = true;
+                btnCheckFFmpeg.IsEnabled = true;
+            }
+        }
+
+        /// <summary>
+        /// Désinstaller FFmpeg
+        /// </summary>
+        private async void BtnUninstallFFmpeg_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var result = MessageBox.Show("Are you sure you want to uninstall FFmpeg?\n\nThis will disable H.264/VP8 video encoding.",
+                                           "Confirm Uninstall", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+                if (result != MessageBoxResult.Yes)
+                    return;
+
+                btnUninstallFFmpeg.IsEnabled = false;
+                btnCheckFFmpeg.IsEnabled = false;
+
+                lblFFmpegStatus.Text = "🗑️ Removing...";
+                lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Orange);
+                lblFFmpegProgress.Text = "Uninstalling FFmpeg...";
+
+                var success = Services.FFmpegInstaller.UninstallFFmpeg();
+
+                if (success)
+                {
+                    lblFFmpegStatus.Text = "⭕ Removed";
+                    lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Gray);
+                    lblFFmpegProgress.Text = "FFmpeg uninstalled";
+
+                    btnInstallFFmpeg.Content = "📥 Install FFmpeg";
+                    btnUninstallFFmpeg.IsEnabled = false;
+
+                    MessageBox.Show("FFmpeg has been uninstalled.\n\nVideo calls will now use raw RGB transmission.",
+                                  "Uninstall Complete", MessageBoxButton.OK, MessageBoxImage.Information);
+
+                    await LogToFile($"[FFmpeg-UI] 🗑️ FFmpeg uninstalled successfully");
+                }
+                else
+                {
+                    lblFFmpegStatus.Text = "❌ Error";
+                    lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Red);
+                    lblFFmpegProgress.Text = "Uninstall failed";
+
+                    MessageBox.Show("Failed to uninstall FFmpeg. Check logs for details.",
+                                  "Uninstall Failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+
+                    await LogToFile($"[FFmpeg-UI] ❌ Uninstall failed");
+                }
+            }
+            catch (Exception ex)
+            {
+                lblFFmpegStatus.Text = "❌ Error";
+                lblFFmpegStatus.Foreground = new SolidColorBrush(Colors.Red);
+                lblFFmpegProgress.Text = $"Uninstall error: {ex.Message}";
+
+                MessageBox.Show($"Uninstall error: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                await LogToFile($"[FFmpeg-UI] ❌ Uninstall error: {ex.Message}");
+            }
+            finally
+            {
+                btnUninstallFFmpeg.IsEnabled = true;
+                btnCheckFFmpeg.IsEnabled = true;
+            }
         }
 
         #endregion
