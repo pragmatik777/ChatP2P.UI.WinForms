@@ -46,7 +46,11 @@
       "Bash(dotnet search:*)",
       "Bash(sed:*)",
       "WebFetch(domain:www.gyan.dev)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(start /b \"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\ChatP2P.Server\\bin\\Debug\\net8.0\\ChatP2P.Server.exe\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(ffmpeg:*)",
+      "WebFetch(domain:sipsorcery-org.github.io)"
     ],
     "deny": [],
     "ask": []

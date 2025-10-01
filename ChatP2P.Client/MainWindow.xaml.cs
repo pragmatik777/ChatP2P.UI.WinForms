@@ -21,6 +21,8 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 // ✅ REMOVED: VB.NET ChatP2P.Crypto - using C# CryptoService directly
 using ChatP2P.Client.Services;
+using SIPSorceryMedia.Abstractions;
+using SIPSorceryMedia.FFmpeg;
 
 namespace ChatP2P.Client
 {
@@ -112,7 +114,8 @@ namespace ChatP2P.Client
             // ✅ NOUVEAU: Charger les périphériques audio/vidéo au démarrage
             _ = LoadDevicesOnStartup();
 
-            // Note: VOIP services will be initialized after WebRTC client is ready
+            // ✅ NOUVEAU: Initialize VOIP/Video system
+            InitializeVOIPSystem();
         }
 
         public RelayClient? GetRelayClient()
@@ -181,6 +184,222 @@ namespace ChatP2P.Client
                     await LogToFile($"❌ [P2P-DIRECT] Failed to start server: {ex.Message}");
                 }
             });
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Initialize complete VOIP/Video system
+        /// </summary>
+        private void InitializeVOIPSystem()
+        {
+            try
+            {
+                var displayName = txtDisplayName?.Text?.Trim() ?? Environment.UserName;
+
+                // Initialize WebRTC client
+                _webrtcClient = new WebRTCDirectClient(displayName);
+
+                // Initialize video capture service (shared with VOIP manager)
+                _videoCapture = new SimpleVideoCaptureService();
+
+                // Initialize VOIP Call Manager with WebRTC client and shared video capture
+                _voipManager = new VOIPCallManager(displayName, _webrtcClient, _videoCapture);
+
+                // Connect VOIP events for UI updates
+                _voipManager.CallStateChanged += OnCallStateChangedNew;
+                _voipManager.RemoteVideoReceived += OnRemoteVideoReceivedNew;
+                _voipManager.RemoteAudioReceived += OnRemoteAudioReceivedNew;
+                _voipManager.IncomingCallReceived += OnIncomingCallReceivedNew;
+                _voipManager.LogEvent += (msg) => _ = LogToFile($"[VOIP] {msg}");
+
+                // Set server IP when relay client is connected
+                if (_relayClient?.IsConnected == true)
+                {
+                    // Get server IP from relay client - use a fallback method
+                    var serverIP = "127.0.0.1"; // Default fallback
+                    _voipManager.SetServerIP(serverIP);
+                }
+
+                LogToFile("[VOIP-INIT] ✅ VOIP/Video system initialized successfully");
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[VOIP-INIT] ❌ Failed to initialize VOIP system: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Handle call state changes for UI updates
+        /// </summary>
+        private void OnCallStateChangedNew(string peerName, CallState state)
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    LogToFile($"[VOIP-UI] Call state changed: {peerName} -> {state}");
+
+                    // Update UI based on call state
+                    switch (state)
+                    {
+                        case CallState.Connected:
+                            // Show video panels
+                            mediaRemoteVideo.Visibility = Visibility.Visible;
+                            mediaLocalVideo.Visibility = Visibility.Visible;
+                            break;
+
+                        case CallState.Ended:
+                            // Hide video panels
+                            mediaRemoteVideo.Visibility = Visibility.Collapsed;
+                            mediaLocalVideo.Visibility = Visibility.Collapsed;
+                            mediaRemoteVideo.Source = null;
+                            mediaLocalVideo.Source = null;
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogToFile($"[VOIP-UI] ❌ Error updating UI for call state: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Handle incoming video frames and render them
+        /// </summary>
+        private void OnRemoteVideoReceivedNew(string fromPeer, VideoFrame videoFrame)
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    LogToFile($"[VOIP-UI] 📺 Rendering video frame from {fromPeer}: {videoFrame.Width}x{videoFrame.Height}");
+
+                    // Convert VideoFrame to BitmapSource for WPF rendering
+                    var bitmapSource = CreateBitmapSourceFromVideoFrame(videoFrame);
+                    if (bitmapSource != null)
+                    {
+                        mediaRemoteVideo.Source = bitmapSource;
+                        mediaRemoteVideo.Visibility = Visibility.Visible;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogToFile($"[VOIP-UI] ❌ Error rendering video frame: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Handle incoming audio data (for UI feedback)
+        /// </summary>
+        private void OnRemoteAudioReceivedNew(string fromPeer, byte[] audioData)
+        {
+            // Audio is handled by the VOIP manager, this is just for UI feedback
+            LogToFile($"[VOIP-UI] 🎵 Audio received from {fromPeer}: {audioData?.Length ?? 0} bytes");
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Handle incoming call notifications
+        /// </summary>
+        private void OnIncomingCallReceivedNew(string fromPeer, string callType)
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                try
+                {
+                    LogToFile($"[VOIP-UI] 📞 Incoming {callType} call from {fromPeer}");
+
+                    var result = MessageBox.Show(
+                        $"Incoming {callType} call from {fromPeer}. Accept?",
+                        "Incoming Call",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    if (result == MessageBoxResult.Yes && _voipManager != null)
+                    {
+                        _ = Task.Run(async () => await _voipManager.AcceptCallAsync(fromPeer, callType, ""));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogToFile($"[VOIP-UI] ❌ Error handling incoming call: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// ✅ TEST: Create a test bitmap to verify video rendering
+        /// </summary>
+        private BitmapSource? CreateTestBitmap(int width, int height)
+        {
+            try
+            {
+                // Create a simple test pattern (red background with blue square)
+                var pixelData = new byte[width * height * 3]; // RGB24
+
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int index = (y * width + x) * 3;
+
+                        // Red background
+                        pixelData[index] = 255;     // R
+                        pixelData[index + 1] = 0;   // G
+                        pixelData[index + 2] = 0;   // B
+
+                        // Blue square in center
+                        if (x >= width/4 && x < 3*width/4 && y >= height/4 && y < 3*height/4)
+                        {
+                            pixelData[index] = 0;       // R
+                            pixelData[index + 1] = 0;   // G
+                            pixelData[index + 2] = 255; // B
+                        }
+                    }
+                }
+
+                var stride = width * 3;
+                var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Rgb24, null, pixelData, stride);
+                bitmap.Freeze();
+                return bitmap;
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[VOIP-UI] ❌ Error creating test bitmap: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Convert VideoFrame to BitmapSource for WPF rendering
+        /// </summary>
+        private BitmapSource? CreateBitmapSourceFromVideoFrame(VideoFrame videoFrame)
+        {
+            try
+            {
+                // Convert VideoFrame sample data to WPF BitmapSource
+                var width = videoFrame.Width;
+                var height = videoFrame.Height;
+                var stride = width * 3; // Assume RGB24 format
+                var pixelData = videoFrame.Data;
+
+                if (pixelData == null || pixelData.Length == 0)
+                    return null;
+
+                // Create BitmapSource from RGB24 data
+                var bitmapSource = BitmapSource.Create(
+                    width, height, 96, 96,
+                    PixelFormats.Rgb24, null,
+                    pixelData, stride);
+
+                bitmapSource.Freeze(); // Make it thread-safe
+                return bitmapSource;
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[VOIP-UI] ❌ Error creating bitmap from video frame: {ex.Message}");
+                return null;
+            }
         }
 
         private void LoadSettings()
@@ -3196,13 +3415,75 @@ namespace ChatP2P.Client
             {
                 await LogToFile($"[VOIP-UI] 📹 Starting video call to {_currentChatSession.PeerName}");
 
+                // ✅ TEST: Force video controls to be visible for debugging
+                await LogToFile("[VOIP-UI] 🧪 TEST: About to make video controls visible...");
+
+                try
+                {
+                    mediaRemoteVideo.Visibility = Visibility.Visible;
+                    await LogToFile("[VOIP-UI] 🧪 TEST: mediaRemoteVideo made visible");
+
+                    mediaLocalVideo.Visibility = Visibility.Visible;
+                    await LogToFile("[VOIP-UI] 🧪 TEST: mediaLocalVideo made visible");
+
+                    // Test with width/height to verify controls exist
+                    mediaRemoteVideo.Width = 320;
+                    mediaRemoteVideo.Height = 240;
+                    mediaLocalVideo.Width = 320;
+                    mediaLocalVideo.Height = 240;
+                    await LogToFile("[VOIP-UI] 🧪 TEST: Video control sizes set (320x240)");
+                }
+                catch (Exception testEx)
+                {
+                    await LogToFile($"[VOIP-UI] ❌ TEST: Error setting video controls: {testEx.Message}");
+                }
+
+                // ✅ TEST: Create a test image to verify video rendering works
+                var testBitmap = CreateTestBitmap(640, 480);
+                if (testBitmap != null)
+                {
+                    mediaLocalVideo.Source = testBitmap;
+                    await LogToFile("[VOIP-UI] 🧪 TEST: Test bitmap assigned to local video");
+
+                    // Force a visible confirmation
+                    MessageBox.Show("🧪 TEST: Video controls should now be visible with green/purple backgrounds and test image. Do you see them?",
+                                   "Video Test", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    await LogToFile("[VOIP-UI] ❌ TEST: Failed to create test bitmap");
+                    MessageBox.Show("❌ TEST: Failed to create test image", "Video Test Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+
                 // ✅ FIX: Diagnostic approfondi avant d'appeler StartVideoCallAsync
                 await LogToFile($"[VOIP-UI] 🔍 Checking VOIP services readiness...");
                 await LogToFile($"[VOIP-UI] - VOIPCallManager: {(_voipManager != null ? "✅ Ready" : "❌ NULL")}");
                 await LogToFile($"[VOIP-UI] - OpusStreaming: {(_voipManager?.OpusStreamingService != null ? "✅ Ready" : "❌ NULL")}");
                 await LogToFile($"[VOIP-UI] - Virtual Camera: Ready (built-in fallback system)");
 
+                // ✅ DEBUG: Vérifier le service de capture vidéo avant appel
+                if (_voipManager?.VideoCapture != null)
+                {
+                    await LogToFile($"[VOIP-UI] 🎥 VideoCapture service: ✅ Available");
+                    await LogToFile($"[VOIP-UI] 🎥 VideoCapture IsCapturing: {_voipManager.VideoCapture.IsCapturing}");
+                    await LogToFile($"[VOIP-UI] 🎥 VideoCapture HasCamera: {_voipManager.VideoCapture.HasCamera}");
+                    await LogToFile($"[VOIP-UI] 🎥 VideoCapture IsPlayingFile: {_voipManager.VideoCapture.IsPlayingFile}");
+                }
+                else
+                {
+                    await LogToFile($"[VOIP-UI] ❌ VideoCapture service: NULL");
+                }
+
+                await LogToFile($"[VOIP-UI] 🚀 About to call StartVideoCallAsync for peer: {_currentChatSession.PeerName}");
                 var success = await _voipManager.StartVideoCallAsync(_currentChatSession.PeerName);
+                await LogToFile($"[VOIP-UI] 📋 StartVideoCallAsync result: {success}");
+
+                // ✅ DEBUG: Vérifier le service de capture vidéo après appel
+                if (_voipManager?.VideoCapture != null)
+                {
+                    await LogToFile($"[VOIP-UI] 🎥 AFTER CALL - VideoCapture IsCapturing: {_voipManager.VideoCapture.IsCapturing}");
+                    await LogToFile($"[VOIP-UI] 🎥 AFTER CALL - VideoCapture IsPlayingFile: {_voipManager.VideoCapture.IsPlayingFile}");
+                }
 
                 if (!success)
                 {
@@ -3351,7 +3632,7 @@ namespace ChatP2P.Client
                         }
                         else
                         {
-                            MessageBox.Show("Failed to start video file playback.", "Video Test", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            MessageBox.Show("Failed to start video file playback.\n\nPossible causes:\n• FFmpeg not installed (use 'Install FFmpeg' button)\n• Unsupported video format\n• Corrupted video file\n\nCheck logs for details.", "Video Test", MessageBoxButton.OK, MessageBoxImage.Warning);
                         }
                     }
                     else
@@ -5633,8 +5914,21 @@ namespace ChatP2P.Client
                         {
                             try
                             {
-                                // ✅ FIX: Affichage réel des frames vidéo RGB
-                                await RenderVideoFrameToUI(videoData, peer);
+                                // ✅ SIMPLE: Décoder H.264 vers RGB directement
+                                await LogToFile($"[VOIP-VIDEO] 🎯 Decoding H.264 data ({videoData.Length}B)...");
+                                var rgbData = await DecodeH264ToRGB(videoData);
+
+                                if (rgbData == null)
+                                {
+                                    await LogToFile($"[VOIP-VIDEO] ❌ H.264 decode failed from {peer}");
+                                    lblRemoteVideoStatus.Text = $"📹 H.264 decode error";
+                                    return;
+                                }
+
+                                await LogToFile($"[VOIP-VIDEO] ✅ H.264 decoded: {videoData.Length}B → {rgbData.Length}B RGB");
+
+                                // Render RGB frame
+                                await RenderVideoFrameToUI(rgbData, peer);
                             }
                             catch (Exception renderEx)
                             {
@@ -5666,6 +5960,43 @@ namespace ChatP2P.Client
         /// <summary>
         /// ✅ NOUVEAU: Rendu réel des frames vidéo RGB vers WPF UI
         /// </summary>
+
+        /// <summary>
+        /// ✅ NOUVEAU: Décoder H.264 vers RGB via FFmpegVideoDecoderService
+        /// </summary>
+        private async Task<byte[]?> DecodeH264ToRGB(byte[] h264Data)
+        {
+            try
+            {
+                // Initialiser le décodeur si nécessaire
+                if (_h264Decoder == null)
+                {
+                    _h264Decoder = new FFmpegVideoDecoderService();
+                    _h264Decoder.LogEvent += (msg) => _ = LogToFile($"[H264-Decoder] {msg}");
+                    await LogToFile($"[VOIP-VIDEO] 🎯 Created H.264 decoder");
+                }
+
+                // Décoder la frame H.264
+                var rgbData = await _h264Decoder.DecodeH264FrameAsync(h264Data);
+
+                if (rgbData != null && rgbData.Length > 0)
+                {
+                    return rgbData;
+                }
+
+                await LogToFile($"[VOIP-VIDEO] ❌ H.264 decoder returned null/empty");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOIP-VIDEO] ❌ H.264 decode error: {ex.Message}");
+                return null;
+            }
+        }
+
+        // ✅ NOUVEAU: Instance du décodeur H.264
+        private FFmpegVideoDecoderService? _h264Decoder;
+
         private async Task RenderVideoFrameToUI(byte[] rgbData, string peer)
         {
             try

@@ -131,6 +131,17 @@ namespace ChatP2P.Client.Services
                     _currentVideoFile = videoFilePath;
                 }
 
+                // ✅ FIX CRITIQUE: S'assurer que FFmpeg est installé AVANT de charger le fichier
+                LogEvent?.Invoke($"[VideoCapture] 🔧 Ensuring FFmpeg is available for video file decoding...");
+                var ffmpegAvailable = await FFmpegInstaller.EnsureFFmpegInstalledAsync();
+
+                if (!ffmpegAvailable)
+                {
+                    LogEvent?.Invoke($"[VideoCapture] ❌ FFmpeg not available, cannot load video file");
+                    LogEvent?.Invoke($"[VideoCapture] 💡 Please install FFmpeg using the 'Install FFmpeg' button in VOIP Testing");
+                    return false;
+                }
+
                 // Initialiser le décodeur FFmpeg réel
                 _ffmpegDecoder = new FFmpegVideoDecoderService();
                 _ffmpegDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[FFmpegDecoder] {msg}");
