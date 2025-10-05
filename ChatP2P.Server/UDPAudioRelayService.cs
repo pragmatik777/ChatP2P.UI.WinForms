@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -23,6 +24,43 @@ namespace ChatP2P.Server
         private const int UDP_AUDIO_PORT = 8895;
 
         public event Action<string>? LogEvent;
+
+        // 📝 DIAGNOSTIC: Auto-logging pour diagnostiquer les coupures audio
+        private readonly string _logFilePath;
+        private readonly object _logLock = new object();
+
+        public UDPAudioRelayService()
+        {
+            // Créer fichier log sur le Bureau dans ChatP2P_Logs (chemin dynamique)
+            var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            var logDir = Path.Combine(desktopPath, "ChatP2P_Logs");
+            Directory.CreateDirectory(logDir);
+            _logFilePath = Path.Combine(logDir, "server_udp_audio.log");
+        }
+
+        /// <summary>
+        /// Log dans fichier + console pour diagnostic
+        /// </summary>
+        private void LogToFile(string message)
+        {
+            try
+            {
+                var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                var logLine = $"[{timestamp}] {message}";
+
+                lock (_logLock)
+                {
+                    File.AppendAllText(_logFilePath, logLine + Environment.NewLine);
+                }
+
+                // Également dans la console
+                LogEvent?.Invoke(message);
+            }
+            catch
+            {
+                // Ignore les erreurs de log pour ne pas crasher le serveur
+            }
+        }
 
         private class AudioSession
         {
@@ -51,14 +89,14 @@ namespace ChatP2P.Server
                 _udpServer = new UdpClient(UDP_AUDIO_PORT);
                 _isRunning = true;
 
-                LogEvent?.Invoke($"[UDP-AUDIO] ✅ UDP Audio Relay started on port {UDP_AUDIO_PORT}");
+                LogToFile($"[UDP-AUDIO] ✅ UDP Audio Relay started on port {UDP_AUDIO_PORT}");
 
                 // Start listening for UDP packets
                 _ = Task.Run(ListenForPacketsAsync);
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[UDP-AUDIO] ❌ Failed to start UDP audio relay: {ex.Message}");
+                LogToFile($"[UDP-AUDIO] ❌ Failed to start UDP audio relay: {ex.Message}");
                 throw;
             }
         }
@@ -78,7 +116,7 @@ namespace ChatP2P.Server
                 }
                 catch (Exception ex) when (!_cancellationTokenSource.Token.IsCancellationRequested)
                 {
-                    LogEvent?.Invoke($"[UDP-AUDIO] ❌ Error receiving UDP packet: {ex.Message}");
+                    LogToFile($"[UDP-AUDIO] ❌ Error receiving UDP packet: {ex.Message}");
                 }
             }
         }
@@ -113,14 +151,14 @@ namespace ChatP2P.Server
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[UDP-AUDIO] ❌ Error processing UDP packet: {ex.Message}");
+                LogToFile($"[UDP-AUDIO] ❌ Error processing UDP packet: {ex.Message}");
             }
         }
 
         private async Task HandleClientRegistration(string peerName, IPEndPoint endPoint)
         {
             _clients[peerName] = endPoint;
-            LogEvent?.Invoke($"[UDP-AUDIO] ✅ Registered {peerName} at {endPoint}");
+            LogToFile($"[UDP-AUDIO] ✅ Registered {peerName} at {endPoint}");
 
             // Send confirmation back
             var response = new UDPAudioMessage
@@ -138,7 +176,7 @@ namespace ChatP2P.Server
         {
             if (!_clients.TryGetValue(peer2, out var peer2EndPoint))
             {
-                LogEvent?.Invoke($"[UDP-AUDIO] ❌ Cannot start session: {peer2} not registered");
+                LogToFile($"[UDP-AUDIO] ❌ Cannot start session: {peer2} not registered");
                 return;
             }
 
@@ -153,7 +191,7 @@ namespace ChatP2P.Server
             };
 
             _activeSessions[sessionKey] = session;
-            LogEvent?.Invoke($"[UDP-AUDIO] 🎵 Started audio session: {sessionKey}");
+            LogToFile($"[UDP-AUDIO] 🎵 Started audio session: {sessionKey}");
 
             // Notify both peers
             var notification = new UDPAudioMessage
@@ -191,6 +229,8 @@ namespace ChatP2P.Server
             if (!_activeSessions.TryGetValue(sessionKey1, out var session) &&
                 !_activeSessions.TryGetValue(sessionKey2, out session))
             {
+                // 🚨 DIAGNOSTIC CRITIQUE: Log quand une session n'existe plus
+                LogToFile($"[UDP-AUDIO] 🚨 AUDIO DROPPED: No session found for {message.FromPeer} → {message.ToPeer} (packet #{message.PacketNumber})");
                 return; // No active session
             }
 
@@ -209,7 +249,11 @@ namespace ChatP2P.Server
             // Update statistics
             session.AudioPacketsRelayed++;
 
-            LogEvent?.Invoke($"[UDP-AUDIO] 🎵 Relayed audio packet #{message.PacketNumber} from {message.FromPeer} to {message.ToPeer}");
+            // 🔍 DIAGNOSTIC: Log seulement toutes les 100 packets pour éviter le lag
+            if (session.AudioPacketsRelayed % 100 == 0)
+            {
+                LogToFile($"[UDP-AUDIO] 🎵 Relayed {session.AudioPacketsRelayed} packets: {message.FromPeer} → {message.ToPeer}");
+            }
         }
 
         private async Task HandleEndSession(string peer1, string peer2)
@@ -220,7 +264,7 @@ namespace ChatP2P.Server
             if (_activeSessions.TryRemove(sessionKey1, out var session) ||
                 _activeSessions.TryRemove(sessionKey2, out session))
             {
-                LogEvent?.Invoke($"[UDP-AUDIO] 📴 Ended audio session: {session.Peer1}↔{session.Peer2} (relayed {session.AudioPacketsRelayed} packets)");
+                LogToFile($"[UDP-AUDIO] 📴 Ended audio session: {session.Peer1}↔{session.Peer2} (relayed {session.AudioPacketsRelayed} packets)");
             }
         }
 
@@ -234,7 +278,7 @@ namespace ChatP2P.Server
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[UDP-AUDIO] ❌ Failed to send UDP message to {endPoint}: {ex.Message}");
+                LogToFile($"[UDP-AUDIO] ❌ Failed to send UDP message to {endPoint}: {ex.Message}");
             }
         }
 
@@ -246,7 +290,7 @@ namespace ChatP2P.Server
             _udpServer?.Close();
             _udpServer?.Dispose();
 
-            LogEvent?.Invoke("[UDP-AUDIO] 📴 UDP Audio Relay stopped");
+            LogToFile("[UDP-AUDIO] 📴 UDP Audio Relay stopped");
         }
 
         public void Dispose()

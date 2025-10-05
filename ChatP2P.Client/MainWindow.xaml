@@ -814,8 +814,63 @@
                         </Grid>
                     </GroupBox>
 
+                    <!-- 🎚️ Volume Control -->
+                    <GroupBox Header="🎚️ Volume Control" Grid.Row="3" Margin="0,0,0,20"
+                              Foreground="White" BorderBrush="#FF4ECDC4">
+                        <Grid Margin="15">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Microphone Volume -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,15">
+                                <Label Content="🎤 Microphone Volume:" Foreground="White" Width="150" VerticalAlignment="Center"/>
+                                <Slider Name="sliderMicVolume" Width="200" Height="30" Minimum="0" Maximum="200" Value="100"
+                                        TickFrequency="10" IsSnapToTickEnabled="True" TickPlacement="BottomRight"
+                                        Foreground="#FF4ECDC4" Background="#FF404040" Margin="10,0"
+                                        ValueChanged="SliderMicVolume_ValueChanged"/>
+                                <TextBlock Name="lblMicVolumeValue" Text="100%" Foreground="White" Width="50"
+                                          VerticalAlignment="Center" Margin="10,0,0,0" FontWeight="Bold"/>
+                                <Button Name="btnResetMicVolume" Content="↻" Width="30" Height="30" Margin="10,0,0,0"
+                                        Background="#FF666666" Foreground="White" BorderBrush="Transparent"
+                                        ToolTip="Reset microphone volume to 100%" Click="BtnResetMicVolume_Click"/>
+                            </StackPanel>
+
+                            <!-- Speaker Volume -->
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,15">
+                                <Label Content="🔊 Speaker Volume:" Foreground="White" Width="150" VerticalAlignment="Center"/>
+                                <Slider Name="sliderSpeakerVolume" Width="200" Height="30" Minimum="0" Maximum="200" Value="100"
+                                        TickFrequency="10" IsSnapToTickEnabled="True" TickPlacement="BottomRight"
+                                        Foreground="#FF4ECDC4" Background="#FF404040" Margin="10,0"
+                                        ValueChanged="SliderSpeakerVolume_ValueChanged"/>
+                                <TextBlock Name="lblSpeakerVolumeValue" Text="100%" Foreground="White" Width="50"
+                                          VerticalAlignment="Center" Margin="10,0,0,0" FontWeight="Bold"/>
+                                <Button Name="btnResetSpeakerVolume" Content="↻" Width="30" Height="30" Margin="10,0,0,0"
+                                        Background="#FF666666" Foreground="White" BorderBrush="Transparent"
+                                        ToolTip="Reset speaker volume to 100%" Click="BtnResetSpeakerVolume_Click"/>
+                            </StackPanel>
+
+                            <!-- Volume Controls -->
+                            <StackPanel Grid.Row="2" Orientation="Horizontal">
+                                <Button Name="btnMuteAll" Content="🔇 Mute All" Width="100" Height="30"
+                                        Background="#FFFF6B6B" Foreground="White" BorderBrush="Transparent"
+                                        Margin="0,0,10,0" Click="BtnMuteAll_Click"/>
+                                <Button Name="btnUnmuteAll" Content="🔊 Unmute All" Width="100" Height="30"
+                                        Background="#FF27AE60" Foreground="White" BorderBrush="Transparent"
+                                        Margin="0,0,10,0" Click="BtnUnmuteAll_Click"/>
+                                <Button Name="btnVolumeTest" Content="🎵 Test Volume" Width="110" Height="30"
+                                        Background="#FFFF8C42" Foreground="White" BorderBrush="Transparent"
+                                        Margin="0,0,10,0" Click="BtnVolumeTest_Click"/>
+                                <TextBlock Name="lblVolumeStatus" Text="Volume settings ready" Foreground="#FF888888"
+                                           VerticalAlignment="Center" Margin="20,0,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </GroupBox>
+
                     <!-- 🎬 FFmpeg Installation -->
-                    <GroupBox Header="🎬 FFmpeg Video Encoding" Grid.Row="3" Margin="0,0,0,20"
+                    <GroupBox Header="🎬 FFmpeg Video Encoding" Grid.Row="4" Margin="0,0,0,20"
                               Foreground="White" BorderBrush="#FF8E44AD">
                         <Grid Margin="15">
                             <Grid.RowDefinitions>

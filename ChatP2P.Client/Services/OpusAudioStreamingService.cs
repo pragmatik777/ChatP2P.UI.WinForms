@@ -25,7 +25,8 @@ namespace ChatP2P.Client.Services
 
         // Buffer circulaire pour streaming temps réel (PLAYBACK)
         private readonly ConcurrentQueue<byte[]> _audioBuffer = new();
-        private readonly int _maxBufferSize = 20; // 🎯 SMOOTH AUDIO: 20 frames (~400ms) anti-crackling buffer
+        private readonly int _maxBufferSize = 10; // 🎯 OPUS-ALIGNED: 10 frames (200ms) optimal pour Opus 20ms frames
+        private readonly int _minBufferSize = 2; // 🎯 OPUS-SYNC: 2 frames (40ms) minimum pour éviter underrun
         private readonly Timer? _playbackTimer;
         private CancellationTokenSource? _streamingCts;
 
@@ -61,6 +62,15 @@ namespace ChatP2P.Client.Services
         // ✅ NOUVEAU: Device selection support
         private string? _selectedSpeakerDevice;
         private string? _selectedMicrophoneDevice;
+
+        // ✅ VOLUME CONTROL: Support volume microphone et speaker
+        private float _microphoneVolume = 1.0f; // 0.0 à 2.0 (0% à 200%)
+        private float _speakerVolume = 1.0f; // 0.0 à 2.0 (0% à 200%)
+
+        // 🔍 DIAGNOSTIC COUNTERS: Pour tracking des problèmes audio
+        private int _frameCounter = 0;
+        private int _receptionCounter = 0;
+        private int _qualityCounter = 0;
 
         // ✅ REAL AUDIO CAPTURE: NAudio components
         private WaveInEvent? _waveIn;
@@ -202,7 +212,13 @@ namespace ChatP2P.Client.Services
             try
             {
                 if (!_isStreaming || audioData == null || audioData.Length == 0)
+                {
+                    LogEvent?.Invoke($"[OpusStreaming] 🚨 RECEPTION BLOCKED: streaming={_isStreaming}, data={(audioData?.Length ?? 0)} bytes");
                     return;
+                }
+
+                // 🔍 DIAGNOSTIC: Log toute réception pour tracker les coupures
+                _receptionCounter++;
 
                 // Ajouter au buffer circulaire
                 _audioBuffer.Enqueue(audioData);
@@ -223,10 +239,10 @@ namespace ChatP2P.Client.Services
 
                 BufferLevelChanged?.Invoke(_audioBuffer.Count);
 
-                // 🔧 DEBUG: Log détaillé mais pas spam (seulement toutes les 50 frames)
-                if (_audioBuffer.Count % 50 == 0)
+                // 🔍 DIAGNOSTIC: Log réception moins verbeux pour éviter lag
+                if (_receptionCounter % 500 == 0) // Toutes les 10 secondes
                 {
-                    LogEvent?.Invoke($"[OpusStreaming] 📨 Audio data received: {audioData.Length} bytes (buffer: {_audioBuffer.Count}/{_maxBufferSize})");
+                    LogEvent?.Invoke($"[OpusStreaming] 📨 RECEPTION #{_receptionCounter}: {audioData.Length} bytes (buffer: {_audioBuffer.Count}/{_maxBufferSize})");
                 }
             }
             catch (Exception ex)
@@ -251,38 +267,34 @@ namespace ChatP2P.Client.Services
                     return;
                 }
 
-                // 🎯 SYNC PERFECT: Minimal protection avec timer 20ms optimisé
-                if (_audioBuffer.Count < 2)
+                // 🎯 OPUS-SYNC: Protection buffer alignée sur frames Opus 20ms
+                if (_audioBuffer.Count < _minBufferSize)
                 {
-                    // Protection minimale anti-underrun
+                    // Attendre minimum 2 frames Opus (40ms) pour stabilité
                     return;
                 }
 
-                // Déqueue et jouer frame suivante
+                // 🎯 OPUS-ALIGNED: Traiter 1 frame à la fois (20ms sync parfait)
                 if (_audioBuffer.TryDequeue(out var audioFrame))
                 {
-                    lock (_lock)
-                    {
-                        _isPlaying = true;
-                    }
-
-                    // Convertir et jouer audio via système optimisé
-                    PlayAudioFrameOptimized(audioFrame);
-
-                    BufferLevelChanged?.Invoke(_audioBuffer.Count);
-
-                    // 🎯 PERFORMANCE: Log seulement toutes les 100 frames pour éviter I/O overhead
-                    if (_audioBuffer.Count % 100 == 0)
-                    {
-                        LogEvent?.Invoke($"[OpusStreaming] 🔊 Audio streaming (buffer: {_audioBuffer.Count})");
-                    }
+                    ProcessSingleAudioFrame(audioFrame);
                 }
-                else
+
+
+                BufferLevelChanged?.Invoke(_audioBuffer.Count);
+
+                // 🎯 DIAGNOSTIC: Log moins verbeux pour éviter lag
+                _frameCounter++;
+
+                if (_frameCounter % 250 == 0) // Toutes les 5 secondes (250 frames * 20ms = 5000ms)
                 {
-                    lock (_lock)
-                    {
-                        _isPlaying = false;
-                    }
+                    LogEvent?.Invoke($"[OpusStreaming] 🔍 DIAGNOSTIC: Frame #{_frameCounter} processed (buffer: {_audioBuffer.Count}/10, timer active: {_playbackTimer != null}, streaming: {_isStreaming})");
+                }
+
+                // 🚨 ALERTE CRITIQUE: Détecter quand le buffer devient vide
+                if (_audioBuffer.Count == 0)
+                {
+                    LogEvent?.Invoke($"[OpusStreaming] 🚨 BUFFER EMPTY at frame #{_frameCounter} - potential underrun detected!");
                 }
             }
             catch (Exception ex)
@@ -292,7 +304,21 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// Jouer frame audio de manière optimisée avec décodage Opus
+        /// Traiter une seule frame audio (nouvelle méthode pour multi-processing)
+        /// </summary>
+        private void ProcessSingleAudioFrame(byte[] audioData)
+        {
+            lock (_lock)
+            {
+                _isPlaying = true;
+            }
+
+            // Convertir et jouer audio via système optimisé avec volume
+            PlayAudioFrameOptimized(audioData);
+        }
+
+        /// <summary>
+        /// Jouer frame audio de manière optimisée avec décodage Opus + Volume Control
         /// </summary>
         private void PlayAudioFrameOptimized(byte[] audioData)
         {
@@ -310,6 +336,12 @@ namespace ChatP2P.Client.Services
 
                     if (samplesDecoded > 0)
                     {
+                        // ✅ VOLUME CONTROL: Appliquer volume speaker avant conversion
+                        for (int i = 0; i < samplesDecoded; i++)
+                        {
+                            decodedSamples[i] = (short)(decodedSamples[i] * _speakerVolume);
+                        }
+
                         // ✅ FIX AUDIO TRUNCATION: Utiliser TOUS les samples décodés sans les tronquer
                         // Convertir short[] → byte[] PCM avec la taille complète
                         pcmData = new byte[samplesDecoded * 2];
@@ -343,15 +375,15 @@ namespace ChatP2P.Client.Services
                     {
                         if (_waveOut == null || _bufferedProvider == null)
                         {
-                            // 🎯 LOW LATENCY CONFIG: BufferedWaveProvider optimisé pour temps réel
+                            // 🎯 OPUS-ALIGNED: Configuration buffer synchronisée avec Opus 20ms frames
                             _bufferedProvider = new BufferedWaveProvider(waveFormat);
-                            _bufferedProvider.DiscardOnBufferOverflow = true; // Drop old data to prevent latency
-                            _bufferedProvider.BufferDuration = TimeSpan.FromMilliseconds(200); // 🎯 SMOOTH: 200ms buffer pour éliminer craquements
+                            _bufferedProvider.DiscardOnBufferOverflow = true; // Drop old data pour low latency
+                            _bufferedProvider.BufferDuration = TimeSpan.FromMilliseconds(200); // 🎯 OPUS: 200ms = 10 frames Opus
 
-                            // 🎯 LOW LATENCY CONFIG: WaveOutEvent optimisé pour temps réel
+                            // 🎯 OPUS-SYNC: Configuration latency alignée sur frames Opus
                             _waveOut = new WaveOutEvent();
-                            _waveOut.DesiredLatency = 60; // 🎯 SMOOTH: 60ms latency pour stabilité optimale
-                            _waveOut.NumberOfBuffers = 3; // 🎯 STABLE: 3 buffers pour éviter underruns
+                            _waveOut.DesiredLatency = 60; // 🎯 OPUS: 60ms = 3 frames Opus (optimal latency)
+                            _waveOut.NumberOfBuffers = 3; // 🎯 OPUS: 3 buffers pour sync Opus
                             _waveOut.Init(_bufferedProvider);
                             _waveOut.Play(); // Start real-time playback
 
@@ -365,9 +397,20 @@ namespace ChatP2P.Client.Services
                             return;
                         }
 
+                        // 🔍 QUALITY DIAGNOSTIC: Vérifier l'état du BufferedWaveProvider
+                        var bufferBytes = _bufferedProvider.BufferedBytes;
+                        var bufferDuration = _bufferedProvider.BufferedDuration;
+
                         // Pattern SIPSorcery SAFE: Direct AddSamples sans contrôle agressif
                         _bufferedProvider.AddSamples(pcmData, 0, pcmData.Length);
-                        LogEvent?.Invoke($"[OpusStreaming] 🎵 SIPSorcery: Added {pcmData.Length} bytes to audio sink (samples: {pcmData.Length/2})");
+
+                        // 🔍 QUALITY LOG: Diagnostic complet du playback
+                        _qualityCounter++;
+
+                        if (_qualityCounter % 500 == 0) // Toutes les 10 secondes
+                        {
+                            LogEvent?.Invoke($"[OpusStreaming] 🎵 QUALITY #{_qualityCounter}: Added {pcmData.Length} bytes (samples: {pcmData.Length/2}) | Buffer: {bufferBytes} bytes ({bufferDuration.TotalMilliseconds:F0}ms) | Playing: {_waveOut?.PlaybackState}");
+                        }
                     }
                 }
                 catch (Exception directEx)
@@ -664,19 +707,20 @@ namespace ChatP2P.Client.Services
                     _captureBuffer.TryDequeue(out _);
                 }
 
-                // ✅ OPUS ENCODING RE-ENABLED: Maintenant que l'interférence simulation est fixée, remettre Opus !
-                var opusData = EncodeToOpus(audioData);
+                // ✅ VOLUME CONTROL + OPUS ENCODING: Appliquer volume micro AVANT encodage
+                var volumeAdjustedData = ApplyMicrophoneVolume(audioData);
+                var opusData = EncodeToOpus(volumeAdjustedData);
                 if (opusData != null)
                 {
                     // Déclencher l'event pour notifier les abonnés (VOIP) avec données Opus
                     AudioCaptured?.Invoke(opusData);
-                    LogEvent?.Invoke($"[OpusStreaming] ✅ REAL MIC: PCM encoded to Opus: {audioData.Length} bytes → {opusData.Length} bytes");
+                    LogEvent?.Invoke($"[OpusStreaming] ✅ REAL MIC+VOL: PCM (vol:{_microphoneVolume:F1}x) encoded to Opus: {audioData.Length} bytes → {opusData.Length} bytes");
                 }
                 else
                 {
-                    // Fallback: Envoyer PCM brut si l'encodage échoue
-                    AudioCaptured?.Invoke(audioData);
-                    LogEvent?.Invoke($"[OpusStreaming] ⚠️ REAL MIC: Opus encoding failed, sending raw PCM: {audioData.Length} bytes");
+                    // Fallback: Envoyer PCM brut avec volume si l'encodage échoue
+                    AudioCaptured?.Invoke(volumeAdjustedData);
+                    LogEvent?.Invoke($"[OpusStreaming] ⚠️ REAL MIC+VOL: Opus encoding failed, sending raw PCM with volume: {volumeAdjustedData.Length} bytes");
                 }
 
                 // Log périodique (toutes les 100 captures = ~2 secondes)
@@ -857,6 +901,67 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[OpusStreaming] ❌ Error encoding to Opus: {ex.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// ✅ VOLUME CONTROL: Appliquer volume au signal microphone
+        /// </summary>
+        private byte[] ApplyMicrophoneVolume(byte[] audioData)
+        {
+            try
+            {
+                if (_microphoneVolume == 1.0f || audioData.Length < 2)
+                    return audioData;
+
+                var adjustedData = new byte[audioData.Length];
+                for (int i = 0; i < audioData.Length; i += 2)
+                {
+                    // Convertir bytes en sample 16-bit
+                    short sample = (short)(audioData[i] | (audioData[i + 1] << 8));
+
+                    // Appliquer volume avec clipping protection
+                    float adjustedSample = sample * _microphoneVolume;
+                    adjustedSample = Math.Max(-32768, Math.Min(32767, adjustedSample));
+
+                    // Reconvertir en bytes
+                    short finalSample = (short)adjustedSample;
+                    adjustedData[i] = (byte)(finalSample & 0xFF);
+                    adjustedData[i + 1] = (byte)((finalSample >> 8) & 0xFF);
+                }
+
+                return adjustedData;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[OpusStreaming] ❌ Error applying microphone volume: {ex.Message}");
+                return audioData; // Fallback vers données originales
+            }
+        }
+
+        /// <summary>
+        /// ✅ VOLUME CONTROL: Configurer le volume du microphone (0.0 à 2.0)
+        /// </summary>
+        public void SetMicrophoneVolume(float volume)
+        {
+            _microphoneVolume = Math.Max(0.0f, Math.Min(2.0f, volume));
+            LogEvent?.Invoke($"[OpusStreaming] 🎤 Microphone volume set to: {_microphoneVolume:F1}x ({_microphoneVolume * 100:F0}%)");
+        }
+
+        /// <summary>
+        /// ✅ VOLUME CONTROL: Configurer le volume du speaker (0.0 à 2.0)
+        /// </summary>
+        public void SetSpeakerVolume(float volume)
+        {
+            _speakerVolume = Math.Max(0.0f, Math.Min(2.0f, volume));
+            LogEvent?.Invoke($"[OpusStreaming] 🔊 Speaker volume set to: {_speakerVolume:F1}x ({_speakerVolume * 100:F0}%)");
+        }
+
+        /// <summary>
+        /// ✅ VOLUME CONTROL: Obtenir les volumes actuels
+        /// </summary>
+        public (float MicVolume, float SpeakerVolume) GetVolumeLevels()
+        {
+            return (_microphoneVolume, _speakerVolume);
         }
 
         #endregion

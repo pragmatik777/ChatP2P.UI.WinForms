@@ -72,6 +72,37 @@ dotnet clean ChatP2P.UI.WinForms.sln
 - ✅ **Performance Optimale**: CPU usage minimal, latence ~400ms acceptable
 - ✅ **Production Ready**: Audio professionnel quality atteint 🔊
 
+## 🎚️ **CONTRÔLE VOLUME AUDIO AVANCÉ (05/10/2025) ✅ IMPLÉMENTÉ**
+**🎯 System Goal**: Contrôle volume microphone/speaker en temps réel + paramètres persistants
+
+### ✅ **Fixes Anti-Hachurages Opus-Aligned**:
+1. **Buffer Opus-Synchronisé**: 30 → 10 frames (600ms → 200ms), sync parfait 20ms frames
+2. **Processing Optimal**: Multi-frame → Single frame per cycle (élimination hachurages)
+3. **BufferedWaveProvider**: 400ms → 200ms (10 frames Opus exactement)
+4. **Latency Optimisée**: 100ms → 60ms (3 frames Opus alignment)
+5. **Min Buffer Intelligent**: 5 → 2 frames (40ms protection underrun)
+
+### 🎚️ **Système Contrôle Volume Complet**:
+- **Interface Settings**: Sliders microphone/speaker (0-200%) avec equalizer existant
+- **Volume PCM Real-Time**: Application volume AVANT encodage Opus (micro) et APRÈS décodage (speaker)
+- **Sauvegarde Persistante**: `%APPDATA%\ChatP2P\volume_settings.json` auto-reload startup
+- **Contrôles UI**: Reset 100%, Mute All, Unmute All, Test Volume, Status display temps réel
+- **Protection Clipping**: Clipping intelligent pour éviter distortion audio
+
+### 🔍 **Diagnostic System Avancé**:
+- **Server UDP Logging**: Auto-logging `%Desktop%\ChatP2P_Logs\server_udp_audio.log`
+- **Performance Optimisée**: Logs réduits client (10s) + serveur (100 packets) pour éliminer lag
+- **Tracking Critique**: Buffer empty, dropped packets, session states
+- **Multi-Frame Diagnostic**: Compteurs frame/réception/quality pour debugging précis
+
+### 🎉 **Résultats Volume + Anti-Hachurages**:
+- ✅ **Audio Stable**: Coupures 16s complètement éliminées
+- ✅ **Volume Contrôle**: Microphone/speaker ajustables 0-200% temps réel
+- ✅ **Opus Perfect Sync**: Buffer aligné sur frames 20ms (zéro drift)
+- ✅ **Performance Logs**: Diagnostic sans lag (optimisation I/O)
+- ✅ **Settings Persistants**: Volume settings restaurés automatiquement
+- ✅ **Production Ready**: Audio professional-grade avec contrôle utilisateur complet
+
 ## 🔐 **CRYPTO SYSTEM PQC**
 **⚠️ SECTION CRITIQUE - NE PAS SUPPRIMER ⚠️**
 

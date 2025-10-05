@@ -243,6 +243,9 @@ namespace ChatP2P.Client
             // ✅ NOUVEAU: Configure network IPs AVANT toute connexion P2P
             ConfigureClientNetworkIPs();
 
+            // 🎚️ VOLUME: Load volume settings at startup
+            await LoadVolumeSettings();
+
             // Auto-connect only if checkbox is checked
             if (chkAutoConnect.IsChecked == true)
             {
@@ -6949,5 +6952,293 @@ namespace ChatP2P.Client
         }
 
         #endregion
+
+        #region 🎚️ Volume Control Event Handlers
+
+        /// <summary>
+        /// Event handler: Microphone volume slider changed
+        /// </summary>
+        private async void SliderMicVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            try
+            {
+                var volumePercent = (float)e.NewValue;
+                var volumeMultiplier = volumePercent / 100.0f;
+
+                // Update UI
+                if (lblMicVolumeValue != null)
+                {
+                    lblMicVolumeValue.Text = $"{volumePercent:F0}%";
+                }
+
+                // Apply to VOIP service
+                if (_voipManager?.OpusStreamingService != null)
+                {
+                    _voipManager.OpusStreamingService.SetMicrophoneVolume(volumeMultiplier);
+                    await LogToFile($"[VOLUME] 🎤 Microphone volume set to {volumePercent:F0}% (x{volumeMultiplier:F2})");
+                }
+
+                // Save settings
+                await SaveVolumeSettings();
+
+                // Update status
+                if (lblVolumeStatus != null)
+                {
+                    lblVolumeStatus.Text = $"Mic: {volumePercent:F0}%";
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error changing microphone volume: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler: Speaker volume slider changed
+        /// </summary>
+        private async void SliderSpeakerVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            try
+            {
+                var volumePercent = (float)e.NewValue;
+                var volumeMultiplier = volumePercent / 100.0f;
+
+                // Update UI
+                if (lblSpeakerVolumeValue != null)
+                {
+                    lblSpeakerVolumeValue.Text = $"{volumePercent:F0}%";
+                }
+
+                // Apply to VOIP service
+                if (_voipManager?.OpusStreamingService != null)
+                {
+                    _voipManager.OpusStreamingService.SetSpeakerVolume(volumeMultiplier);
+                    await LogToFile($"[VOLUME] 🔊 Speaker volume set to {volumePercent:F0}% (x{volumeMultiplier:F2})");
+                }
+
+                // Save settings
+                await SaveVolumeSettings();
+
+                // Update status
+                if (lblVolumeStatus != null)
+                {
+                    var (micVol, spkVol) = _voipManager?.OpusStreamingService?.GetVolumeLevels() ?? (1.0f, 1.0f);
+                    lblVolumeStatus.Text = $"Mic: {micVol * 100:F0}%, Speaker: {spkVol * 100:F0}%";
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error changing speaker volume: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler: Reset microphone volume to 100%
+        /// </summary>
+        private async void BtnResetMicVolume_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sliderMicVolume != null)
+                {
+                    sliderMicVolume.Value = 100;
+                }
+                await LogToFile("[VOLUME] 🎤 Microphone volume reset to 100%");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error resetting microphone volume: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler: Reset speaker volume to 100%
+        /// </summary>
+        private async void BtnResetSpeakerVolume_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sliderSpeakerVolume != null)
+                {
+                    sliderSpeakerVolume.Value = 100;
+                }
+                await LogToFile("[VOLUME] 🔊 Speaker volume reset to 100%");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error resetting speaker volume: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler: Mute all audio
+        /// </summary>
+        private async void BtnMuteAll_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sliderMicVolume != null && sliderSpeakerVolume != null)
+                {
+                    sliderMicVolume.Value = 0;
+                    sliderSpeakerVolume.Value = 0;
+                }
+                await LogToFile("[VOLUME] 🔇 All audio muted");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error muting all audio: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler: Unmute all audio
+        /// </summary>
+        private async void BtnUnmuteAll_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sliderMicVolume != null && sliderSpeakerVolume != null)
+                {
+                    sliderMicVolume.Value = 100;
+                    sliderSpeakerVolume.Value = 100;
+                }
+                await LogToFile("[VOLUME] 🔊 All audio unmuted");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error unmuting all audio: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Event handler: Test volume settings
+        /// </summary>
+        private async void BtnVolumeTest_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                btnVolumeTest.Content = "🎵 Testing...";
+                btnVolumeTest.IsEnabled = false;
+
+                await LogToFile("[VOLUME] 🎵 Testing volume settings...");
+
+                if (_voipManager?.OpusStreamingService != null)
+                {
+                    var (micVol, spkVol) = _voipManager.OpusStreamingService.GetVolumeLevels();
+                    await LogToFile($"[VOLUME] Current levels - Mic: {micVol * 100:F0}%, Speaker: {spkVol * 100:F0}%");
+
+                    // Test avec un ton de test pendant 2 secondes
+                    var testResult = await _voipManager.OpusStreamingService.PlayTestToneAsync(440.0, 2000);
+
+                    if (lblVolumeStatus != null)
+                    {
+                        lblVolumeStatus.Text = testResult ? "Test completed successfully" : "Test failed";
+                    }
+                }
+                else
+                {
+                    if (lblVolumeStatus != null)
+                    {
+                        lblVolumeStatus.Text = "VOIP service not available";
+                    }
+                    await LogToFile("[VOLUME] ❌ VOIP service not available for testing");
+                }
+
+                await LogToFile("[VOLUME] ✅ Volume test completed");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error testing volume: {ex.Message}");
+            }
+            finally
+            {
+                btnVolumeTest.Content = "🎵 Test Volume";
+                btnVolumeTest.IsEnabled = true;
+            }
+        }
+
+        /// <summary>
+        /// Load volume settings from persistent storage
+        /// </summary>
+        private async Task LoadVolumeSettings()
+        {
+            try
+            {
+                var settingsPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P", "volume_settings.json");
+
+                if (File.Exists(settingsPath))
+                {
+                    var json = await File.ReadAllTextAsync(settingsPath);
+                    var settings = System.Text.Json.JsonSerializer.Deserialize<VolumeSettings>(json);
+
+                    if (settings != null)
+                    {
+                        // Apply to UI
+                        if (sliderMicVolume != null) sliderMicVolume.Value = settings.MicrophoneVolume;
+                        if (sliderSpeakerVolume != null) sliderSpeakerVolume.Value = settings.SpeakerVolume;
+
+                        // Apply to service
+                        if (_voipManager?.OpusStreamingService != null)
+                        {
+                            _voipManager.OpusStreamingService.SetMicrophoneVolume(settings.MicrophoneVolume / 100.0f);
+                            _voipManager.OpusStreamingService.SetSpeakerVolume(settings.SpeakerVolume / 100.0f);
+                        }
+
+                        await LogToFile($"[VOLUME] ✅ Settings loaded - Mic: {settings.MicrophoneVolume:F0}%, Speaker: {settings.SpeakerVolume:F0}%");
+                    }
+                }
+                else
+                {
+                    await LogToFile("[VOLUME] 📝 No saved settings found, using defaults (100%)");
+                }
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error loading volume settings: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Save volume settings to persistent storage
+        /// </summary>
+        private async Task SaveVolumeSettings()
+        {
+            try
+            {
+                var settingsDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChatP2P");
+                Directory.CreateDirectory(settingsDir);
+
+                var settingsPath = System.IO.Path.Combine(settingsDir, "volume_settings.json");
+
+                var settings = new VolumeSettings
+                {
+                    MicrophoneVolume = (float)(sliderMicVolume?.Value ?? 100),
+                    SpeakerVolume = (float)(sliderSpeakerVolume?.Value ?? 100),
+                    LastUpdated = DateTime.Now
+                };
+
+                var json = System.Text.Json.JsonSerializer.Serialize(settings, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                await File.WriteAllTextAsync(settingsPath, json);
+
+                await LogToFile($"[VOLUME] 💾 Settings saved - Mic: {settings.MicrophoneVolume:F0}%, Speaker: {settings.SpeakerVolume:F0}%");
+            }
+            catch (Exception ex)
+            {
+                await LogToFile($"[VOLUME] ❌ Error saving volume settings: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Volume settings data structure
+        /// </summary>
+        public class VolumeSettings
+        {
+            public float MicrophoneVolume { get; set; } = 100.0f;
+            public float SpeakerVolume { get; set; } = 100.0f;
+            public DateTime LastUpdated { get; set; }
+        }
+
+        #endregion
+
     }
 }
