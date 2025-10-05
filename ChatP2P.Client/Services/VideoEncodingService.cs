@@ -24,7 +24,7 @@ namespace ChatP2P.Client.Services
         private const int TARGET_WIDTH = 640;
         private const int TARGET_HEIGHT = 480;
         private const int TARGET_FPS = 15;
-        private const int TARGET_BITRATE = 500_000; // 500 kbps pour balance qualité/bande passante
+        private const int TARGET_BITRATE = 100_000; // 100 kbps pour streaming UDP efficace
 
         public bool IsInitialized => _isInitialized;
         public VideoCodecsEnum SelectedCodec => _selectedCodec;
@@ -127,27 +127,30 @@ namespace ChatP2P.Client.Services
                     return null;
                 }
 
-                // Check if we have a working video endpoint
-                if (_videoEndPoint != null)
+                // ✅ FIX: Encodage H.264 direct avec FFmpeg
+                try
                 {
-                    try
-                    {
-                        // ✅ RE-ENABLED: Use actual H.264/VP8 encoding via VideoEndPoint
-                        LogEvent?.Invoke($"[VideoEncoder] 🎥 Processing frame with {_selectedCodec}: {rawFrame.Data.Length}B ({rawFrame.Width}x{rawFrame.Height})");
+                    LogEvent?.Invoke($"[VideoEncoder] 🎥 Encoding RGB frame to H.264: {rawFrame.Data.Length}B ({rawFrame.Width}x{rawFrame.Height})");
 
-                        // Note: For now, return raw data since the actual encoding integration is complex
-                        // The VideoEndPoint is initialized and ready, but we'll implement the actual encoding later
-                        LogEvent?.Invoke($"[VideoEncoder] 📊 VideoEndPoint ready, using enhanced raw mode: {rawFrame.Data.Length}B");
-                        EncodedVideoReady?.Invoke(rawFrame.Data);
-                        return rawFrame.Data;
-                    }
-                    catch (Exception encEx)
+                    var h264Data = await EncodeRGBToH264(rawFrame);
+
+                    if (h264Data != null && h264Data.Length > 0)
                     {
-                        LogEvent?.Invoke($"[VideoEncoder] ❌ Processing failed: {encEx.Message}, falling back to raw");
+                        LogEvent?.Invoke($"[VideoEncoder] ✅ H.264 encoding successful: {rawFrame.Data.Length}B → {h264Data.Length}B (compression: {(float)h264Data.Length/rawFrame.Data.Length:P1})");
+                        EncodedVideoReady?.Invoke(h264Data);
+                        return h264Data;
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VideoEncoder] ⚠️ H.264 encoding failed, using raw fallback");
                     }
                 }
+                catch (Exception encEx)
+                {
+                    LogEvent?.Invoke($"[VideoEncoder] ❌ H.264 encoding error: {encEx.Message}, using raw fallback");
+                }
 
-                // Fallback to raw transmission if encoder not available or failed
+                // Fallback to raw transmission if encoder failed
                 LogEvent?.Invoke($"[VideoEncoder] 📊 Fallback raw frame: {rawFrame.Data.Length}B ({rawFrame.Width}x{rawFrame.Height})");
                 EncodedVideoReady?.Invoke(rawFrame.Data);
                 return rawFrame.Data;
@@ -155,6 +158,35 @@ namespace ChatP2P.Client.Services
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[VideoEncoder] ❌ Error processing frame: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Convertir VideoFrame SIPSorcery vers format FFmpeg
+        /// </summary>
+        private FFmpegVideoFrame? ConvertToFFmpegFrame(VideoFrame sipFrame)
+        {
+            try
+            {
+                // Create FFmpeg-compatible frame structure
+                var ffmpegFrame = new FFmpegVideoFrame
+                {
+                    Width = (uint)sipFrame.Width,
+                    Height = (uint)sipFrame.Height,
+                    Sample = sipFrame.Data,
+                    PixelFormat = ConvertPixelFormat(sipFrame.PixelFormat)
+                };
+
+                // Calculate stride (bytes per row) for RGB24
+                ffmpegFrame.Stride = sipFrame.Width * 3; // RGB = 3 bytes per pixel
+
+                LogEvent?.Invoke($"[VideoEncoder] 🔄 Converted SIP frame to FFmpeg: {ffmpegFrame.Width}x{ffmpegFrame.Height}, {ffmpegFrame.PixelFormat}");
+                return ffmpegFrame;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoEncoder] ❌ Frame conversion failed: {ex.Message}");
                 return null;
             }
         }
@@ -171,6 +203,155 @@ namespace ChatP2P.Client.Services
                 VideoPixelFormatsEnum.Bgra => VideoPixelFormatsEnum.Bgra,
                 _ => VideoPixelFormatsEnum.Rgb // Défaut RGB24
             };
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Encoder RGB vers H.264 via FFmpeg direct
+        /// </summary>
+        private async Task<byte[]?> EncodeRGBToH264(VideoFrame rgbFrame)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VideoEncoder] 🎯 Encoding RGB to H.264: {rgbFrame.Data.Length} bytes");
+
+                // Créer fichiers temporaires
+                var tempDir = Path.GetTempPath();
+                var inputFile = Path.Combine(tempDir, $"rgb_frame_{Guid.NewGuid()}.raw");
+                var outputFile = Path.Combine(tempDir, $"h264_frame_{Guid.NewGuid()}.h264");
+
+                try
+                {
+                    // Écrire les données RGB dans un fichier temporaire
+                    await File.WriteAllBytesAsync(inputFile, rgbFrame.Data);
+
+                    // Trouver FFmpeg
+                    var ffmpegPath = GetFFmpegPath();
+                    if (ffmpegPath == null)
+                    {
+                        LogEvent?.Invoke($"[VideoEncoder] ❌ FFmpeg not found for encoding");
+                        return null;
+                    }
+
+                    // Commande ffmpeg pour encoder RGB24 → H.264 avec compression agressive pour streaming UDP
+                    var arguments = $"-f rawvideo -pix_fmt rgb24 -s {rgbFrame.Width}x{rgbFrame.Height} -r {TARGET_FPS} -i \"{inputFile}\" -c:v libx264 -preset ultrafast -tune zerolatency -b:v 100k -maxrate 150k -bufsize 50k -g {TARGET_FPS} -keyint_min 1 -sc_threshold 0 -f h264 \"{outputFile}\" -y";
+
+                    LogEvent?.Invoke($"[VideoEncoder] 🔧 Running: ffmpeg {arguments}");
+
+                    var processResult = await RunFFmpegAsync(ffmpegPath, arguments);
+
+                    if (processResult && File.Exists(outputFile))
+                    {
+                        var h264Data = await File.ReadAllBytesAsync(outputFile);
+
+                        if (h264Data.Length > 0)
+                        {
+                            LogEvent?.Invoke($"[VideoEncoder] ✅ RGB→H.264 encoded successfully: {rgbFrame.Data.Length}B → {h264Data.Length}B");
+                            return h264Data;
+                        }
+                        else
+                        {
+                            LogEvent?.Invoke($"[VideoEncoder] ⚠️ H.264 output file is empty");
+                            return null;
+                        }
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[VideoEncoder] ❌ FFmpeg encoding failed or output file not created");
+                        return null;
+                    }
+                }
+                finally
+                {
+                    // Nettoyer les fichiers temporaires
+                    try
+                    {
+                        if (File.Exists(inputFile)) File.Delete(inputFile);
+                        if (File.Exists(outputFile)) File.Delete(outputFile);
+                    }
+                    catch { /* Ignore cleanup errors */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoEncoder] ❌ Error encoding RGB to H.264: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Trouver le chemin vers ffmpeg.exe
+        /// </summary>
+        private string? GetFFmpegPath()
+        {
+            var possiblePaths = new[]
+            {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ChatP2P", "ffmpeg", "bin", "ffmpeg.exe"),
+                "ffmpeg.exe", // Dans le PATH
+                @"C:\ffmpeg\bin\ffmpeg.exe",
+                @"C:\Program Files\ffmpeg\bin\ffmpeg.exe"
+            };
+
+            foreach (var path in possiblePaths)
+            {
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        return path;
+                    }
+                }
+                catch { /* Ignore access errors */ }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Exécuter FFmpeg avec les arguments donnés
+        /// </summary>
+        private async Task<bool> RunFFmpegAsync(string ffmpegPath, string arguments)
+        {
+            try
+            {
+                using var process = new System.Diagnostics.Process();
+                process.StartInfo.FileName = ffmpegPath;
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+
+                process.Start();
+
+                // Timeout de 3 secondes pour l'encodage (plus rapide que décodage)
+                var completed = await Task.Run(() => process.WaitForExit(3000));
+
+                if (!completed)
+                {
+                    LogEvent?.Invoke($"[VideoEncoder] ⚠️ FFmpeg encoding timeout, killing...");
+                    try { process.Kill(); } catch { }
+                    return false;
+                }
+
+                return process.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoEncoder] ❌ Error running FFmpeg: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Structure pour frame FFmpeg
+        /// </summary>
+        private class FFmpegVideoFrame
+        {
+            public uint Width { get; set; }
+            public uint Height { get; set; }
+            public int Stride { get; set; }
+            public byte[] Sample { get; set; } = Array.Empty<byte>();
+            public VideoPixelFormatsEnum PixelFormat { get; set; }
         }
 
         /// <summary>

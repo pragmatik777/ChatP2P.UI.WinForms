@@ -26,10 +26,13 @@ namespace ChatP2P.Client.Services
         private VOIPRelayClient? _voipRelay;
         private PureAudioRelayClient? _pureAudioRelay; // ✅ ANCIEN: Canal audio pur TCP
         private UDPAudioRelayClient? _udpAudioRelay; // ✅ NOUVEAU: Canal audio UDP temps réel
-        private PureVideoRelayClient? _pureVideoRelay; // ✅ NOUVEAU: Canal vidéo pur (port 8894)
+        private UDPVideoRelayClient? _udpVideoRelay; // ✅ NOUVEAU: Canal vidéo UDP (port 8894)
 
         // ✅ NOUVEAU: Mode caméra (physique ou virtuelle)
         public bool UseVirtualCamera { get; set; } = false; // ✅ DEFAULT: Use real video capture with FFmpeg first
+
+        // ✅ DEBUG: Expose video capture service for diagnostics
+        public SimpleVideoCaptureService VideoCapture => _videoCapture;
 
         // Events pour l'interface utilisateur
         public event Action<string, CallState>? CallStateChanged;
@@ -67,7 +70,7 @@ namespace ChatP2P.Client.Services
             _videoEncoder = new VideoEncodingService(); // ✅ NOUVEAU: Encodeur vidéo professionnel
             _pureAudioRelay = new PureAudioRelayClient(); // ✅ ANCIEN: Canal audio pur TCP
             _udpAudioRelay = new UDPAudioRelayClient(); // ✅ NOUVEAU: Canal audio UDP temps réel
-            _pureVideoRelay = new PureVideoRelayClient(); // ✅ NOUVEAU: Canal vidéo pur
+            _udpVideoRelay = new UDPVideoRelayClient(); // ✅ NOUVEAU: Canal vidéo UDP
 
             // ✅ FIX: Wire les events des services de capture ET VIDÉO
             _videoCapture.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Video] {msg}");
@@ -77,12 +80,13 @@ namespace ChatP2P.Client.Services
             _virtualCamera.EncodedVideoReady += OnEncodedVideoReady; // ✅ NOUVEAU: H.264 direct depuis caméra virtuelle
             _opusStreaming.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Opus] {msg}"); // ✅ OPUS
             _videoEncoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Encoder] {msg}"); // ✅ NOUVEAU
+            _videoEncoder.EncodedVideoReady += OnEncodedVideoReady; // ✅ FIX CRITIQUE: Connecter l'encodeur vidéo
             _pureAudioRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-AUDIO-TCP] {msg}"); // ✅ ANCIEN
             _pureAudioRelay.AudioDataReceived += OnPureAudioReceived; // ✅ ANCIEN
             _udpAudioRelay.LogEvent += (msg) => LogEvent?.Invoke($"[UDP-AUDIO] {msg}"); // ✅ NOUVEAU
             _udpAudioRelay.AudioDataReceived += OnUDPAudioReceived; // ✅ NOUVEAU
-            _pureVideoRelay.LogEvent += (msg) => LogEvent?.Invoke($"[PURE-VIDEO] {msg}"); // ✅ NOUVEAU
-            _pureVideoRelay.VideoDataReceived += OnPureVideoReceived; // ✅ NOUVEAU
+            _udpVideoRelay.LogEvent += (msg) => LogEvent?.Invoke($"[UDP-VIDEO] {msg}"); // ✅ NOUVEAU
+            _udpVideoRelay.VideoDataReceived += OnUDPVideoReceived; // ✅ NOUVEAU
 
             // ✅ OPUS: Initialize streaming service asynchronously
             _ = Task.Run(async () => await InitializeOpusStreamingAsync());
@@ -446,13 +450,23 @@ namespace ChatP2P.Client.Services
                 }
 
                 // ✅ NOUVEAU: Se connecter au relay vidéo pur (port 8894)
-                var videoRelayConnected = await EnsurePureVideoRelayConnectionAsync();
+                var videoRelayConnected = await EnsureUDPVideoRelayConnectionAsync();
                 if (!videoRelayConnected)
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to connect to pure video relay");
                     await EndCallAsync(targetPeer);
                     return false;
                 }
+
+                // ✅ FIX CRITIQUE: Démarrer la session vidéo UDP sur le serveur
+                var sessionStarted = await _udpVideoRelay.StartSessionAsync(targetPeer);
+                if (!sessionStarted)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to start UDP video session with {targetPeer}");
+                    await EndCallAsync(targetPeer);
+                    return false;
+                }
+                LogEvent?.Invoke($"[VOIP-Manager] ✅ UDP video session started with {targetPeer}");
 
                 // Envoyer invitation d'appel vidéo via relay (pas d'offer WebRTC)
                 await SendCallInviteAsync(targetPeer, "video", "relay");
@@ -531,10 +545,21 @@ namespace ChatP2P.Client.Services
 
                     // Se connecter aux relays audio ET vidéo
                     await EnsureRelayConnectionAsync();
-                    var videoRelayConnected = await EnsurePureVideoRelayConnectionAsync();
+                    var videoRelayConnected = await EnsureUDPVideoRelayConnectionAsync();
 
                     if (_voipRelay?.IsConnected == true && videoRelayConnected)
                     {
+                        // ✅ FIX CRITIQUE: Démarrer la session vidéo UDP sur le serveur (côté acceptation)
+                        var sessionStarted = await _udpVideoRelay.StartSessionAsync(fromPeer);
+                        if (!sessionStarted)
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ❌ Failed to start UDP video session when accepting call from {fromPeer}");
+                        }
+                        else
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ✅ UDP video session started when accepting call from {fromPeer}");
+                        }
+
                         // Accepter via le relay
                         var relaySuccess = await _voipRelay.AcceptCallAsync(fromPeer);
                         if (relaySuccess)
@@ -707,14 +732,14 @@ namespace ChatP2P.Client.Services
         /// <summary>
         /// ✅ NOUVEAU: Assurer connexion au relay vidéo pur (port 8894)
         /// </summary>
-        private async Task<bool> EnsurePureVideoRelayConnectionAsync()
+        private async Task<bool> EnsureUDPVideoRelayConnectionAsync()
         {
             try
             {
                 LogEvent?.Invoke($"[VOIP-Manager] 📹 Ensuring pure video relay connection (port 8894)...");
 
                 // Vérifier la connexion existante
-                if (_pureVideoRelay?.IsConnected == true)
+                if (_udpVideoRelay?.IsConnected == true)
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ Pure video relay already connected");
                     return true;
@@ -728,7 +753,7 @@ namespace ChatP2P.Client.Services
                 }
 
                 // Connecter au relay vidéo avec le clientId (display name)
-                var connected = await _pureVideoRelay.ConnectAsync(_clientId, _serverIP, 8894);
+                var connected = await _udpVideoRelay.ConnectAsync(_serverIP, _clientId);
                 if (connected)
                 {
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to pure video relay as {_clientId}");
@@ -999,10 +1024,10 @@ namespace ChatP2P.Client.Services
                 }
 
                 // ✅ NOUVEAU: Se connecter au canal vidéo pur si appel vidéo
-                if (includeVideo && _pureVideoRelay != null && !_pureVideoRelay.IsConnected)
+                if (includeVideo && _udpVideoRelay != null && !_udpVideoRelay.IsConnected)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Trying to connect to pure video relay {serverIP}:8894...");
-                    var videoConnected = await _pureVideoRelay.ConnectAsync(_clientId, serverIP, 8894);
+                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Trying to connect to SIPSorcery video relay {serverIP}:8894...");
+                    var videoConnected = await _udpVideoRelay.ConnectAsync(serverIP, _clientId);
                     if (videoConnected)
                     {
                         LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to pure video relay channel (port 8894)");
@@ -1012,9 +1037,9 @@ namespace ChatP2P.Client.Services
                         LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Failed to connect to pure video relay, using JSON fallback");
                     }
                 }
-                else if (includeVideo && _pureVideoRelay == null)
+                else if (includeVideo && _udpVideoRelay == null)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _pureVideoRelay is null for video call!");
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _udpVideoRelay is null for video call!");
                 }
                 else if (includeVideo)
                 {
@@ -1147,10 +1172,10 @@ namespace ChatP2P.Client.Services
                 }
 
                 // ✅ NOUVEAU: Se connecter au canal vidéo pur pour appels entrants aussi
-                if (_pureVideoRelay != null && !_pureVideoRelay.IsConnected)
+                if (_udpVideoRelay != null && !_udpVideoRelay.IsConnected)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Trying to connect to pure video relay {serverIP}:8894 for incoming call...");
-                    var videoConnected = await _pureVideoRelay.ConnectAsync(_clientId, serverIP, 8894);
+                    LogEvent?.Invoke($"[VOIP-Manager] 📹 Trying to connect to SIPSorcery video relay {serverIP}:8894 for incoming call...");
+                    var videoConnected = await _udpVideoRelay.ConnectAsync(serverIP, _clientId);
                     if (videoConnected)
                     {
                         LogEvent?.Invoke($"[VOIP-Manager] ✅ Connected to pure video relay channel for incoming call (port 8894)");
@@ -1160,9 +1185,9 @@ namespace ChatP2P.Client.Services
                         LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Failed to connect to pure video relay for incoming call, using JSON fallback");
                     }
                 }
-                else if (_pureVideoRelay == null)
+                else if (_udpVideoRelay == null)
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _pureVideoRelay is null for incoming call!");
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ _udpVideoRelay is null for incoming call!");
                 }
                 else
                 {
@@ -1328,6 +1353,7 @@ namespace ChatP2P.Client.Services
                 return "";
             }
         }
+
 
         /// <summary>
         /// ✅ FIX CRITIQUE: Gérer les données audio capturées et les transmettre au relay
@@ -1496,7 +1522,7 @@ namespace ChatP2P.Client.Services
         /// <summary>
         /// ✅ NOUVEAU: Traiter vidéo reçue du canal pur (port 8894) - Performance maximale !
         /// </summary>
-        private void OnPureVideoReceived(byte[] videoData)
+        private void OnUDPVideoReceived(byte[] videoData)
         {
             try
             {
@@ -1524,6 +1550,7 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing pure video: {ex.Message}");
             }
         }
+
 
         /// <summary>
         /// ✅ NOUVEAU: Extraire le nom du peer depuis la session d'appel vidéo active
@@ -1571,13 +1598,35 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Call {kvp.Key} -> {call.PeerName}, Type: {call.CallType}, State: {call.State}");
                 }
 
-                // ✅ ENCODAGE PROFESSIONNEL: Les frames peuvent être encodées par VideoEncodingService
-                // Cette méthode reçoit des frames raw des caméras physiques/virtuelles qui seront transmises en raw
-                // L'encodage H.264/VP8 est maintenant géré directement par VideoEncodingService via OnEncodedVideoReady
+                // ✅ FIX CRITIQUE: Encoder la frame raw AVANT transmission pour éviter les 921KB/frame !
                 byte[]? encodedData = null;
 
-                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Raw video frame from camera - FFmpeg handles encoding separately via OnFFmpegEncodedSample");
-                LogEvent?.Invoke($"[VOIP-Manager] 📊 Video encoder status: initialized={_videoEncoderInitialized}");
+                // Si l'encodeur vidéo est initialisé, encoder la frame en H.264/VP8
+                if (_videoEncoderInitialized && _videoEncoder != null)
+                {
+                    try
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] 🎯 Encoding RGB frame to {_videoEncoder.SelectedCodec} before transmission...");
+                        encodedData = await _videoEncoder.EncodeFrameAsync(frame);
+
+                        if (encodedData != null && encodedData.Length > 0)
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ✅ Frame encoded successfully: {frame.Data.Length} bytes → {encodedData.Length} bytes ({_videoEncoder.SelectedCodec})");
+                        }
+                        else
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Video encoding returned null/empty, using raw fallback");
+                        }
+                    }
+                    catch (Exception encodingEx)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ❌ Video encoding failed: {encodingEx.Message}, using raw fallback");
+                    }
+                }
+                else
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Video encoder not initialized (initialized={_videoEncoderInitialized}), transmitting raw RGB");
+                }
 
                 // Transmettre la frame (encodée ou raw) à tous les peers en appel vidéo actif (Calling ou Connected)
                 var videoCallsFound = 0;
@@ -1646,7 +1695,7 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[VOIP-Manager] 📤 Sending {formatInfo} video data to {peerName}: {videoData.Length} bytes");
 
                 // ✅ NOUVEAU: Debug des connexions relais
-                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: PureVideoRelay connected: {_pureVideoRelay?.IsConnected ?? false}");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: SIPSorceryVideoRelay connected: {_udpVideoRelay?.IsConnected ?? false}");
                 LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: VoipRelay connected: {_voipRelay?.IsConnected ?? false}");
                 LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: WebRTC client available: {_webRtcClient != null}");
 
@@ -1658,13 +1707,13 @@ namespace ChatP2P.Client.Services
                 }
 
                 // ✅ PRIORITÉ: Pure Video Relay (port 8894) - Performance maximale !
-                if (_pureVideoRelay != null && _pureVideoRelay.IsConnected)
+                if (_udpVideoRelay != null && _udpVideoRelay.IsConnected)
                 {
                     // ✅ NOUVEAU: Ajouter header avec métadonnées codec pour décodage côté réception
                     var header = CreateVideoHeader(isEncoded, codec, videoData.Length);
                     var fullPacket = CombineHeaderAndData(header, videoData);
 
-                    await _pureVideoRelay.SendVideoDataAsync(fullPacket);
+                    await _udpVideoRelay.SendVideoDataAsync(peerName, fullPacket);
                     LogEvent?.Invoke($"[VOIP-Manager] ✅ {formatInfo} video sent via PURE relay to {peerName} ({fullPacket.Length} bytes total)");
                 }
                 // Fallback vers VOIP relay JSON pour vidéo
@@ -1820,7 +1869,7 @@ namespace ChatP2P.Client.Services
                 // ❌ DUPLICATE REMOVED: _opusStreaming?.Dispose() already called above
                 _pureAudioRelay?.Dispose(); // ✅ ANCIEN: Nettoyer canal audio pur TCP
                 _udpAudioRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal audio UDP
-                _pureVideoRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal vidéo pur
+                _udpVideoRelay?.Dispose(); // ✅ NOUVEAU: Nettoyer canal vidéo pur
                 _voipRelay?.Disconnect();
 
                 LogEvent?.Invoke("[VOIP-Manager] Service disposed");
@@ -1830,6 +1879,7 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[VOIP-Manager] ❌ Error during dispose: {ex.Message}");
             }
         }
+
     }
 
     /// <summary>

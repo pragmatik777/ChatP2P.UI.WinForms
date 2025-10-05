@@ -385,6 +385,8 @@ namespace ChatP2P.Server
                 {
                     Console.WriteLine(message);
                     LogToFile($"[VIDEO-RELAY] {message}");
+                    // Also log to specialized UDP video log file
+                    _ = Task.Run(async () => await ServerLogHelper.LogToUDPVideoAsync(message));
                 };
                 await _videoRelay.StartAsync();
 

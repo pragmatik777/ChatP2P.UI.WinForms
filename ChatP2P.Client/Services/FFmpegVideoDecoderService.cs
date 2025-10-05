@@ -1,24 +1,24 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
-using FFMediaToolkit;
-using FFMediaToolkit.Decoding;
-using FFMediaToolkit.Graphics;
+using System.Diagnostics;
+using System.Text;
 
 namespace ChatP2P.Client.Services
 {
     /// <summary>
-    /// 🎬 Service de décodage vidéo FFmpeg avec FFMediaToolkit
-    /// Lecture réelle de fichiers vidéo pour streaming via caméra virtuelle
+    /// 🎬 Service de décodage vidéo FFmpeg direct
+    /// Lecture réelle de fichiers vidéo via FFmpeg process pour streaming via caméra virtuelle
     /// </summary>
     public class FFmpegVideoDecoderService : IDisposable
     {
-        private MediaFile? _mediaFile;
         private string? _currentFilePath;
         private bool _isInitialized = false;
         private int _totalFrames = 0;
         private double _frameRate = 30.0;
         private TimeSpan _duration = TimeSpan.Zero;
+        private string? _ffmpegPath;
+        private VideoInfo? _videoInfo;
 
         public event Action<string>? LogEvent;
 
@@ -34,7 +34,7 @@ namespace ChatP2P.Client.Services
         private const int TARGET_HEIGHT = 480;
 
         /// <summary>
-        /// Initialiser FFmpeg et charger un fichier vidéo
+        /// Initialiser FFmpeg direct et analyser un fichier vidéo
         /// </summary>
         public async Task<bool> LoadVideoFileAsync(string filePath)
         {
@@ -49,61 +49,56 @@ namespace ChatP2P.Client.Services
                 // Fermer le fichier précédent si ouvert
                 await CloseVideoAsync();
 
-                LogEvent?.Invoke($"[FFmpegDecoder] 🎬 Loading video file: {Path.GetFileName(filePath)}");
+                LogEvent?.Invoke($"[FFmpegDecoder] 🎬 Loading video file via FFmpeg direct: {Path.GetFileName(filePath)}");
 
-                // Initialiser FFMediaToolkit si pas encore fait
-                if (!_isInitialized)
+                // S'assurer que FFmpeg est disponible
+                _ffmpegPath = await GetFFmpegPathAsync();
+                if (_ffmpegPath == null)
                 {
-                    // FFMediaToolkit utilise automatiquement FFmpeg
-                    LogEvent?.Invoke($"[FFmpegDecoder] 🔧 Initializing FFMediaToolkit...");
-                    _isInitialized = true;
-                }
-
-                // Ouvrir le fichier vidéo
-                _mediaFile = await Task.Run(() => MediaFile.Open(filePath));
-                _currentFilePath = filePath;
-
-                // Récupérer les informations du fichier
-                if (_mediaFile.HasVideo)
-                {
-                    var videoStream = _mediaFile.Video;
-                    _frameRate = videoStream.Info.AvgFrameRate;
-                    _duration = videoStream.Info.Duration;
-                    _totalFrames = (int)(_duration.TotalSeconds * _frameRate);
-
-                    LogEvent?.Invoke($"[FFmpegDecoder] ✅ Video loaded successfully:");
-                    LogEvent?.Invoke($"[FFmpegDecoder] 📊 Resolution: {videoStream.Info.FrameSize.Width}x{videoStream.Info.FrameSize.Height}");
-                    LogEvent?.Invoke($"[FFmpegDecoder] 📊 Frame Rate: {_frameRate:F2} FPS");
-                    LogEvent?.Invoke($"[FFmpegDecoder] 📊 Duration: {_duration:mm\\:ss\\.fff}");
-                    LogEvent?.Invoke($"[FFmpegDecoder] 📊 Total Frames: {_totalFrames}");
-                    LogEvent?.Invoke($"[FFmpegDecoder] 📊 Codec: {videoStream.Info.CodecName}");
-
-                    return true;
-                }
-                else
-                {
-                    LogEvent?.Invoke($"[FFmpegDecoder] ❌ No video stream found in file");
-                    await CloseVideoAsync();
+                    LogEvent?.Invoke($"[FFmpegDecoder] ❌ FFmpeg not found or not installed");
                     return false;
                 }
+
+                // Analyser le fichier vidéo avec ffprobe
+                var videoInfo = await AnalyzeVideoFileAsync(filePath);
+                if (videoInfo == null)
+                {
+                    LogEvent?.Invoke($"[FFmpegDecoder] ❌ Failed to analyze video file");
+                    return false;
+                }
+
+                _currentFilePath = filePath;
+                _videoInfo = videoInfo; // ✅ FIX: Store video info for later use
+                _frameRate = videoInfo.FrameRate;
+                _duration = videoInfo.Duration;
+                _totalFrames = (int)(_duration.TotalSeconds * _frameRate);
+                _isInitialized = true;
+
+                LogEvent?.Invoke($"[FFmpegDecoder] ✅ Video analyzed successfully:");
+                LogEvent?.Invoke($"[FFmpegDecoder] 📊 Resolution: {videoInfo.Width}x{videoInfo.Height}");
+                LogEvent?.Invoke($"[FFmpegDecoder] 📊 Frame Rate: {_frameRate:F2} FPS");
+                LogEvent?.Invoke($"[FFmpegDecoder] 📊 Duration: {_duration:mm\\:ss\\.fff}");
+                LogEvent?.Invoke($"[FFmpegDecoder] 📊 Total Frames: {_totalFrames}");
+                LogEvent?.Invoke($"[FFmpegDecoder] 📊 Codec: {videoInfo.Codec}");
+
+                return true;
             }
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error loading video file: {ex.Message}");
-                LogEvent?.Invoke($"[FFmpegDecoder] 💡 Make sure FFmpeg is properly installed and the file format is supported");
                 await CloseVideoAsync();
                 return false;
             }
         }
 
         /// <summary>
-        /// Lire une frame spécifique du fichier vidéo
+        /// Lire une frame spécifique du fichier vidéo via FFmpeg direct
         /// </summary>
         public async Task<byte[]?> ReadFrameAsync(int frameNumber)
         {
             try
             {
-                if (_mediaFile?.HasVideo != true)
+                if (!_isInitialized || string.IsNullOrEmpty(_currentFilePath))
                 {
                     LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ No video file loaded");
                     return null;
@@ -119,32 +114,16 @@ namespace ChatP2P.Client.Services
                     timeStamp = TimeSpan.FromSeconds((frameNumber % _totalFrames) / _frameRate);
                 }
 
-                // Lire la frame à ce timestamp de manière synchrone
-                var frameResult = await Task.Run(() =>
-                {
-                    try
-                    {
-                        if (_mediaFile.Video.TryGetFrame(timeStamp, out var videoFrame))
-                        {
-                            // Convertir immédiatement dans le thread de lecture
-                            return ConvertFrameToRGB24(videoFrame, TARGET_WIDTH, TARGET_HEIGHT);
-                        }
-                        return null;
-                    }
-                    catch (Exception frameEx)
-                    {
-                        LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ Frame read error for frame {frameNumber}: {frameEx.Message}");
-                        return null;
-                    }
-                });
+                // Extraire la frame via FFmpeg
+                var rgbData = await ExtractFrameAtTimestamp(timeStamp);
 
-                if (frameResult != null)
+                if (rgbData != null && rgbData.Length > 0)
                 {
-                    return frameResult;
+                    return rgbData;
                 }
                 else
                 {
-                    LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ Could not read frame {frameNumber} at {timeStamp:mm\\:ss\\.fff}");
+                    LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ Could not extract frame {frameNumber} at {timeStamp:mm\\:ss\\.fff}");
                     return null;
                 }
             }
@@ -156,52 +135,149 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// Convertir une frame FFMediaToolkit en RGB24 raw bytes
+        /// ✅ NOUVEAU: Analyser un fichier vidéo avec ffprobe
         /// </summary>
-        private byte[] ConvertFrameToRGB24(ImageData frame, int targetWidth, int targetHeight)
+        private async Task<VideoInfo?> AnalyzeVideoFileAsync(string filePath)
         {
             try
             {
-                // Extraire les données de l'ImageData FFMediaToolkit
-                var frameData = frame.Data;
-                var frameWidth = frame.ImageSize.Width;
-                var frameHeight = frame.ImageSize.Height;
-
-                // Créer le buffer de sortie RGB24
-                var rgbBytes = new byte[targetWidth * targetHeight * 3];
-
-                // Calculer les ratios de redimensionnement
-                double scaleX = (double)frameWidth / targetWidth;
-                double scaleY = (double)frameHeight / targetHeight;
-
-                // Remplir le buffer RGB24 en redimensionnant
-                for (int y = 0; y < targetHeight; y++)
+                var ffprobePath = _ffmpegPath?.Replace("ffmpeg.exe", "ffprobe.exe");
+                if (string.IsNullOrEmpty(ffprobePath) || !File.Exists(ffprobePath))
                 {
-                    for (int x = 0; x < targetWidth; x++)
-                    {
-                        // Calculer les coordonnées source
-                        int srcX = Math.Min((int)(x * scaleX), frameWidth - 1);
-                        int srcY = Math.Min((int)(y * scaleY), frameHeight - 1);
-
-                        int dstIndex = (y * targetWidth + x) * 3;
-                        int srcIndex = (srcY * frameWidth + srcX) * 3;
-
-                        // Les données FFMediaToolkit sont en RGB, copier directement
-                        if (srcIndex + 2 < frameData.Length && dstIndex + 2 < rgbBytes.Length)
-                        {
-                            rgbBytes[dstIndex] = frameData[srcIndex];       // R
-                            rgbBytes[dstIndex + 1] = frameData[srcIndex + 1]; // G
-                            rgbBytes[dstIndex + 2] = frameData[srcIndex + 2]; // B
-                        }
-                    }
+                    LogEvent?.Invoke($"[FFmpegDecoder] ❌ ffprobe not found");
+                    return null;
                 }
 
-                return rgbBytes;
+                // Commande ffprobe pour analyser le fichier
+                var arguments = $"-v quiet -print_format json -show_format -show_streams \"{filePath}\"";
+
+                using var process = new Process();
+                process.StartInfo.FileName = ffprobePath;
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+
+                process.Start();
+
+                var output = await process.StandardOutput.ReadToEndAsync();
+                var completed = await Task.Run(() => process.WaitForExit(5000));
+
+                if (!completed || process.ExitCode != 0)
+                {
+                    LogEvent?.Invoke($"[FFmpegDecoder] ❌ ffprobe failed or timeout");
+                    return null;
+                }
+
+                // Parser le JSON de ffprobe (simple parsing)
+                return ParseFFProbeOutput(output);
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error converting frame to RGB24: {ex.Message}");
-                return new byte[targetWidth * targetHeight * 3]; // Retourner frame noire en cas d'erreur
+                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error analyzing video: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Extraire une frame à un timestamp donné via FFmpeg
+        /// </summary>
+        private async Task<byte[]?> ExtractFrameAtTimestamp(TimeSpan timestamp)
+        {
+            try
+            {
+                var tempDir = Path.GetTempPath();
+                var outputFile = Path.Combine(tempDir, $"frame_{Guid.NewGuid()}.raw");
+
+                try
+                {
+                    // ✅ FIX: Force scale to target dimensions for consistent frame size
+                    var width = TARGET_WIDTH;
+                    var height = TARGET_HEIGHT;
+
+                    // Commande ffmpeg pour extraire une frame RGB avec dimensions originales
+                    // ✅ FIX: Force English culture for FFmpeg timestamp format (dot instead of comma)
+                    var timestampStr = timestamp.TotalSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+                    var arguments = $"-ss {timestampStr} -i \"{_currentFilePath}\" -vframes 1 -f rawvideo -pix_fmt rgb24 -s {width}x{height} \"{outputFile}\" -y";
+
+                    LogEvent?.Invoke($"[FFmpegDecoder] 🔧 Running FFmpeg: {_ffmpegPath} {arguments}");
+
+                    using var process = new Process();
+                    process.StartInfo.FileName = _ffmpegPath!;
+                    process.StartInfo.Arguments = arguments;
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.CreateNoWindow = true;
+                    process.StartInfo.RedirectStandardOutput = true;
+                    process.StartInfo.RedirectStandardError = true;
+
+                    var stdoutBuilder = new StringBuilder();
+                    var stderrBuilder = new StringBuilder();
+
+                    process.OutputDataReceived += (s, e) => { if (e.Data != null) stdoutBuilder.AppendLine(e.Data); };
+                    process.ErrorDataReceived += (s, e) => { if (e.Data != null) stderrBuilder.AppendLine(e.Data); };
+
+                    process.Start();
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    var completed = await Task.Run(() => process.WaitForExit(5000));
+
+                    if (!completed)
+                    {
+                        LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ FFmpeg timeout during frame extraction");
+                        try { process.Kill(); } catch { }
+                        return null;
+                    }
+
+                    var stdout = stdoutBuilder.ToString();
+                    var stderr = stderrBuilder.ToString();
+
+                    if (process.ExitCode != 0)
+                    {
+                        LogEvent?.Invoke($"[FFmpegDecoder] ❌ FFmpeg failed with exit code {process.ExitCode}");
+                        LogEvent?.Invoke($"[FFmpegDecoder] ❌ FFmpeg stderr: {stderr}");
+                        return null;
+                    }
+
+                    if (File.Exists(outputFile))
+                    {
+                        var frameData = await File.ReadAllBytesAsync(outputFile);
+                        var expectedSize = width * height * 3;
+
+                        LogEvent?.Invoke($"[FFmpegDecoder] 📊 Frame extracted: {frameData.Length} bytes (expected: {expectedSize} for {width}x{height})");
+
+                        if (frameData.Length > 0)
+                        {
+                            // ✅ Update video dimensions for proper rendering
+                            if (_videoInfo != null)
+                            {
+                                _videoInfo.Width = width;
+                                _videoInfo.Height = height;
+                            }
+                            return frameData;
+                        }
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[FFmpegDecoder] ❌ Output file not created: {outputFile}");
+                    }
+
+                    return null;
+                }
+                finally
+                {
+                    try
+                    {
+                        if (File.Exists(outputFile)) File.Delete(outputFile);
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error extracting frame: {ex.Message}");
+                return null;
             }
         }
 
@@ -212,7 +288,7 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                if (_mediaFile?.HasVideo != true)
+                if (!_isInitialized || string.IsNullOrEmpty(_currentFilePath))
                 {
                     return null;
                 }
@@ -234,17 +310,15 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                if (_mediaFile != null)
-                {
-                    await Task.Run(() => _mediaFile.Dispose());
-                    _mediaFile = null;
-                    LogEvent?.Invoke($"[FFmpegDecoder] 📴 Video file closed");
-                }
+                await Task.CompletedTask; // Pour maintenir l'interface async
 
                 _currentFilePath = null;
                 _totalFrames = 0;
                 _frameRate = 30.0;
                 _duration = TimeSpan.Zero;
+                _isInitialized = false;
+
+                LogEvent?.Invoke($"[FFmpegDecoder] 📴 Video file closed");
             }
             catch (Exception ex)
             {
@@ -253,16 +327,279 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
+        /// ✅ NOUVEAU: Trouver le chemin vers ffmpeg.exe
+        /// </summary>
+        private async Task<string?> GetFFmpegPathAsync()
+        {
+            try
+            {
+                // S'assurer que FFmpeg est installé via FFmpegInstaller
+                var ffmpegAvailable = await FFmpegInstaller.EnsureFFmpegInstalledAsync();
+                if (!ffmpegAvailable)
+                {
+                    return null;
+                }
+
+                // Vérifier les emplacements possibles
+                var possiblePaths = new[]
+                {
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ChatP2P", "ffmpeg", "bin", "ffmpeg.exe"),
+                    "ffmpeg.exe", // Dans le PATH
+                    @"C:\ffmpeg\bin\ffmpeg.exe",
+                    @"C:\Program Files\ffmpeg\bin\ffmpeg.exe"
+                };
+
+                foreach (var path in possiblePaths)
+                {
+                    try
+                    {
+                        if (File.Exists(path))
+                        {
+                            return path;
+                        }
+                    }
+                    catch { /* Ignore access errors */ }
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error finding FFmpeg: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Parser simple de la sortie ffprobe JSON
+        /// </summary>
+        private VideoInfo? ParseFFProbeOutput(string jsonOutput)
+        {
+            try
+            {
+                // Simple parsing sans dépendance JSON complexe
+                // Rechercher les informations vidéo de base
+                var info = new VideoInfo();
+
+                // Extraire width/height
+                var widthIndex = jsonOutput.IndexOf("\"width\":");
+                var heightIndex = jsonOutput.IndexOf("\"height\":");
+                var durationIndex = jsonOutput.IndexOf("\"duration\":");
+                var frameRateIndex = jsonOutput.IndexOf("\"r_frame_rate\":");
+                var codecIndex = jsonOutput.IndexOf("\"codec_name\":");
+
+                if (widthIndex > 0 && heightIndex > 0)
+                {
+                    var widthEnd = jsonOutput.IndexOf(',', widthIndex);
+                    var heightEnd = jsonOutput.IndexOf(',', heightIndex);
+
+                    if (int.TryParse(jsonOutput.Substring(widthIndex + 8, widthEnd - widthIndex - 8).Trim(), out int width))
+                        info.Width = width;
+
+                    if (int.TryParse(jsonOutput.Substring(heightIndex + 9, heightEnd - heightIndex - 9).Trim(), out int height))
+                        info.Height = height;
+                }
+
+                if (durationIndex > 0)
+                {
+                    var durationStart = jsonOutput.IndexOf('"', durationIndex + 11) + 1;
+                    var durationEnd = jsonOutput.IndexOf('"', durationStart);
+
+                    if (double.TryParse(jsonOutput.Substring(durationStart, durationEnd - durationStart), out double duration))
+                        info.Duration = TimeSpan.FromSeconds(duration);
+                }
+
+                if (frameRateIndex > 0)
+                {
+                    var rateStart = jsonOutput.IndexOf('"', frameRateIndex + 15) + 1;
+                    var rateEnd = jsonOutput.IndexOf('"', rateStart);
+                    var rateStr = jsonOutput.Substring(rateStart, rateEnd - rateStart);
+
+                    // Parse "25/1" format
+                    if (rateStr.Contains('/'))
+                    {
+                        var parts = rateStr.Split('/');
+                        if (parts.Length == 2 && double.TryParse(parts[0], out double num) && double.TryParse(parts[1], out double den) && den > 0)
+                            info.FrameRate = num / den;
+                    }
+                    else if (double.TryParse(rateStr, out double rate))
+                    {
+                        info.FrameRate = rate;
+                    }
+                }
+
+                if (codecIndex > 0)
+                {
+                    var codecStart = jsonOutput.IndexOf('"', codecIndex + 13) + 1;
+                    var codecEnd = jsonOutput.IndexOf('"', codecStart);
+                    info.Codec = jsonOutput.Substring(codecStart, codecEnd - codecStart);
+                }
+
+                // Valeurs par défaut si parsing échoue
+                if (info.Width == 0) info.Width = 640;
+                if (info.Height == 0) info.Height = 480;
+                if (info.FrameRate == 0) info.FrameRate = 25.0;
+                if (info.Duration == TimeSpan.Zero) info.Duration = TimeSpan.FromMinutes(1);
+                if (string.IsNullOrEmpty(info.Codec)) info.Codec = "unknown";
+
+                return info;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error parsing ffprobe output: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NOUVEAU: Décoder des données H.264 brutes en RGB via FFmpeg direct
+        /// </summary>
+        public async Task<byte[]?> DecodeH264FrameAsync(byte[] h264Data)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[FFmpegDecoder] 🎯 Decoding H.264 frame: {h264Data.Length} bytes");
+
+                // Créer un fichier temporaire pour la frame H.264
+                var tempDir = Path.GetTempPath();
+                var inputFile = Path.Combine(tempDir, $"h264_frame_{Guid.NewGuid()}.h264");
+                var outputFile = Path.Combine(tempDir, $"rgb_frame_{Guid.NewGuid()}.raw");
+
+                try
+                {
+                    // Écrire les données H.264 dans un fichier temporaire
+                    await File.WriteAllBytesAsync(inputFile, h264Data);
+
+                    // Utiliser ffmpeg.exe directement pour décoder
+                    var ffmpegPath = GetFFmpegPath();
+                    if (ffmpegPath == null)
+                    {
+                        LogEvent?.Invoke($"[FFmpegDecoder] ❌ FFmpeg not found");
+                        return null;
+                    }
+
+                    // Commande ffmpeg pour décoder H.264 → RGB24
+                    var arguments = $"-f h264 -i \"{inputFile}\" -f rawvideo -pix_fmt rgb24 -s {TARGET_WIDTH}x{TARGET_HEIGHT} \"{outputFile}\" -y";
+
+                    LogEvent?.Invoke($"[FFmpegDecoder] 🔧 Running: ffmpeg {arguments}");
+
+                    var processResult = await RunFFmpegAsync(ffmpegPath, arguments);
+
+                    if (processResult && File.Exists(outputFile))
+                    {
+                        var rgbData = await File.ReadAllBytesAsync(outputFile);
+                        var expectedSize = TARGET_WIDTH * TARGET_HEIGHT * 3;
+
+                        if (rgbData.Length == expectedSize)
+                        {
+                            LogEvent?.Invoke($"[FFmpegDecoder] ✅ H.264 decoded successfully: {h264Data.Length}B → {rgbData.Length}B RGB");
+                            return rgbData;
+                        }
+                        else
+                        {
+                            LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ Unexpected RGB size: {rgbData.Length}B, expected {expectedSize}B");
+                            return null;
+                        }
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[FFmpegDecoder] ❌ FFmpeg decoding failed or output file not created");
+                        return null;
+                    }
+                }
+                finally
+                {
+                    // Nettoyer les fichiers temporaires
+                    try
+                    {
+                        if (File.Exists(inputFile)) File.Delete(inputFile);
+                        if (File.Exists(outputFile)) File.Delete(outputFile);
+                    }
+                    catch { /* Ignore cleanup errors */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error decoding H.264 frame: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Trouver le chemin vers ffmpeg.exe
+        /// </summary>
+        private string? GetFFmpegPath()
+        {
+            // Vérifier plusieurs emplacements possibles
+            var possiblePaths = new[]
+            {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ChatP2P", "ffmpeg", "bin", "ffmpeg.exe"),
+                "ffmpeg.exe", // Dans le PATH
+                @"C:\ffmpeg\bin\ffmpeg.exe",
+                @"C:\Program Files\ffmpeg\bin\ffmpeg.exe"
+            };
+
+            foreach (var path in possiblePaths)
+            {
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        return path;
+                    }
+                }
+                catch { /* Ignore access errors */ }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Exécuter FFmpeg avec les arguments donnés
+        /// </summary>
+        private async Task<bool> RunFFmpegAsync(string ffmpegPath, string arguments)
+        {
+            try
+            {
+                using var process = new System.Diagnostics.Process();
+                process.StartInfo.FileName = ffmpegPath;
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+
+                process.Start();
+
+                // Timeout de 5 secondes pour éviter les blocages
+                var completed = await Task.Run(() => process.WaitForExit(5000));
+
+                if (!completed)
+                {
+                    LogEvent?.Invoke($"[FFmpegDecoder] ⚠️ FFmpeg process timeout, killing...");
+                    try { process.Kill(); } catch { }
+                    return false;
+                }
+
+                return process.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error running FFmpeg: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Obtenir les informations du fichier vidéo
         /// </summary>
         public string GetVideoInfo()
         {
-            if (_mediaFile?.HasVideo == true)
+            if (_isInitialized && !string.IsNullOrEmpty(_currentFilePath))
             {
-                var video = _mediaFile.Video.Info;
-                return $"Resolution: {video.FrameSize.Width}x{video.FrameSize.Height}, " +
+                return $"File: {Path.GetFileName(_currentFilePath)}, " +
                        $"FPS: {_frameRate:F2}, Duration: {_duration:mm\\:ss}, " +
-                       $"Codec: {video.CodecName}, Frames: {_totalFrames}";
+                       $"Frames: {_totalFrames}";
             }
             return "No video loaded";
         }
@@ -279,5 +616,17 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[FFmpegDecoder] ❌ Error during dispose: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// ✅ NOUVEAU: Structure pour stocker les informations vidéo analysées par ffprobe
+    /// </summary>
+    internal class VideoInfo
+    {
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public double FrameRate { get; set; }
+        public TimeSpan Duration { get; set; }
+        public string Codec { get; set; } = "";
     }
 }

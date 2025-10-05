@@ -2,7 +2,8 @@
 
   <ItemGroup>
     <!-- ✅ REMOVED: VB.NET ChatP2P.Crypto reference - using pure C# CryptoService now -->
-    <PackageReference Include="SIPSorcery" Version="8.0.23" />
+    <PackageReference Include="SIPSorcery" Version="6.0.11" />
+    <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.7" />
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.119" />
   </ItemGroup>
 
