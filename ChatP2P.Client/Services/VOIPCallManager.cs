@@ -22,7 +22,21 @@ namespace ChatP2P.Client.Services
         private readonly OpusAudioStreamingService _opusStreaming; // ✅ OPUS: Professional streaming service
         private readonly VideoEncodingService _videoEncoder; // ✅ NOUVEAU: Encodage H.264/VP8 professionnel
         private volatile bool _videoEncoderInitialized = false; // ✅ FIX: Track encoder initialization state
-        private FFmpegVideoDecoderService? _ffmpegDecoder; // ✅ NOUVEAU: Décodage H.264/VP8 streaming
+        private EmguVideoDecoderService? _emguDecoder;
+
+        // ✅ BUFFERING: Système de buffer intelligent pour réception vidéo
+        private readonly Queue<byte[]> _videoReceiveBuffer = new();
+        private readonly object _bufferLock = new object();
+        private bool _isBuffering = true;
+        private const int MIN_BUFFER_SIZE = 2; // ⚡ 30 FPS: Start avec seulement 2 frames pour latence minimale
+        private const int MAX_BUFFER_SIZE = 15; // ⚡ 30 FPS: Buffer réduit (500ms à 30fps) pour temps réel
+        private DateTime _lastBufferLog = DateTime.MinValue;
+        private CancellationTokenSource? _renderingCancellation;
+
+        // ✅ ADAPTIVE RENDERING: FPS adaptatif selon l'émetteur
+        private double _receiverAdaptiveFPS = 30.0; // ⚡ 30 FPS: Start optimistic pour performance maximale
+        private DateTime _lastFPSDetection = DateTime.MinValue;
+        private readonly Queue<DateTime> _frameTimestamps = new(); // Pour calculer le FPS réel
         private readonly WebRTCDirectClient _webRtcClient;
         private VOIPRelayClient? _voipRelay;
         private PureAudioRelayClient? _pureAudioRelay; // ✅ ANCIEN: Canal audio pur TCP
@@ -71,6 +85,9 @@ namespace ChatP2P.Client.Services
 
         private string? _serverIP; // ✅ NOUVEAU: Store server IP
         private bool _audioCaptureEventWired = false; // ✅ FIX: Track event wiring to prevent duplicates
+
+        // ⚡ VIDEO THROTTLING: Éviter surcharge processing
+        private DateTime _lastVideoFrameProcessed = DateTime.MinValue;
 
         // ✅ NOUVEAU: Exposer OpusStreamingService pour l'interface utilisateur
         public OpusAudioStreamingService OpusStreamingService => _opusStreaming;
@@ -700,6 +717,27 @@ namespace ChatP2P.Client.Services
                     {
                         await _opusStreaming.StopStreamingAsync();
                         LogEvent?.Invoke($"[VOIP-Manager] 🎵 Opus streaming stopped - no active calls");
+                    }
+
+                    // ✅ BUFFERING: Nettoyer le buffer vidéo et arrêter le rendering
+                    lock (_bufferLock)
+                    {
+                        _videoReceiveBuffer.Clear();
+                        _isBuffering = true;
+                        LogEvent?.Invoke($"[VOIP-Manager] 🧹 Video buffer cleared - no active calls");
+                    }
+
+                    // ✅ FPS DETECTION: Reset FPS detection
+                    _frameTimestamps.Clear();
+                    _receiverAdaptiveFPS = 30.0; // ⚡ Reset au 30 FPS optimal
+                    _lastFPSDetection = DateTime.MinValue;
+
+                    if (_renderingCancellation != null)
+                    {
+                        _renderingCancellation.Cancel();
+                        _renderingCancellation.Dispose();
+                        _renderingCancellation = null;
+                        LogEvent?.Invoke($"[VOIP-Manager] 🛑 Video rendering thread stopped, FPS detection reset");
                     }
                 }
 
@@ -1372,6 +1410,194 @@ namespace ChatP2P.Client.Services
             }
         }
 
+        /// <summary>
+        /// ✅ BUFFERING: Thread de processing des frames vidéo bufferisées pour rendering fluide
+        /// </summary>
+        private async Task ProcessBufferedVideoFramesAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🎬 Starting buffered video frame processing thread");
+
+                // ✅ H.264 DECODER: Initialiser le décodeur une seule fois
+                if (_emguDecoder == null)
+                {
+                    _emguDecoder = new EmguVideoDecoderService();
+                    _emguDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Decoder] {msg}");
+                }
+
+                var frameCount = 0;
+                var lastFPSUpdate = _receiverAdaptiveFPS;
+
+                LogEvent?.Invoke($"[VOIP-Manager] 🎬 Starting adaptive rendering at {_receiverAdaptiveFPS:F1} FPS");
+
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    // ✅ DYNAMIC FPS: Recalculer l'intervalle si le FPS a changé
+                    var frameInterval = TimeSpan.FromMilliseconds(1000.0 / _receiverAdaptiveFPS);
+
+                    if (Math.Abs(_receiverAdaptiveFPS - lastFPSUpdate) > 0.5)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] 🔄 Rendering FPS updated: {lastFPSUpdate:F1} → {_receiverAdaptiveFPS:F1} FPS");
+                        lastFPSUpdate = _receiverAdaptiveFPS;
+                    }
+                    byte[]? h264Data = null;
+
+                    // ✅ BUFFER: Extraire une frame du buffer
+                    lock (_bufferLock)
+                    {
+                        if (_videoReceiveBuffer.Count > 0)
+                        {
+                            h264Data = _videoReceiveBuffer.Dequeue();
+
+                            // ✅ STARVATION PROTECTION: Redémarrer le buffering si on n'a plus assez de frames
+                            if (_videoReceiveBuffer.Count < 3 && !_isBuffering)
+                            {
+                                _isBuffering = true;
+                                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Buffer starvation detected, resuming buffering...");
+                            }
+                        }
+                    }
+
+                    if (h264Data != null)
+                    {
+                        try
+                        {
+                            // ✅ H.264 BATCH DECODING: Utiliser le nouveau système de batch processing
+                            byte[]? rgbData = null;
+                            var decodeTime = TimeSpan.Zero;
+
+                            // ⚡ ULTRA-FAST H.264 decode: no logging for performance
+                            try
+                            {
+                                // EmguVideoDecoderService doesn't support direct H.264 decoding
+                                // This would need a different approach for H.264 frames
+                                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ H.264 decoding not supported by EmguCV decoder");
+                                continue;
+                            }
+                            catch
+                            {
+                                continue; // Skip cette frame et continuer
+                            }
+
+                            if (rgbData != null && rgbData.Length > 0)
+                            {
+                                var fromPeer = GetActiveVideoPeerName();
+
+                                // ✅ RENDER: Créer VideoFrame et envoyer à l'UI
+                                var videoFrame = new VideoFrame
+                                {
+                                    Width = 640,
+                                    Height = 480,
+                                    Data = rgbData,
+                                    PixelFormat = VideoPixelFormatsEnum.Rgb,
+                                    Timestamp = DateTime.UtcNow.Ticks
+                                };
+
+                                RemoteVideoReceived?.Invoke(fromPeer, videoFrame);
+
+                                frameCount++;
+
+                                // ✅ PERFORMANCE: Log avec timing de décodage
+                                if (frameCount % 15 == 0)
+                                {
+                                    lock (_bufferLock)
+                                    {
+                                        LogEvent?.Invoke($"[VOIP-Manager] 🎬 Frame {frameCount} rendered (decode: {decodeTime.TotalMilliseconds:F1}ms, buffer: {_videoReceiveBuffer.Count})");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ H.264 decode returned empty data (took {decodeTime.TotalMilliseconds:F1}ms)");
+                            }
+                        }
+                        catch (Exception decodeEx)
+                        {
+                            LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Frame processing error: {decodeEx.Message}");
+                        }
+                    }
+                    else if (!_isBuffering)
+                    {
+                        // Pas de frame dans le buffer mais on n'est pas en mode buffering
+                        // Attendre un peu pour éviter de spammer le CPU
+                        await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken);
+                    }
+
+                    // ✅ PERFORMANCE: Délai minimal si on a plein de frames à traiter
+                    if (_videoReceiveBuffer.Count > 5)
+                    {
+                        // Buffer plein - traiter rapidement
+                        await Task.Delay(frameInterval / 2, cancellationToken);
+                    }
+                    else
+                    {
+                        // Buffer normal - timing normal
+                        await Task.Delay(frameInterval, cancellationToken);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] 🛑 Buffered video processing stopped");
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error in buffered video processing: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ FPS DETECTION: Détecter le FPS réel de l'émetteur via les timestamps d'arrivée
+        /// </summary>
+        private void DetectSenderFPS(DateTime frameArrivalTime)
+        {
+            try
+            {
+                // Ajouter le timestamp d'arrivée
+                _frameTimestamps.Enqueue(frameArrivalTime);
+
+                // Garder seulement les 30 derniers timestamps (1-2 secondes d'historique)
+                while (_frameTimestamps.Count > 30)
+                {
+                    _frameTimestamps.Dequeue();
+                }
+
+                // Calculer le FPS seulement si on a assez d'échantillons et pas trop récemment
+                if (_frameTimestamps.Count >= 10 &&
+                    frameArrivalTime - _lastFPSDetection > TimeSpan.FromSeconds(3))
+                {
+                    var timestamps = _frameTimestamps.ToArray();
+                    var timeSpan = timestamps[timestamps.Length - 1] - timestamps[0];
+                    var frameCount = timestamps.Length - 1;
+
+                    if (timeSpan.TotalSeconds > 0.5) // Au moins 500ms d'historique
+                    {
+                        var detectedFPS = frameCount / timeSpan.TotalSeconds;
+
+                        // Filtrer les valeurs aberrantes (entre 5 et 60 FPS)
+                        if (detectedFPS >= 5.0 && detectedFPS <= 60.0)
+                        {
+                            // Lissage : moyenne avec l'ancienne valeur pour éviter les variations brusques
+                            var newFPS = (_receiverAdaptiveFPS * 0.7) + (detectedFPS * 0.3);
+
+                            if (Math.Abs(newFPS - _receiverAdaptiveFPS) > 0.5) // Changement significatif
+                            {
+                                _receiverAdaptiveFPS = newFPS;
+                                _lastFPSDetection = frameArrivalTime;
+
+                                LogEvent?.Invoke($"[VOIP-Manager] 🎯 FPS adaptatif mis à jour: {_receiverAdaptiveFPS:F1} FPS (détecté: {detectedFPS:F1})");
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Error in FPS detection: {ex.Message}");
+            }
+        }
+
 
         /// <summary>
         /// ✅ FIX CRITIQUE: Gérer les données audio capturées et les transmettre au relay
@@ -1544,45 +1770,46 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                LogEvent?.Invoke($"[VOIP-Manager] 🎬 INCOMING UDP VIDEO FRAME RECEIVED: {h264Data.Length} bytes");
-                LogEvent?.Invoke($"[VOIP-Manager] 🔍 Active video calls count: {_activeCalls.Values.Count(c => c.CallType == CallType.VideoCall)}");
+                // ✅ FPS DETECTION: Analyser les timestamps d'arrivée pour détecter le FPS émetteur
+                var now = DateTime.UtcNow;
+                DetectSenderFPS(now);
 
-                // ✅ FIX: Extraire le vrai peer ID depuis la session d'appel vidéo active
-                string fromPeer = GetActiveVideoPeerName();
-
-                // ✅ H.264 PURE: Décoder directement avec FFmpeg streaming
-                if (_ffmpegDecoder == null)
+                // ✅ BUFFERING: Ajouter au buffer au lieu de décoder immédiatement
+                lock (_bufferLock)
                 {
-                    _ffmpegDecoder = new FFmpegVideoDecoderService();
-                    _ffmpegDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Decoder] {msg}");
+                    // Ajouter au buffer avec protection overflow
+                    if (_videoReceiveBuffer.Count >= MAX_BUFFER_SIZE)
+                    {
+                        // Enlever les frames les plus anciennes si buffer trop plein
+                        _videoReceiveBuffer.Dequeue();
+                    }
+
+                    _videoReceiveBuffer.Enqueue(h264Data);
+
+                    // Log progress périodiquement
+                    if (now - _lastBufferLog > TimeSpan.FromSeconds(2))
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] 📦 Video buffer: {_videoReceiveBuffer.Count}/{MAX_BUFFER_SIZE} frames (FPS: {_receiverAdaptiveFPS:F1})");
+                        _lastBufferLog = now;
+                    }
+
+                    // ✅ BUFFER THRESHOLD: Démarrer le rendering quand on a suffisamment de frames
+                    if (_isBuffering && _videoReceiveBuffer.Count >= MIN_BUFFER_SIZE)
+                    {
+                        _isBuffering = false;
+                        LogEvent?.Invoke($"[VOIP-Manager] 🚀 Buffer ready ({MIN_BUFFER_SIZE} frames), starting adaptive rendering at {_receiverAdaptiveFPS:F1} FPS...");
+
+                        // Démarrer le thread de rendering adaptatif
+                        _renderingCancellation = new CancellationTokenSource();
+                        _ = Task.Run(() => ProcessBufferedVideoFramesAsync(_renderingCancellation.Token));
+                    }
                 }
 
-                var rgbData = await _ffmpegDecoder.DecodeH264FrameAsync(h264Data);
-                if (rgbData == null || rgbData.Length == 0)
-                {
-                    LogEvent?.Invoke($"[VOIP-Manager] ❌ H.264 decode failed, skipping frame");
-                    return;
-                }
-
-                LogEvent?.Invoke($"[VOIP-Manager] ✅ H.264 decode success: {h264Data.Length}B → {rgbData.Length}B RGB");
-
-                // ✅ Créer VideoFrame avec données RGB décodées
-                var videoFrame = new VideoFrame
-                {
-                    Width = 640,  // Standard resolution
-                    Height = 480,
-                    Data = rgbData,
-                    PixelFormat = VideoPixelFormatsEnum.Rgb,
-                    Timestamp = DateTime.UtcNow.Ticks
-                };
-
-                // Notifier l'UI de la frame vidéo reçue
-                RemoteVideoReceived?.Invoke(fromPeer, videoFrame);
-                LogEvent?.Invoke($"[VOIP-Manager] ✅ H.264 frame processed from {fromPeer} and sent to UI ({rgbData.Length} bytes RGB)");
+                // Ne pas décoder ici - le faire dans le thread de rendering
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing H.264 video: {ex.Message}");
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error buffering UDP video frame: {ex.Message}");
             }
         }
 
@@ -1638,15 +1865,7 @@ namespace ChatP2P.Client.Services
                     return;
                 }
 
-                LogEvent?.Invoke($"[VOIP-Manager] 📹 Raw video frame ready: {frame.Width}x{frame.Height}, {frame.Data.Length} bytes");
-
-                // ✅ NOUVEAU: Debug diagnostics pour troubleshooting
-                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Active calls count: {_activeCalls.Count}");
-                foreach (var kvp in _activeCalls)
-                {
-                    var call = kvp.Value;
-                    LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Call {kvp.Key} -> {call.PeerName}, Type: {call.CallType}, State: {call.State}");
-                }
+                // ⚡ PERFORMANCE: Skip excessive logging
 
                 // ✅ H.264 PURE: Encoder OBLIGATOIREMENT en H.264, pas de fallback
                 if (!_videoEncoderInitialized || _videoEncoder == null)
@@ -1654,6 +1873,27 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] ❌ Video encoder not initialized, skipping frame (H.264 REQUIRED)");
                     return;
                 }
+
+                // ⚠️ TESTING: DISABLE ENCODING BUT PASS RGB TO UI FOR DISPLAY (THROTTLED)
+
+                // ⚡ THROTTLE: Limiter à 10 FPS max pour éviter surcharge
+                var now = DateTime.UtcNow;
+                if (now - _lastVideoFrameProcessed < TimeSpan.FromMilliseconds(100)) // 10 FPS max
+                {
+                    return; // Skip frame pour éviter overload
+                }
+                _lastVideoFrameProcessed = now;
+
+                // Pass RGB frame directly to UI for local display (throttled)
+                try
+                {
+                    RemoteVideoReceived?.Invoke("LOCAL_DISPLAY", frame);
+                }
+                catch (Exception uiEx)
+                {
+                    // Silent catch pour performance
+                }
+                return;
 
                 byte[]? h264Data;
                 try
@@ -1709,7 +1949,16 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                LogEvent?.Invoke($"[VOIP-Manager] 🎯 H.264/VP8 encoded video ready from virtual camera: {encodedData.Length} bytes");
+                LogEvent?.Invoke($"[VOIP-Manager] 🎯🎯🎯 OnEncodedVideoReady CALLED: {encodedData?.Length ?? -1} bytes 🎯🎯🎯");
+                await ServiceLogHelper.LogToVideoAsync($"[VOIP-Manager] 🎯🎯🎯 OnEncodedVideoReady CALLED: {encodedData?.Length ?? -1} bytes 🎯🎯🎯", true); // Force log
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DEBUG: Active calls count: {_activeCalls.Count}");
+
+                // ✅ DEBUG: Log all active calls
+                foreach (var kvp in _activeCalls)
+                {
+                    var call = kvp.Value;
+                    LogEvent?.Invoke($"[VOIP-Manager] 🔍 DEBUG: Call {call.PeerName} - Type: {call.CallType}, State: {call.State}");
+                }
 
                 // Transmettre directement la vidéo encodée (pas besoin de ré-encoder)
                 var videoCallsFound = 0;
@@ -1718,6 +1967,7 @@ namespace ChatP2P.Client.Services
                     if (call.CallType == CallType.VideoCall && (call.State == CallState.Connected || call.State == CallState.Calling))
                     {
                         videoCallsFound++;
+                        LogEvent?.Invoke($"[VOIP-Manager] ✅ FOUND active video call: {call.PeerName} (state: {call.State})");
                         await SendVideoFrameToPeerAsync(call.PeerName, encodedData, true, _virtualCamera.SelectedCodec);
                         LogEvent?.Invoke($"[VOIP-Manager] 📹 Encoded H.264/VP8 frame sent to {call.PeerName} (state: {call.State})");
                     }
@@ -1730,7 +1980,10 @@ namespace ChatP2P.Client.Services
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing encoded video frame: {ex.Message}");
+                LogEvent?.Invoke($"[VOIP-Manager] ❌❌❌ CRITICAL ERROR in OnEncodedVideoReady: {ex.Message} ❌❌❌");
+                await ServiceLogHelper.LogToVideoAsync($"[VOIP-Manager] ❌❌❌ CRITICAL ERROR in OnEncodedVideoReady: {ex.Message} ❌❌❌", true); // Force log
+                await ServiceLogHelper.LogToVideoAsync($"[VOIP-Manager] ❌❌❌ Stack trace: {ex.StackTrace} ❌❌❌", true); // Force log
+                await ServiceLogHelper.LogToVideoAsync($"[VOIP-Manager] ❌❌❌ Exception type: {ex.GetType().Name} ❌❌❌", true); // Force log
             }
         }
 

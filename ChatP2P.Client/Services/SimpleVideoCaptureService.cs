@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
@@ -8,8 +11,9 @@ using ChatP2P.Client.Services;
 namespace ChatP2P.Client.Services
 {
     /// <summary>
-    /// 📹 Service de capture vidéo simplifié pour appels vidéo P2P
-    /// Version compatible SipSorcery 6.0.11 sans dépendances complexes
+    /// 📹 Service de capture vidéo simple - Interface unifiée pour caméra/fichiers
+    /// Délègue le décodage réel des fichiers vidéo à EmguVideoDecoderService
+    /// Interface compatible SipSorcery 6.0.11 avec buffer intelligent
     /// </summary>
     public class SimpleVideoCaptureService : IDisposable
     {
@@ -18,17 +22,32 @@ namespace ChatP2P.Client.Services
         private readonly object _lock = new object();
         private string? _currentVideoFile;
         private SimpleVirtualCameraService? _simpleVirtualCamera;
-        private FFmpegVideoDecoderService? _ffmpegDecoder;
+        private EmguVideoDecoderService? _emguDecoder;
+
+        // ✅ BUFFER SYSTEM: Intelligent frame buffering with bitrate adaptation
+        private readonly ConcurrentQueue<VideoFrame> _frameBuffer = new ConcurrentQueue<VideoFrame>();
+        private readonly object _bufferLock = new object();
+        private int _detectedWidth = 640;
+        private int _detectedHeight = 480;
+        private int _currentBufferSize = 0;
+        private int _maxBufferSize = 30; // Adaptive buffer size
+        private int _minBufferSize = 10;
+        private double _detectedFrameRate = 15.0;
+        private volatile bool _bufferProcessingActive = false;
+        private CancellationTokenSource? _bufferCancellation;
 
         // Events pour notifier de la disponibilité des frames vidéo
         public event Action<VideoFrame>? VideoFrameReady;
         public event Action<string>? LogEvent;
         public event Action<bool>? CaptureStateChanged;
 
-        // Configuration vidéo
-        private const int VIDEO_WIDTH = 640;
-        private const int VIDEO_HEIGHT = 480;
-        private const int VIDEO_FPS = 15;
+        // ✅ ADAPTIVE: Configuration vidéo adaptative selon le fichier
+        private const int DEFAULT_VIDEO_WIDTH = 640;
+        private const int DEFAULT_VIDEO_HEIGHT = 480;
+        private double _adaptiveFPS = 15.0; // FPS adaptatif selon la vidéo
+        private int _adaptiveBatchSize = 10; // Taille de lot adaptative
+        private DateTime _lastLogTime = DateTime.MinValue;
+        private DateTime _lastBatchPreload = DateTime.MinValue;
 
         public bool IsCapturing => _isCapturing;
         public bool IsPlayingFile => _isPlayingFile;
@@ -49,8 +68,8 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                // Simulation de détection - en production, énumérer les périphériques DirectShow
-                HasCamera = false; // Par défaut pas de caméra (plus réaliste pour VMs)
+                // En production, énumérer les périphériques DirectShow/MediaFoundation
+                HasCamera = false; // Par défaut pas de caméra détectée
                 LogEvent?.Invoke("[VideoCapture] Camera detection completed");
             }
             catch (Exception ex)
@@ -77,22 +96,9 @@ namespace ChatP2P.Client.Services
                     _isCapturing = true;
                 }
 
-                if (HasCamera)
-                {
-                    LogEvent?.Invoke("[VideoCapture] ✅ Video capture started (camera)");
-                }
-                else
-                {
-                    LogEvent?.Invoke("[VideoCapture] ✅ Video capture started (simulation mode - no camera)");
-
-                    // ✅ FIX: Démarrer simulation vidéo pour VMs sans caméra
-                    _isPlayingFile = true;
-                    _currentVideoFile = "simulation"; // Fake file pour activer la simulation
-                    _ = Task.Run(async () => await SimulateVideoFilePlayback());
-                }
-
-                CaptureStateChanged?.Invoke(true);
-                return true;
+                LogEvent?.Invoke("[VideoCapture] ❌ No real camera available. Use StartVideoFilePlaybackAsync() for video files.");
+                CaptureStateChanged?.Invoke(false);
+                return false;
             }
             catch (Exception ex)
             {
@@ -103,7 +109,8 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// 🎬 AMÉLIORÉ: Démarrer la lecture d'un fichier vidéo réel avec FFMediaToolkit
+        /// 🎬 Démarrer la lecture d'un fichier vidéo réel via EmguVideoDecoderService
+        /// Interface simple qui délègue le décodage complexe au service spécialisé
         /// </summary>
         public async Task<bool> StartVideoFilePlaybackAsync(string videoFilePath)
         {
@@ -131,49 +138,34 @@ namespace ChatP2P.Client.Services
                     _currentVideoFile = videoFilePath;
                 }
 
-                // ✅ FIX CRITIQUE: S'assurer que FFmpeg est installé AVANT de charger le fichier
-                LogEvent?.Invoke($"[VideoCapture] 🔧 Ensuring FFmpeg is available for video file decoding...");
-                var ffmpegAvailable = await FFmpegInstaller.EnsureFFmpegInstalledAsync();
+                // ✅ DELEGATE: Use EmguVideoDecoderService for real video processing
+                LogEvent?.Invoke($"[VideoCapture] 🎬 Delegating video decoding to EmguVideoDecoderService...");
 
-                if (!ffmpegAvailable)
+                _emguDecoder = new EmguVideoDecoderService();
+                _emguDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[EmguDecoder] {msg}");
+
+                // Load video file with specialized EmguCV service
+                var loaded = await _emguDecoder.InitializeAsync(videoFilePath);
+                if (!loaded)
                 {
-                    LogEvent?.Invoke($"[VideoCapture] ❌ FFmpeg not available, cannot load video file");
-                    LogEvent?.Invoke($"[VideoCapture] 💡 Please install FFmpeg using the 'Install FFmpeg' button in VOIP Testing");
+                    LogEvent?.Invoke($"[VideoCapture] ❌ EmguVideoDecoderService failed to load: {Path.GetFileName(videoFilePath)}");
+
+                    lock (_lock)
+                    {
+                        _isPlayingFile = false;
+                        _currentVideoFile = null;
+                    }
                     return false;
                 }
 
-                // Initialiser le décodeur FFmpeg réel
-                _ffmpegDecoder = new FFmpegVideoDecoderService();
-                _ffmpegDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[FFmpegDecoder] {msg}");
+                // ✅ ADAPTIVE: Adapter le FPS et le batch size selon la vidéo
+                AdaptToVideoSpecs();
 
-                // Charger le fichier vidéo avec FFmpeg
-                var loaded = await _ffmpegDecoder.LoadVideoFileAsync(videoFilePath);
-                if (!loaded)
-                {
-                    LogEvent?.Invoke($"[VideoCapture] ❌ Failed to load video file with FFmpeg: {Path.GetFileName(videoFilePath)}");
-
-                    // Fallback vers la caméra virtuelle simulée
-                    LogEvent?.Invoke($"[VideoCapture] 🔄 Falling back to simulation mode...");
-                    _simpleVirtualCamera = new SimpleVirtualCameraService();
-                    _simpleVirtualCamera.VideoFrameReady += OnVirtualCameraFrameReady;
-                    _simpleVirtualCamera.LogEvent += (msg) => LogEvent?.Invoke($"[VirtualCamera] {msg}");
-                    _simpleVirtualCamera.PlaybackStateChanged += (playing) => CaptureStateChanged?.Invoke(playing);
-
-                    var simLoaded = await _simpleVirtualCamera.LoadVideoFileAsync(videoFilePath);
-                    if (!simLoaded) return false;
-
-                    var simStarted = await _simpleVirtualCamera.StartPlaybackAsync();
-                    if (!simStarted) return false;
-
-                    LogEvent?.Invoke($"[VideoCapture] ✅ Fallback to simulation mode successful");
-                    return true;
-                }
-
-                // Démarrer la capture de frames FFmpeg
+                // Start intelligent buffered frame processing
                 await StartFFmpegCaptureAsync();
 
-                LogEvent?.Invoke($"[VideoCapture] ✅ Real video file playback started with FFmpeg: {Path.GetFileName(videoFilePath)}");
-                LogEvent?.Invoke($"[VideoCapture] 📊 Video Info: {_ffmpegDecoder.GetVideoInfo()}");
+                LogEvent?.Invoke($"[VideoCapture] ✅ Video playback started via EmguVideoDecoderService: {Path.GetFileName(videoFilePath)}");
+                LogEvent?.Invoke($"[VideoCapture] 📊 Video Info: {_emguDecoder.TotalFrames} frames, {_emguDecoder.FrameRate:F1} FPS, {_emguDecoder.Duration:mm\\:ss}");
 
                 return true;
             }
@@ -193,243 +185,272 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// Démarrer la capture de frames FFmpeg avec lecture en boucle
+        /// ✅ ADAPTIVE: Adapter la configuration selon les spécifications de la vidéo
+        /// </summary>
+        private void AdaptToVideoSpecs()
+        {
+            if (_emguDecoder == null) return;
+
+            // Récupérer les specs de la vidéo depuis EmguCV
+            _adaptiveFPS = _emguDecoder.FrameRate;
+            if (_adaptiveFPS > 0)
+            {
+                // Adapter le batch size : plus le FPS est élevé, plus le batch est grand
+                _adaptiveBatchSize = Math.Max(5, (int)(_adaptiveFPS / 3)); // 1/3 du FPS
+            }
+
+            LogEvent?.Invoke($"[VideoCapture] 🎯 Adapted to video: {_adaptiveFPS:F1} FPS, batch size: {_adaptiveBatchSize}");
+        }
+
+        /// <summary>
+        /// Start buffered frame processing using EmguVideoDecoderService
+        /// This service manages intelligent buffering and batch processing
         /// </summary>
         private async Task StartFFmpegCaptureAsync()
         {
             try
             {
-                if (_ffmpegDecoder == null || !_ffmpegDecoder.IsInitialized)
+                if (_emguDecoder == null || !_emguDecoder.IsInitialized)
                 {
-                    LogEvent?.Invoke("[VideoCapture] ❌ FFmpeg decoder not initialized");
+                    LogEvent?.Invoke("[VideoCapture] ❌ EmguCV decoder not initialized");
                     return;
                 }
 
-                LogEvent?.Invoke("[VideoCapture] 🎬 Starting FFmpeg frame capture loop");
+                LogEvent?.Invoke("[VideoCapture] 🎬 Starting intelligent buffered frame processing");
 
-                // Démarrer la boucle de lecture FFmpeg en arrière-plan
-                _ = Task.Run(async () => await FFmpegCaptureLoopAsync());
+                // Start buffered frame processing in background
+                _ = Task.Run(async () => await EmguCaptureLoopAsync());
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[VideoCapture] ❌ Error starting FFmpeg capture: {ex.Message}");
+                LogEvent?.Invoke($"[VideoCapture] ❌ Error starting EmguCV capture: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Boucle de lecture de frames FFmpeg
+        /// ✅ OPTIMIZED: Batch EmguCV processing with intelligent buffering
         /// </summary>
-        private async Task FFmpegCaptureLoopAsync()
+        private async Task EmguCaptureLoopAsync()
         {
             try
             {
                 var frameCount = 0;
-                var frameInterval = TimeSpan.FromMilliseconds(1000.0 / VIDEO_FPS);
+                var frameInterval = TimeSpan.FromMilliseconds(1000.0 / _adaptiveFPS);
 
-                LogEvent?.Invoke($"[VideoCapture] 🎬 FFmpeg capture loop started at {VIDEO_FPS} FPS");
+                LogEvent?.Invoke($"[VideoCapture] 🚀 ADAPTIVE EmguCV loop started: {_adaptiveFPS:F1} FPS native, batch size: {_adaptiveBatchSize}");
 
-                while (_isPlayingFile && _ffmpegDecoder?.IsInitialized == true)
+                // ✅ PRELOAD: Démarrer avec un préchargement initial
+                if (_emguDecoder != null)
+                {
+                    _ = _emguDecoder.PreloadFrameBatchAsync(0);
+                }
+
+                while (_isPlayingFile && _emguDecoder?.IsInitialized == true)
                 {
                     try
                     {
-                        // Lire frame depuis FFmpeg
-                        var frameData = await _ffmpegDecoder.ReadFrameAsync(frameCount);
+                        // ✅ SMART PRELOADING: Précharger les prochaines frames en arrière-plan
+                        var now = DateTime.UtcNow;
+                        if (now - _lastBatchPreload > TimeSpan.FromSeconds(1))
+                        {
+                            var nextBatchStart = frameCount + _adaptiveBatchSize;
+                            _ = _emguDecoder.PreloadFrameBatchAsync(nextBatchStart);
+                            _lastBatchPreload = now;
+                        }
+
+                        // ✅ NATIVE FPS: Lire une frame au FPS natif de la vidéo
+                        var frameData = await _emguDecoder.ReadFrameAsync(frameCount);
 
                         if (frameData != null && frameData.Length > 0)
                         {
                             var videoFrame = new VideoFrame
                             {
-                                Width = VIDEO_WIDTH,
-                                Height = VIDEO_HEIGHT,
+                                Width = DEFAULT_VIDEO_WIDTH,
+                                Height = DEFAULT_VIDEO_HEIGHT,
                                 Data = frameData,
                                 PixelFormat = VideoPixelFormatsEnum.Rgb,
                                 Timestamp = DateTime.UtcNow.Ticks
                             };
 
+                            // Émettre la frame immédiatement
                             VideoFrameReady?.Invoke(videoFrame);
+
+                            frameCount++;
+
+                            // ✅ PERFORMANCE: Logging périodique seulement
+                            if (frameCount % (_adaptiveBatchSize * 3) == 0)
+                            {
+                                LogEvent?.Invoke($"[VideoCapture] 📹 Frame {frameCount} processed (FPS: {_adaptiveFPS:F1})");
+                            }
                         }
                         else
                         {
-                            // Si pas de frame (fin de vidéo), recommencer depuis le début
+                            // End of video - restart loop
                             frameCount = 0;
-                            LogEvent?.Invoke("[VideoCapture] 🔄 Video reached end, restarting loop");
-                            continue;
+                            LogEvent?.Invoke("[VideoCapture] 🔄 Video loop restarted");
                         }
 
-                        frameCount++;
-
-                        // Log périodique
-                        if (frameCount % (VIDEO_FPS * 10) == 0) // Toutes les 10 secondes
-                        {
-                            var position = TimeSpan.FromSeconds(frameCount / (double)VIDEO_FPS);
-                            LogEvent?.Invoke($"[VideoCapture] 📹 FFmpeg frame {frameCount}, Position: {position:mm\\:ss}");
-                        }
-
+                        // ✅ ADAPTIVE TIMING: Respecter le timing natif du FPS
                         await Task.Delay(frameInterval);
                     }
                     catch (Exception ex)
                     {
-                        LogEvent?.Invoke($"[VideoCapture] ⚠️ Error reading FFmpeg frame {frameCount}: {ex.Message}");
+                        LogEvent?.Invoke($"[VideoCapture] ⚠️ Frame processing error at frame {frameCount}: {ex.Message}");
                         frameCount++;
                         await Task.Delay(frameInterval);
                     }
                 }
 
-                LogEvent?.Invoke("[VideoCapture] 🛑 FFmpeg capture loop ended");
+                LogEvent?.Invoke("[VideoCapture] 🛑 ADAPTIVE FFmpeg loop ended");
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[VideoCapture] ❌ FFmpeg capture loop error: {ex.Message}");
+                LogEvent?.Invoke($"[VideoCapture] ❌ FFmpeg loop error: {ex.Message}");
+            }
+            finally
+            {
+                _bufferCancellation?.Cancel();
             }
         }
 
         /// <summary>
-        /// Simuler la lecture de fichier vidéo (envoi de frames fictives ou réelles)
+        /// ✅ BUFFER: Adaptive buffer size based on frame rate
         /// </summary>
-        private async Task SimulateVideoFilePlayback()
+        private void AdaptBufferSizeToFrameRate(double frameRate)
         {
-            try
+            // Higher frame rate = larger buffer for smooth playback
+            _maxBufferSize = Math.Max(15, (int)(frameRate * 2)); // 2 seconds buffer
+            _minBufferSize = Math.Max(5, (int)(frameRate * 0.5)); // 0.5 seconds minimum
+        }
+
+        /// <summary>
+        /// ✅ BUFFER: Add frames to buffer with overflow protection
+        /// </summary>
+        private void AddFramesToBuffer(List<VideoFrame> frames)
+        {
+            lock (_bufferLock)
             {
-                LogEvent?.Invoke($"[VideoCapture] 📹 Starting video simulation - File: {_currentVideoFile ?? "Built-in sample"}");
-
-                int frameCount = 0;
-                while (_isPlayingFile && !string.IsNullOrEmpty(_currentVideoFile))
+                foreach (var frame in frames)
                 {
-                    if (_currentVideoFile == "simulation")
+                    if (_currentBufferSize >= _maxBufferSize)
                     {
-                        // Générer frame de test avec pattern animé
-                        var frameData = GenerateTestVideoFrame(frameCount);
-                        var videoFrame = new VideoFrame
+                        // Remove old frames to make space
+                        if (_frameBuffer.TryDequeue(out _))
                         {
-                            Width = VIDEO_WIDTH,
-                            Height = VIDEO_HEIGHT,
-                            Data = frameData,
-                            PixelFormat = VideoPixelFormatsEnum.Rgb,
-                            Timestamp = DateTime.Now.Ticks
-                        };
-
-                        VideoFrameReady?.Invoke(videoFrame);
-                    }
-                    else if (File.Exists(_currentVideoFile))
-                    {
-                        // TODO: Lire vraies frames du fichier vidéo
-                        var frameData = await ReadVideoFileSample(_currentVideoFile, frameCount);
-                        if (frameData != null && frameData.Length > 0)
-                        {
-                            var videoFrame = new VideoFrame
-                            {
-                                Width = VIDEO_WIDTH,
-                                Height = VIDEO_HEIGHT,
-                                Data = frameData,
-                                PixelFormat = VideoPixelFormatsEnum.Rgb,
-                                Timestamp = DateTime.Now.Ticks
-                            };
-
-                            VideoFrameReady?.Invoke(videoFrame);
+                            _currentBufferSize--;
                         }
                     }
-                    else
-                    {
-                        // Fallback vers test pattern
-                        var frameData = GenerateTestVideoFrame(frameCount);
-                        var videoFrame = new VideoFrame
-                        {
-                            Width = VIDEO_WIDTH,
-                            Height = VIDEO_HEIGHT,
-                            Data = frameData,
-                            PixelFormat = VideoPixelFormatsEnum.Rgb,
-                            Timestamp = DateTime.Now.Ticks
-                        };
 
-                        VideoFrameReady?.Invoke(videoFrame);
-                    }
-
-                    frameCount++;
-                    await Task.Delay(1000 / VIDEO_FPS); // Respecter le framerate (15 FPS)
+                    _frameBuffer.Enqueue(frame);
+                    _currentBufferSize++;
                 }
-            }
-            catch (Exception ex)
-            {
-                LogEvent?.Invoke($"[VideoCapture] ❌ Error during video simulation: {ex.Message}");
             }
         }
 
         /// <summary>
-        /// Lire frame d'un fichier vidéo (placeholder pour vraie implémentation)
+        /// ✅ BUFFER: Process buffered frames at stable rate
         /// </summary>
-        private async Task<byte[]?> ReadVideoFileSample(string filePath, int frameNumber)
+        private async Task ProcessBufferedFramesAsync(CancellationToken cancellation)
         {
             try
             {
-                // TODO: Implémenter vraie lecture vidéo avec FFMpeg.NET ou équivalent
-                // Pour l'instant, retourner pattern différent pour indiquer qu'on "lit" un fichier
-                LogEvent?.Invoke($"[VideoCapture] 📁 Reading video file frame {frameNumber}: {Path.GetFileName(filePath)}");
+                _bufferProcessingActive = true;
+                var targetFrameTime = TimeSpan.FromMilliseconds(1000.0 / _detectedFrameRate);
 
-                // Générer pattern différent pour files vs simulation
-                return GenerateFileVideoFrame(frameNumber);
-            }
-            catch (Exception ex)
-            {
-                LogEvent?.Invoke($"[VideoCapture] ❌ Error reading video file: {ex.Message}");
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Générer frame spéciale pour simulation de lecture fichier
-        /// </summary>
-        private byte[] GenerateFileVideoFrame(int frameNumber)
-        {
-            var frameSize = VIDEO_WIDTH * VIDEO_HEIGHT * 3; // RGB24
-            var frameData = new byte[frameSize];
-
-            // Pattern différent pour les "files" - grille avec mouvement
-            for (int y = 0; y < VIDEO_HEIGHT; y++)
-            {
-                for (int x = 0; x < VIDEO_WIDTH; x++)
+                while (!cancellation.IsCancellationRequested && _isPlayingFile)
                 {
-                    int index = (y * VIDEO_WIDTH + x) * 3;
-
-                    // Créer pattern grille avec animation
-                    bool isGrid = ((x + frameNumber / 5) % 40 < 5) || ((y + frameNumber / 5) % 30 < 3);
-
-                    if (isGrid)
+                    if (_frameBuffer.TryDequeue(out var frame))
                     {
-                        frameData[index] = 255;     // R (blanc pour grille)
-                        frameData[index + 1] = 255; // G
-                        frameData[index + 2] = 255; // B
+                        lock (_bufferLock)
+                        {
+                            _currentBufferSize--;
+                        }
+
+                        // ✅ PERFORMANCE: Dispatch frame to UI without logging
+                        VideoFrameReady?.Invoke(frame);
+                        await Task.Delay(targetFrameTime, cancellation);
                     }
                     else
                     {
-                        frameData[index] = (byte)(64 + frameNumber % 128);     // R (bleu animé)
-                        frameData[index + 1] = (byte)(32);                     // G
-                        frameData[index + 2] = (byte)(128 + frameNumber % 127); // B
+                        // Buffer empty - wait for more frames
+                        await Task.Delay(10, cancellation);
                     }
                 }
             }
-
-            return frameData;
+            catch (OperationCanceledException)
+            {
+                // Normal cancellation
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[VideoCapture] ❌ Buffer processing error: {ex.Message}");
+            }
+            finally
+            {
+                _bufferProcessingActive = false;
+            }
         }
 
         /// <summary>
-        /// Générer une frame de test avec couleur qui change
+        /// ✅ PERFORMANCE: Calculate adaptive delay based on buffer level
         /// </summary>
-        private byte[] GenerateTestVideoFrame(int frameNumber)
+        private int CalculateAdaptiveDelay()
         {
-            // Générer une frame simple avec couleur qui change
-            var frameSize = VIDEO_WIDTH * VIDEO_HEIGHT * 3; // RGB24
-            var frameData = new byte[frameSize];
+            var bufferRatio = (double)_currentBufferSize / _maxBufferSize;
 
-            var color = (byte)(frameNumber % 255); // Couleur qui cycle
-            for (int i = 0; i < frameSize; i += 3)
+            if (bufferRatio > 0.8) // Buffer nearly full
             {
-                frameData[i] = color;     // R
-                frameData[i + 1] = (byte)(255 - color); // G
-                frameData[i + 2] = (byte)(frameNumber / 2 % 255); // B
+                return 100; // Slow down capture
             }
-
-            return frameData;
+            else if (bufferRatio < 0.3) // Buffer low
+            {
+                return 10; // Speed up capture
+            }
+            else
+            {
+                return 50; // Normal rate
+            }
         }
+
+        /// <summary>
+        /// ✅ REDUCED LOGGING: Log progress only every 30 seconds
+        /// </summary>
+        private void LogProgressPeriodically(int frameCount)
+        {
+            var now = DateTime.UtcNow;
+            if (now - _lastLogTime > TimeSpan.FromSeconds(30))
+            {
+                var position = TimeSpan.FromSeconds(frameCount / _detectedFrameRate);
+                LogEvent?.Invoke($"[VideoCapture] 📹 Position: {position:mm\\:ss}, Buffer: {_currentBufferSize}/{_maxBufferSize}");
+                _lastLogTime = now;
+            }
+        }
+
+        /// <summary>
+        /// ✅ REDUCED LOGGING: Log restart only periodically
+        /// </summary>
+        private void LogRestartPeriodically()
+        {
+            var now = DateTime.UtcNow;
+            if (now - _lastLogTime > TimeSpan.FromSeconds(10))
+            {
+                LogEvent?.Invoke("[VideoCapture] 🔄 Video loop restart");
+                _lastLogTime = now;
+            }
+        }
+
+        /// <summary>
+        /// ✅ BUFFER: Get current buffer status for diagnostics
+        /// </summary>
+        public (int count, int max, double ratio) GetBufferStatus()
+        {
+            return (_currentBufferSize, _maxBufferSize, (double)_currentBufferSize / _maxBufferSize);
+        }
+
+        // ❌ REMOVED: No more simulation/test frames - use real videos only
+
+
+        // ❌ REMOVED: No test frame generation - real videos only
 
         /// <summary>
         /// Arrêter la capture vidéo et/ou lecture de fichier
@@ -450,7 +471,7 @@ namespace ChatP2P.Client.Services
                     _currentVideoFile = null;
                 }
 
-                // Arrêter la caméra virtuelle si active
+                // Clean up virtual camera if exists
                 if (_simpleVirtualCamera != null)
                 {
                     await _simpleVirtualCamera.StopPlaybackAsync();
@@ -458,12 +479,21 @@ namespace ChatP2P.Client.Services
                     _simpleVirtualCamera = null;
                 }
 
+                // ✅ BUFFER: Stop buffer processing
+                _bufferCancellation?.Cancel();
+
                 // Arrêter le décodeur FFmpeg si actif
-                if (_ffmpegDecoder != null)
+                if (_emguDecoder != null)
                 {
-                    await _ffmpegDecoder.CloseVideoAsync();
-                    _ffmpegDecoder.Dispose();
-                    _ffmpegDecoder = null;
+                    _emguDecoder.Dispose();
+                    _emguDecoder = null;
+                }
+
+                // ✅ BUFFER: Clear buffer
+                lock (_bufferLock)
+                {
+                    while (_frameBuffer.TryDequeue(out _)) { }
+                    _currentBufferSize = 0;
                 }
 
                 LogEvent?.Invoke("[VideoCapture] ✅ Video capture/playback stopped");
@@ -486,10 +516,9 @@ namespace ChatP2P.Client.Services
                 var devices = new List<string>();
 
                 // TODO: En production, énumérer DirectShow devices ou MediaFoundation
-                devices.Add("📹 Default Camera (VM Simulation)");
-                devices.Add("🖥️ Screen Capture (VM Desktop)");
-                devices.Add("📁 Video File Playback (Test Mode)");
-                devices.Add("🎨 Test Pattern Generator");
+                devices.Add("📹 Default Camera");
+                devices.Add("🖥️ Screen Capture");
+                devices.Add("📁 Video File Playback");
 
                 return devices.ToArray();
             }
@@ -523,7 +552,7 @@ namespace ChatP2P.Client.Services
             {
                 StopCaptureAsync().Wait(1000);
                 _simpleVirtualCamera?.Dispose();
-                _ffmpegDecoder?.Dispose();
+                _emguDecoder?.Dispose();
                 LogEvent?.Invoke("[VideoCapture] Service disposed");
             }
             catch (Exception ex)

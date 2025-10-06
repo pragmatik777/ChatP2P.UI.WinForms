@@ -121,10 +121,10 @@ namespace ChatP2P.Client.Services
                     return null;
                 }
 
-                if (rawFrame.Data == null || rawFrame.Data.Length == 0)
+                if (rawFrame?.Data == null || rawFrame.Data.Length == 0)
                 {
                     LogEvent?.Invoke($"[VideoEncoder] ⚠️ Empty frame data, skipping");
-                    return null;
+                    return Array.Empty<byte>(); // Retourner array vide au lieu de null
                 }
 
                 // ✅ FIX: Encodage H.264 direct avec FFmpeg
@@ -137,7 +137,18 @@ namespace ChatP2P.Client.Services
                     if (h264Data != null && h264Data.Length > 0)
                     {
                         LogEvent?.Invoke($"[VideoEncoder] ✅ H.264 encoding successful: {rawFrame.Data.Length}B → {h264Data.Length}B (compression: {(float)h264Data.Length/rawFrame.Data.Length:P1})");
+                        LogEvent?.Invoke($"[VideoEncoder] 🔥 DEBUG: About to trigger EncodedVideoReady event with {h264Data.Length} bytes");
+                        LogEvent?.Invoke($"[VideoEncoder] 🔥 DEBUG: EncodedVideoReady event has {(EncodedVideoReady?.GetInvocationList().Length ?? 0)} subscribers");
+                        if (EncodedVideoReady != null)
+                        {
+                            var subscribers = EncodedVideoReady.GetInvocationList();
+                            for (int i = 0; i < subscribers.Length; i++)
+                            {
+                                LogEvent?.Invoke($"[VideoEncoder] 🔥 DEBUG: Subscriber {i}: {subscribers[i].Method.DeclaringType?.Name}.{subscribers[i].Method.Name}");
+                            }
+                        }
                         EncodedVideoReady?.Invoke(h264Data);
+                        LogEvent?.Invoke($"[VideoEncoder] 🔥 DEBUG: EncodedVideoReady event triggered successfully");
                         return h264Data;
                     }
                     else
@@ -158,7 +169,8 @@ namespace ChatP2P.Client.Services
             catch (Exception ex)
             {
                 LogEvent?.Invoke($"[VideoEncoder] ❌ Error processing frame: {ex.Message}");
-                return null;
+                // ✅ Retourner array vide au lieu de null pour éviter NullReferenceException
+                return Array.Empty<byte>();
             }
         }
 
@@ -223,9 +235,14 @@ namespace ChatP2P.Client.Services
                     return null;
                 }
 
-                // ✅ OPTIMISATION CRITIQUE: FFmpeg STREAMING via STDIN/STDOUT (pas de fichiers temporaires)
-                // Commande: RGB24 depuis STDIN → H.264 Annex B vers STDOUT (qualité améliorée)
-                var arguments = $"-f rawvideo -pix_fmt rgb24 -s {rgbFrame.Width}x{rgbFrame.Height} -r {TARGET_FPS} -i pipe:0 -c:v libx264 -preset fast -tune film -crf 23 -maxrate 1500k -bufsize 3000k -g {TARGET_FPS} -keyint_min 1 -sc_threshold 0 -bsf:v h264_mp4toannexb -f h264 pipe:1";
+                // ⚡ UDP STREAMING OPTIMIZED: Best practices RFC 3984/6184 pour streaming H.264 temps réel
+                // CRF 35 = compression max, SPS/PPS répétés, Annex B format pour UDP streaming
+                var arguments = $"-f rawvideo -pix_fmt rgb24 -s {rgbFrame.Width}x{rgbFrame.Height} -r {TARGET_FPS} -i pipe:0 " +
+                               $"-c:v libx264 -preset fast -tune zerolatency -crf 28 -maxrate 800k -bufsize 1600k " +
+                               $"-g {TARGET_FPS} -keyint_min 1 -sc_threshold 0 " +
+                               $"-force_key_frames \"expr:gte(t,n_forced*2)\" " +  // SPS/PPS toutes les 2s
+                               $"-x264-params \"repeat-headers=1:annexb=1\" " +      // Force SPS/PPS repetition + Annex B
+                               $"-bsf:v h264_mp4toannexb -f h264 pipe:1";
 
                 LogEvent?.Invoke($"[VideoEncoder] 🔧 STREAMING FFmpeg: {arguments}");
 

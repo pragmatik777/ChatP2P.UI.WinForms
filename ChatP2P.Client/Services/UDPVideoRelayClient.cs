@@ -21,6 +21,7 @@ namespace ChatP2P.Client.Services
         private bool _isConnected = false;
         private readonly CancellationTokenSource _cancellationTokenSource = new();
         private int _packetNumber = 0;
+        private DateTime _lastLogTime = DateTime.MinValue;
 
         public event Action<string>? LogEvent;
         public event Action<byte[]>? VideoDataReceived;
@@ -112,8 +113,15 @@ namespace ChatP2P.Client.Services
 
             try
             {
-                // ✅ NEW: Binary protocol with 1200 byte fragments (optimal for Ethernet MTU)
-                const int maxFragmentSize = 1200; // No Base64 = 1200 bytes raw data per packet
+                // ⚡ H.264 OPTIMIZED: Small frames should fit in single UDP packet (no fragmentation needed)
+                const int maxFragmentSize = 1200; // 1200 bytes raw data per packet
+
+                // ✅ OPTIMIZATION: Si frame <1200 bytes, pas de fragmentation nécessaire
+                if (videoData.Length <= maxFragmentSize)
+                {
+                    LogEvent?.Invoke($"[UDP-VIDEO] ⚡ Single packet send: {videoData.Length} bytes (no fragmentation)");
+                    return await SendSingleVideoPacket(targetPeer, videoData);
+                }
                 const int headerSize = 32; // Fixed header size
 
                 var totalFragments = (int)Math.Ceiling((double)videoData.Length / maxFragmentSize);
@@ -279,11 +287,16 @@ namespace ChatP2P.Client.Services
             {
                 try
                 {
-                    LogEvent?.Invoke($"[UDP-VIDEO] 🔧 DEBUG: Waiting for UDP packet...");
+                    // ✅ PERFORMANCE: Removed excessive "Waiting for UDP packet" logs
                     var result = await _udpClient!.ReceiveAsync();
                     var data = result.Buffer;
 
-                    LogEvent?.Invoke($"[UDP-VIDEO] 🔧 DEBUG: Received UDP packet: {data.Length} bytes from {result.RemoteEndPoint}");
+                    // ✅ PERFORMANCE: Only log packet receive occasionally
+                    if (DateTime.UtcNow - _lastLogTime > TimeSpan.FromSeconds(2))
+                    {
+                        LogEvent?.Invoke($"[UDP-VIDEO] 📶 Receiving packets: {data.Length} bytes from {result.RemoteEndPoint}");
+                        _lastLogTime = DateTime.UtcNow;
+                    }
 
                     // Process packet in background
                     _ = Task.Run(() => ProcessReceivedPacket(data));
@@ -301,7 +314,7 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                LogEvent?.Invoke($"[UDP-VIDEO] 🔧 DEBUG: Processing packet of {data.Length} bytes");
+                // ✅ PERFORMANCE: Reduced processing packet logs
 
                 // ✅ NEW: Check if this is a BINARY video packet or legacy JSON
                 if (data.Length >= 32 && Encoding.UTF8.GetString(data, 0, 4) == "VDAT")
@@ -495,7 +508,11 @@ namespace ChatP2P.Client.Services
                 var fragmentIndex = message.FragmentIndex;
                 var totalFragments = message.TotalFragments;
 
-                LogEvent?.Invoke($"[UDP-VIDEO] 🔧 DEBUG: HandleVideoFragment - packet #{packetNumber}, fragment {fragmentIndex}/{totalFragments}");
+                // ✅ PERFORMANCE: Only log fragment handling for key fragments
+                if (fragmentIndex == 0 || fragmentIndex == totalFragments - 1)
+                {
+                    LogEvent?.Invoke($"[UDP-VIDEO] 📦 Fragment #{fragmentIndex}/{totalFragments} for packet #{packetNumber}");
+                }
 
                 // ✅ FIX: Validate fragment data with enhanced checks
                 if (fragmentIndex < 0)
@@ -543,7 +560,7 @@ namespace ChatP2P.Client.Services
                         var storedTotal = _packetTotalFragments[packetNumber];
                         if (storedTotal != totalFragments)
                         {
-                            LogEvent?.Invoke($"[UDP-VIDEO] 🔧 TotalFragments update for packet #{packetNumber}: stored {storedTotal}, received {totalFragments} - using max");
+                            // ✅ PERFORMANCE: Reduced logging for TotalFragments updates
                             // Use the maximum to ensure we don't miss any fragments
                             totalFragments = Math.Max(storedTotal, totalFragments);
                             _packetTotalFragments[packetNumber] = totalFragments;
@@ -565,7 +582,11 @@ namespace ChatP2P.Client.Services
                         _fragmentBuffer[packetNumber][fragmentIndex] = message.VideoData!;
                         var currentCount = _fragmentBuffer[packetNumber].Count;
                         var currentExpectedTotal = _packetTotalFragments[packetNumber];
-                        LogEvent?.Invoke($"[UDP-VIDEO] 🔧 DEBUG: Stored fragment {fragmentIndex} for packet #{packetNumber}. Current count: {currentCount}/{currentExpectedTotal}");
+                        // ✅ PERFORMANCE: Only log fragment completion, not every fragment
+                        if (currentCount % 5 == 0 || currentCount == currentExpectedTotal)
+                        {
+                            LogEvent?.Invoke($"[UDP-VIDEO] 📊 Fragment progress: {currentCount}/{currentExpectedTotal} for packet #{packetNumber}");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -678,6 +699,38 @@ namespace ChatP2P.Client.Services
                 _fragmentBuffer.Remove(packetNumber);
                 _packetTotalFragments.Remove(packetNumber);
                 _packetTimestamps.Remove(packetNumber);
+            }
+        }
+
+        /// <summary>
+        /// ⚡ OPTIMIZED: Send single H.264 frame without fragmentation
+        /// </summary>
+        private async Task<bool> SendSingleVideoPacket(string targetPeer, byte[] videoData)
+        {
+            try
+            {
+                _packetNumber++;
+
+                var message = new UDPVideoMessage
+                {
+                    Type = "VIDEO_FRAME",
+                    FromPeer = _peerName,
+                    ToPeer = targetPeer,
+                    PacketNumber = _packetNumber,
+                    FragmentIndex = 0,
+                    TotalFragments = 1,  // Single packet = no fragmentation
+                    VideoData = Convert.ToBase64String(videoData),
+                    Timestamp = DateTime.UtcNow
+                };
+
+                await SendMessage(message);
+                LogEvent?.Invoke($"[UDP-VIDEO] ✅ Single H.264 packet #{_packetNumber} sent: {videoData.Length} bytes (no fragmentation)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[UDP-VIDEO] ❌ Failed to send single packet: {ex.Message}");
+                return false;
             }
         }
 

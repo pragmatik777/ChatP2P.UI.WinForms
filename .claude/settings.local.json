@@ -50,7 +50,10 @@
       "Bash(start /b \"C:\\Users\\pragm\\source\\repos\\ChatP2P.UI.WinForms\\ChatP2P.Server\\bin\\Debug\\net8.0\\ChatP2P.Server.exe\")",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(ffmpeg:*)",
-      "WebFetch(domain:sipsorcery-org.github.io)"
+      "WebFetch(domain:sipsorcery-org.github.io)",
+      "Bash(grep:*)",
+      "Bash(copy:*)",
+      "Bash(test_emgu.exe)"
     ],
     "deny": [],
     "ask": []
