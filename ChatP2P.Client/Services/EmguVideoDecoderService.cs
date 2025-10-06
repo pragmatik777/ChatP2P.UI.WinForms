@@ -90,6 +90,14 @@ namespace ChatP2P.Client.Services
             if (!_isInitialized || _videoCapture == null || _disposing)
                 return null;
 
+            // ⚡ RELAXED LIMIT: Let EmguCV determine real end, don't rely on metadata frame count
+            // Metadata frame counts are often inaccurate, let natural frame reading determine the real end
+            if (frameIndex > _totalFrames + 200) // Very generous buffer for metadata inaccuracies
+            {
+                LogEvent?.Invoke($"[EmguDecoder] ⚠️ Frame {frameIndex} way beyond metadata limit ({_totalFrames}), likely real end");
+                return null;
+            }
+
             try
             {
                 // ⚡ THREAD SAFE: Lock all EmguCV access
@@ -105,10 +113,30 @@ namespace ChatP2P.Client.Services
                     }
                 }
 
-                // ⚡ SMART BUFFERING: Preload batch if needed (thread-safe)
-                if (Math.Abs(frameIndex - _lastBufferedIndex) > BUFFER_SIZE / 2)
+                // ⚡ SMART BUFFERING: Preload batch if needed OR if frame not in buffer
+                bool needsPreload = false;
+                bool isLoopReset = false;
+                lock (_lock)
                 {
-                    LogEvent?.Invoke($"[EmguDecoder] 📦 SMART BUFFER: Loading batch around frame {frameIndex}");
+                    // ⚡ LOOP DETECTION: If we're asking for frame 0 and last was high frame = video loop
+                    isLoopReset = (frameIndex == 0 && _lastBufferedIndex > BUFFER_SIZE);
+
+                    needsPreload = !_frameBuffer.ContainsKey(frameIndex) &&
+                                   (isLoopReset || // Force reload on loop reset
+                                    Math.Abs(frameIndex - _lastBufferedIndex) > BUFFER_SIZE / 2 ||
+                                    frameIndex >= _lastBufferedIndex + BUFFER_SIZE);
+                }
+
+                if (needsPreload)
+                {
+                    if (isLoopReset)
+                    {
+                        LogEvent?.Invoke($"[EmguDecoder] 🔄 LOOP RESET: Reloading from frame 0 after video end");
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[EmguDecoder] 📦 BUFFER MISS: Loading batch around frame {frameIndex}");
+                    }
                     await PreloadFrameBatchAsync(frameIndex);
                 }
 
@@ -121,7 +149,7 @@ namespace ChatP2P.Client.Services
                     }
                 }
 
-                LogEvent?.Invoke($"[EmguDecoder] ❌ Frame {frameIndex} not available even after buffering");
+                LogEvent?.Invoke($"[EmguDecoder] ❌ Frame {frameIndex} not available even after aggressive buffering - likely real end");
                 return null;
             }
             catch (Exception ex)
@@ -146,7 +174,8 @@ namespace ChatP2P.Client.Services
                     if (_disposing || _videoCapture == null) return;
 
                     var batchStart = Math.Max(0, startIndex - 20); // 20 frames before
-                    var batchEnd = Math.Min(_totalFrames - 1, batchStart + BUFFER_SIZE - 1);
+                    // ⚡ REAL END: Don't limit to _totalFrames, let EmguCV tell us the real end
+                    var batchEnd = batchStart + BUFFER_SIZE - 1;
 
                     LogEvent?.Invoke($"[EmguDecoder] 📦 PRELOADING: Frames {batchStart} to {batchEnd} (Grab+Retrieve pattern)");
 
@@ -168,24 +197,42 @@ namespace ChatP2P.Client.Services
                             if (_disposing) break;
                             if (_frameBuffer.ContainsKey(i)) continue; // Skip if already cached
 
-                            // ⚡ ULTRA-FAST: Grab() + Retrieve() pattern (13ms vs 280ms FFmpeg)
-                            if (_videoCapture.Grab())
+                            // ⚡ ULTRA-FAST: Grab() + Retrieve() pattern with retry for robustness
+                            bool frameGrabbed = false;
+                            int retryCount = 0;
+                            const int maxRetries = 3;
+
+                            while (!frameGrabbed && retryCount < maxRetries)
                             {
-                                if (_videoCapture.Retrieve(mat))
+                                if (_videoCapture.Grab())
                                 {
-                                    // Convert to RGB24 byte array (640x480x3) - synchronous to avoid threading issues
-                                    var rgbData = ConvertMatToRgb(mat);
-                                    if (rgbData != null)
+                                    if (_videoCapture.Retrieve(mat))
                                     {
-                                        _frameBuffer[i] = rgbData;
-                                        LogEvent?.Invoke($"[EmguDecoder] ✅ FAST LOAD: Frame {i} ({rgbData.Length} bytes)");
+                                        // Convert to RGB24 byte array (640x480x3) - synchronous to avoid threading issues
+                                        var rgbData = ConvertMatToRgb(mat);
+                                        if (rgbData != null)
+                                        {
+                                            _frameBuffer[i] = rgbData;
+                                            LogEvent?.Invoke($"[EmguDecoder] ✅ FAST LOAD: Frame {i} ({rgbData.Length} bytes)");
+                                            frameGrabbed = true;
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    retryCount++;
+                                    if (retryCount < maxRetries)
+                                    {
+                                        LogEvent?.Invoke($"[EmguDecoder] 🔄 RETRY: Frame {i} attempt {retryCount}/{maxRetries}");
+                                        Thread.Sleep(1); // Small delay between retries
                                     }
                                 }
                             }
-                            else
+
+                            if (!frameGrabbed)
                             {
-                                LogEvent?.Invoke($"[EmguDecoder] ⚠️ Failed to grab frame {i}");
-                                break; // End of video
+                                LogEvent?.Invoke($"[EmguDecoder] ⚠️ Failed to grab frame {i} after {maxRetries} retries - likely real end of video");
+                                break; // End of video reached after retries
                             }
                         }
                     } // Mat automatically disposed here

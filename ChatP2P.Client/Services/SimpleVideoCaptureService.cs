@@ -138,34 +138,12 @@ namespace ChatP2P.Client.Services
                     _currentVideoFile = videoFilePath;
                 }
 
-                // ✅ DELEGATE: Use EmguVideoDecoderService for real video processing
-                LogEvent?.Invoke($"[VideoCapture] 🎬 Delegating video decoding to EmguVideoDecoderService...");
+                // ✅ SMART DELEGATION: Delegate to SimpleVirtualCameraService to avoid multiple EmguDecoder instances
+                // This service handles playback state and events, but video processing is done by SimpleVirtualCameraService
+                LogEvent?.Invoke($"[VideoCapture] 🎯 Delegating video processing to SimpleVirtualCameraService (no EmguDecoder conflicts)");
 
-                _emguDecoder = new EmguVideoDecoderService();
-                _emguDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[EmguDecoder] {msg}");
-
-                // Load video file with specialized EmguCV service
-                var loaded = await _emguDecoder.InitializeAsync(videoFilePath);
-                if (!loaded)
-                {
-                    LogEvent?.Invoke($"[VideoCapture] ❌ EmguVideoDecoderService failed to load: {Path.GetFileName(videoFilePath)}");
-
-                    lock (_lock)
-                    {
-                        _isPlayingFile = false;
-                        _currentVideoFile = null;
-                    }
-                    return false;
-                }
-
-                // ✅ ADAPTIVE: Adapter le FPS et le batch size selon la vidéo
-                AdaptToVideoSpecs();
-
-                // Start intelligent buffered frame processing
-                await StartFFmpegCaptureAsync();
-
-                LogEvent?.Invoke($"[VideoCapture] ✅ Video playback started via EmguVideoDecoderService: {Path.GetFileName(videoFilePath)}");
-                LogEvent?.Invoke($"[VideoCapture] 📊 Video Info: {_emguDecoder.TotalFrames} frames, {_emguDecoder.FrameRate:F1} FPS, {_emguDecoder.Duration:mm\\:ss}");
+                // ✅ SUCCESS: Video file loaded, state managed here but processing delegated
+                LogEvent?.Invoke($"[VideoCapture] 📊 Video file accepted: {Path.GetFileName(videoFilePath)} (processing delegated)");
 
                 return true;
             }

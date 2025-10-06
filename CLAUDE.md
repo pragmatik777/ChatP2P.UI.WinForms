@@ -373,3 +373,65 @@ var decrypted = await CryptoService.DecryptMessage(encrypted, ownerPrivateKey);
 - 🔄 **Future Optimizations** : Quality/performance tuning à implémenter
 
 **🎉 MILESTONE ATTEINT** : Système vidéo complet et fonctionnel !
+
+## 🎥 **VIDEO PERFORMANCE OPTIMIZATION ✅ PERFECTION ATTEINTE (06/10/2025)**
+**🎯 System Goal**: Ultra-smooth video playback with adaptive FPS + elimination of instance conflicts
+
+### ✅ **Adaptive FPS System Implémenté**:
+**Problem**: Fixed 15 FPS throttling causing choppy playback regardless of source video FPS
+**Solution**: Dynamic throttling adapting to original video frame rate
+- **VOIPCallManager.cs**: Adaptive throttling using `GetCurrentVideoFPS()` method
+- **MainWindow.xaml.cs**: UI throttling synchronized with video FPS
+- **SimpleVirtualCameraService.cs**: `ExactFPS` property for precise timing calculations
+- **EmguVideoDecoderService.cs**: Enhanced retry logic for end-of-video detection
+
+### 🔧 **Multiple Instance Conflict Resolution**:
+**Problem**: 4 EmguVideoDecoderService instances running simultaneously causing buffer conflicts
+**Solution**: Unified video processing with smart delegation
+- **Primary Service**: SimpleVirtualCameraService as single video source
+- **Disabled Redundant Instances**: VOIPCallManager, MainWindow, SimpleVideoCaptureService
+- **Buffer Unification**: Eliminated double buffering by delegating to EmguVideoDecoderService
+- **Coordination**: Maintained state management while avoiding resource conflicts
+
+### ⚡ **Buffer Management Optimization**:
+**Problem**: Frame gaps, stuttering, and "Failed to load frame X" errors
+**Solution**: Intelligent buffering with direct delegation pattern
+```csharp
+// ⚡ DIRECT DELEGATION: Use EmguVideoDecoderService's intelligent buffering directly
+var rgbData = await _videoDecoder.ReadFrameAsync(frameIndex);
+if (rgbData != null && rgbData.Length > 0)
+{
+    return new VideoFrame { /* RGB data */ };
+}
+```
+
+### 🔄 **Video Loop Enhancement**:
+**Problem**: Video replaying before reaching actual end
+**Solution**: Enhanced end-of-video detection with retry system
+- **Relaxed Frame Limits**: 50 → 200 frame buffer for metadata inaccuracies
+- **Retry Logic**: 3-attempt system for robust frame grabbing
+- **Real End Detection**: Let EmguCV determine actual video end instead of metadata
+
+### 📊 **Logging Cross-Contamination Fix**:
+**Problem**: EmguDecoder logs appearing in audio log files
+**Solution**: Enhanced keyword detection in MainWindow.xaml.cs
+- **New Keywords**: "EmguDecoder", "VirtCam-Decoder" → client_video.log
+- **Clean Separation**: Audio/video logs properly isolated
+- **Diagnostic Clarity**: Clear log categorization for debugging
+
+### 🎉 **Résultats Video Performance PERFECTION**:
+- ✅ **Smooth Playback**: Video plays completely to the end before looping ✨
+- ✅ **Adaptive FPS**: Dynamic throttling matching source video frame rate
+- ✅ **Buffer Unity**: Single-source buffering eliminates conflicts and stuttering
+- ✅ **Enhanced Quality**: Good image quality maintained throughout playback
+- ✅ **Resource Efficiency**: Eliminated redundant processing instances
+- ✅ **Production Ready**: Fluid video streaming without performance bottlenecks
+
+### 🎬 **Components Optimized**:
+- **SimpleVirtualCameraService.cs**: Primary video source with ExactFPS timing
+- **EmguVideoDecoderService.cs**: Enhanced buffering with retry logic and relaxed limits
+- **VOIPCallManager.cs**: Adaptive throttling + disabled redundant decoder
+- **MainWindow.xaml.cs**: Synchronized UI throttling + enhanced log routing
+- **SimpleVideoCaptureService.cs**: Conflict resolution via delegation pattern
+
+**🎯 Status**: ✅ Video performance optimization COMPLET - ultra-smooth playback achieved

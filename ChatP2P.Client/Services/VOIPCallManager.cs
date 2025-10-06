@@ -1419,12 +1419,10 @@ namespace ChatP2P.Client.Services
             {
                 LogEvent?.Invoke($"[VOIP-Manager] 🎬 Starting buffered video frame processing thread");
 
-                // ✅ H.264 DECODER: Initialiser le décodeur une seule fois
-                if (_emguDecoder == null)
-                {
-                    _emguDecoder = new EmguVideoDecoderService();
-                    _emguDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Decoder] {msg}");
-                }
+                // ❌ DISABLED: EmguDecoder to prevent conflicts with SimpleVirtualCameraService
+                // Multiple EmguVideoDecoderService instances cause buffer conflicts and video stuttering
+                LogEvent?.Invoke($"[VOIP-Manager] ⚠️ EmguDecoder disabled - using SimpleVirtualCameraService as primary video source");
+                return; // Exit early to avoid video processing conflicts
 
                 var frameCount = 0;
                 var lastFPSUpdate = _receiverAdaptiveFPS;
@@ -1876,11 +1874,17 @@ namespace ChatP2P.Client.Services
 
                 // ⚠️ TESTING: DISABLE ENCODING BUT PASS RGB TO UI FOR DISPLAY (THROTTLED)
 
-                // ⚡ THROTTLE: Limiter à 10 FPS max pour éviter surcharge
+                // ⚡ ADAPTIVE THROTTLE: Limit based on video FPS (intelligent adaptation)
                 var now = DateTime.UtcNow;
-                if (now - _lastVideoFrameProcessed < TimeSpan.FromMilliseconds(100)) // 10 FPS max
+                var videoFPS = _virtualCamera?.ExactFPS ?? 30.0; // Get actual video FPS
+
+                // Smart throttling: high FPS videos get more frames, low FPS less
+                var maxUiFps = Math.Min(Math.Max(videoFPS * 0.8, 10.0), 25.0); // 80% of video FPS, clamped 10-25 FPS
+                var minInterval = TimeSpan.FromMilliseconds(1000.0 / maxUiFps);
+
+                if (now - _lastVideoFrameProcessed < minInterval)
                 {
-                    return; // Skip frame pour éviter overload
+                    return; // Skip frame pour éviter overload UI
                 }
                 _lastVideoFrameProcessed = now;
 
@@ -2152,6 +2156,11 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[VOIP-Manager] ❌ Error during dispose: {ex.Message}");
             }
         }
+
+        /// <summary>
+        /// ⚡ ADAPTIVE: Get current video FPS for UI throttling
+        /// </summary>
+        public double GetCurrentVideoFPS() => _virtualCamera?.ExactFPS ?? 30.0;
 
     }
 

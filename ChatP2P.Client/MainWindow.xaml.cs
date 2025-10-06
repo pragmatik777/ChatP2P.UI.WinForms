@@ -4910,8 +4910,8 @@ namespace ChatP2P.Client
                 message.Contains("CAMERA") || message.Contains("H264") || message.Contains("H.264") ||
                 message.Contains("VP8") || message.Contains("FRAME") || message.Contains("ENCODING") ||
                 message.Contains("FFMPEG") || message.Contains("VirtualCamera") || message.Contains("VideoCapture") ||
-                message.Contains("VOIP-Encoder") || message.Contains("VirtCam-Encoder") ||
-                message.Contains("Video encoding") || message.Contains("video encoder") ||
+                message.Contains("VOIP-Encoder") || message.Contains("VirtCam-Encoder") || message.Contains("VirtCam-Decoder") ||
+                message.Contains("EmguDecoder") || message.Contains("Video encoding") || message.Contains("video encoder") ||
                 message.Contains("UDP-VIDEO") || message.Contains("video relay"))
             {
                 await LogHelper.LogToVideoAsync(message, forceLog);
@@ -6009,13 +6009,10 @@ namespace ChatP2P.Client
         {
             try
             {
-                // Initialiser le décodeur si nécessaire
-                if (_h264Decoder == null)
-                {
-                    _h264Decoder = new EmguVideoDecoderService();
-                    _h264Decoder.LogEvent += (msg) => _ = LogToFile($"[H264-Decoder] {msg}");
-                    await LogToFile($"[VOIP-VIDEO] 🎯 Created H.264 decoder");
-                }
+                // ❌ DISABLED: H.264 decoder to prevent conflicts with SimpleVirtualCameraService
+                // Multiple EmguVideoDecoderService instances cause buffer conflicts and video stuttering
+                await LogToFile($"[VOIP-VIDEO] ⚠️ H.264 decoder disabled - using SimpleVirtualCameraService only");
+                return null; // Skip video processing to avoid conflicts
 
                 // EmguVideoDecoderService doesn't support direct H.264 decoding
                 // This would need a different approach for H.264 frames
@@ -6032,18 +6029,25 @@ namespace ChatP2P.Client
         // ✅ NOUVEAU: Instance du décodeur H.264
         private EmguVideoDecoderService? _h264Decoder;
 
-        // ⚡ UI THROTTLING: Éviter surcharge UI
+        // ⚡ UI THROTTLING: Éviter surcharge UI (adaptatif au FPS vidéo)
         private DateTime _lastUIRender = DateTime.MinValue;
-        private const int UI_FPS_LIMIT = 15; // 15 FPS pour l'UI (60ms entre frames)
 
         private async Task RenderVideoFrameToUI(byte[] rgbData, string peer)
         {
             try
             {
-                // ⚡ THROTTLE UI: Limiter à 15 FPS pour éviter surcharge
+                // ⚡ ADAPTIVE UI THROTTLE: Limit based on video FPS (intelligent adaptation)
                 var now = DateTime.UtcNow;
                 var timeSinceLastRender = now - _lastUIRender;
-                if (timeSinceLastRender.TotalMilliseconds < (1000.0 / UI_FPS_LIMIT))
+
+                // Get actual video FPS from VOIP manager
+                var videoFPS = _voipManager?.GetCurrentVideoFPS() ?? 30.0;
+
+                // Smart UI throttling: high FPS videos get more UI updates, low FPS less
+                var maxUiFps = Math.Min(Math.Max(videoFPS * 0.9, 12.0), 30.0); // 90% of video FPS, clamped 12-30 FPS
+                var minInterval = 1000.0 / maxUiFps;
+
+                if (timeSinceLastRender.TotalMilliseconds < minInterval)
                 {
                     return; // Skip cette frame pour éviter overload UI
                 }

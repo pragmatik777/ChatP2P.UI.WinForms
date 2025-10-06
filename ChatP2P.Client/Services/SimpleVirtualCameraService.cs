@@ -28,11 +28,12 @@ namespace ChatP2P.Client.Services
         private const int TARGET_WIDTH = 640;
         private const int TARGET_HEIGHT = 480;
         private int _currentFPS = 30; // Dynamic FPS based on loaded video file
+        private double _exactFPS = 30.0; // Exact FPS for precise timing calculations
 
         // ⚡ FRAME PRELOADING: Cache frames in RAM for ultra-fast access
-        private readonly Dictionary<int, byte[]> _frameBuffer = new();
+        // Removed: _frameBuffer - now delegating all buffering to EmguVideoDecoderService
         private const int BUFFER_SIZE = 60; // Preload 2 seconds of frames
-        private int _bufferStartIndex = 0;
+        // Removed: _bufferStartIndex - no longer managing local buffer
 
         // Events
         public event Action<VideoFrame>? VideoFrameReady; // Frame RGB brute
@@ -48,6 +49,7 @@ namespace ChatP2P.Client.Services
         public VideoCodecsEnum SelectedCodec => _videoEncoder?.SelectedCodec ?? VideoCodecsEnum.H264;
         public bool IsEncodingEnabled { get; set; } = false; // DISABLE encoding for performance test
         public int CurrentFPS => _currentFPS;
+        public double ExactFPS => _exactFPS;
 
         public SimpleVirtualCameraService()
         {
@@ -58,7 +60,7 @@ namespace ChatP2P.Client.Services
             _videoEncoder.LogEvent += (msg) => LogEvent?.Invoke($"[VirtCam-Encoder] {msg}");
             _videoEncoder.EncodedVideoReady += (data) => EncodedVideoReady?.Invoke(data);
 
-            // Initialiser le décodeur FFmpeg pour les vraies vidéos
+            // Initialiser le décodeur EmguCV pour les vraies vidéos
             _videoDecoder = new EmguVideoDecoderService();
             _videoDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[VirtCam-Decoder] {msg}");
         }
@@ -124,17 +126,19 @@ namespace ChatP2P.Client.Services
                         Duration = TimeSpan.FromMinutes(5); // Fallback sécurisé
                         LogEvent?.Invoke($"[SimpleVirtualCamera] ⚠️ Invalid video duration detected ({rawDuration}), using 5min fallback");
                     }
-                    // ⚡ ADAPTIVE FPS: Set current FPS from video file
-                    var videoFPS = (int)Math.Round(_videoDecoder.FrameRate);
-                    if (videoFPS > 0 && videoFPS <= 120) // Reasonable FPS range
+                    // ⚡ PRECISION FPS: Use exact framerate from video file (preserve decimals)
+                    var exactFPS = _videoDecoder.FrameRate;
+                    if (exactFPS > 0 && exactFPS <= 120) // Reasonable FPS range
                     {
-                        _currentFPS = videoFPS;
-                        LogEvent?.Invoke($"[SimpleVirtualCamera] 🎯 ADAPTIVE FPS: Set to {_currentFPS} FPS from video file");
+                        _currentFPS = (int)Math.Round(exactFPS); // For UI display
+                        _exactFPS = exactFPS; // Store exact value for precise timing
+                        LogEvent?.Invoke($"[SimpleVirtualCamera] 🎯 PRECISION FPS: {exactFPS:F3} FPS (rounded to {_currentFPS} for display)");
                     }
                     else
                     {
                         _currentFPS = 30; // Safe fallback
-                        LogEvent?.Invoke($"[SimpleVirtualCamera] ⚠️ Invalid FPS detected ({_videoDecoder.FrameRate:F2}), using 30 FPS fallback");
+                        _exactFPS = 30.0;
+                        LogEvent?.Invoke($"[SimpleVirtualCamera] ⚠️ Invalid FPS detected ({exactFPS:F3}), using 30 FPS fallback");
                     }
 
                     LogEvent?.Invoke($"[SimpleVirtualCamera] 📊 Video loaded: {_videoDecoder.TotalFrames} frames, {Duration:mm\\:ss\\.fff}, {_videoDecoder.FrameRate:F2} FPS → {_currentFPS} FPS");
@@ -245,27 +249,24 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                // ⚡ ADAPTIVE: Use dynamic FPS from loaded video file
-                var frameInterval = TimeSpan.FromMilliseconds(1000.0 / _currentFPS);
+                // ⚡ PRECISION: Use exact FPS from video file for perfect timing
+                var frameInterval = TimeSpan.FromMilliseconds(1000.0 / _exactFPS);
                 var frameIndex = 0;
-                var maxFrames = _videoDecoder?.TotalFrames ?? (_currentFPS * 60); // Fallback to 60s at current FPS
+                var estimatedMaxFrames = _videoDecoder?.TotalFrames ?? (_currentFPS * 60); // Fallback to 60s at current FPS
+                var frameStartTime = DateTime.UtcNow;
 
-                LogEvent?.Invoke($"[SimpleVirtualCamera] 🎬 ADAPTIVE LOOP: Playing {maxFrames} frames at {_currentFPS} FPS ({frameInterval.TotalMilliseconds:F1}ms/frame)");
+                LogEvent?.Invoke($"[SimpleVirtualCamera] 🎬 ADAPTIVE LOOP: Playing video at {_currentFPS} FPS ({frameInterval.TotalMilliseconds:F1}ms/frame), estimated {estimatedMaxFrames} frames");
 
                 while (!cancellationToken.IsCancellationRequested && _isPlaying)
                 {
                     try
                     {
-                        // ⚡ SIMPLE: Sequential frame reading, no complex time calculations
-                        if (frameIndex >= maxFrames)
-                        {
-                            frameIndex = 0; // Loop video
-                        }
+                        var currentFrameStart = DateTime.UtcNow;
 
-                        // Calculate position for display only
-                        CurrentPosition = TimeSpan.FromSeconds(frameIndex / (double)_currentFPS);
+                        // Calculate position for display only (use exact FPS for precision)
+                        CurrentPosition = TimeSpan.FromSeconds(frameIndex / _exactFPS);
 
-                        // Read frame directly by index (silent performance mode)
+                        // ⚡ REAL END DETECTION: Try to read frame, let EmguCV tell us when it's really over
                         var videoFrame = await GetVideoFrameByIndex(frameIndex);
 
                         if (videoFrame?.Data != null && videoFrame.Data.Length > 0)
@@ -285,22 +286,34 @@ namespace ChatP2P.Client.Services
                                     // Silent catch pour performance
                                 }
                             }
+
+                            frameIndex++;
                         }
                         else
                         {
-                            LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ No frame at index {frameIndex}, stopping");
-                            break;
+                            // ⚡ REAL END: Frame doesn't exist = we've reached the ACTUAL end
+                            LogEvent?.Invoke($"[SimpleVirtualCamera] 🏁 REAL END: Frame {frameIndex} doesn't exist, actual video end reached. Looping from start.");
+                            frameIndex = 0; // Loop back to beginning
+
+                            // ⚡ MICRO DELAY: Just enough to avoid rapid retry, maintain smoothness
+                            await Task.Delay(5, cancellationToken); // 5ms micro-delay only
+                            continue; // Try again with frame 0
                         }
 
-                        frameIndex++;
+                        // ⚡ PRECISION TIMING: Compensate for processing time to maintain accurate FPS
+                        var processingTime = DateTime.UtcNow - currentFrameStart;
+                        var remainingDelay = frameInterval - processingTime;
 
-                        // ⚡ SIMPLE TIMING: Fixed delay, no compensation
-                        await Task.Delay(frameInterval, cancellationToken);
+                        if (remainingDelay > TimeSpan.Zero)
+                        {
+                            await Task.Delay(remainingDelay, cancellationToken);
+                        }
+                        // If processing took longer than frame interval, continue immediately (catch up)
 
                         // Log every 5 seconds
                         if (frameIndex % (_currentFPS * 5) == 0)
                         {
-                            LogEvent?.Invoke($"[SimpleVirtualCamera] 📹 Frame {frameIndex}/{maxFrames} at {CurrentPosition:mm\\:ss} ({_currentFPS} FPS)");
+                            LogEvent?.Invoke($"[SimpleVirtualCamera] 📹 Frame {frameIndex} at {CurrentPosition:mm\\:ss} ({_currentFPS} FPS, est. {estimatedMaxFrames} total)");
                         }
                     }
                     catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
@@ -334,43 +347,25 @@ namespace ChatP2P.Client.Services
 
             try
             {
-                // ⚡ BUFFER HIT: Return cached frame instantly
-                if (_frameBuffer.ContainsKey(frameIndex))
+                // ⚡ DIRECT DELEGATION: Use EmguVideoDecoderService's intelligent buffering directly
+                // No need for double buffering - EmguDecoder handles caching optimally
+                var rgbData = await _videoDecoder.ReadFrameAsync(frameIndex);
+
+                if (rgbData != null && rgbData.Length > 0)
                 {
-                    var cachedData = _frameBuffer[frameIndex];
-                    LogEvent?.Invoke($"[SimpleVirtualCamera] ⚡ BUFFER HIT: Frame {frameIndex} from cache (<1ms)");
+                    LogEvent?.Invoke($"[SimpleVirtualCamera] ✅ DELEGATED: Frame {frameIndex} loaded via EmguDecoder ({rgbData.Length} bytes)");
 
                     return new VideoFrame
                     {
                         Width = TARGET_WIDTH,
                         Height = TARGET_HEIGHT,
-                        Data = cachedData,
+                        Data = rgbData,
                         PixelFormat = SIPSorceryMedia.Abstractions.VideoPixelFormatsEnum.Rgb,
                         Timestamp = DateTime.UtcNow.Ticks
                     };
                 }
 
-                // ⚡ BUFFER MISS: Load batch of frames around current index
-                LogEvent?.Invoke($"[SimpleVirtualCamera] 📦 BUFFER MISS: Preloading batch around frame {frameIndex}");
-                await PreloadFrameBatch(frameIndex);
-
-                // Try again from buffer
-                if (_frameBuffer.ContainsKey(frameIndex))
-                {
-                    var loadedData = _frameBuffer[frameIndex];
-                    LogEvent?.Invoke($"[SimpleVirtualCamera] ✅ BATCH LOADED: Frame {frameIndex} now available");
-
-                    return new VideoFrame
-                    {
-                        Width = TARGET_WIDTH,
-                        Height = TARGET_HEIGHT,
-                        Data = loadedData,
-                        PixelFormat = SIPSorceryMedia.Abstractions.VideoPixelFormatsEnum.Rgb,
-                        Timestamp = DateTime.UtcNow.Ticks
-                    };
-                }
-
-                LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ Failed to load frame {frameIndex} even after batch preload");
+                LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ DELEGATED: Frame {frameIndex} not available from EmguDecoder - likely end");
                 return null;
             }
             catch (Exception ex)
@@ -380,64 +375,7 @@ namespace ChatP2P.Client.Services
             }
         }
 
-        /// <summary>
-        /// ⚡ BATCH PRELOAD: Load BUFFER_SIZE frames around target index
-        /// </summary>
-        private async Task PreloadFrameBatch(int targetIndex)
-        {
-            try
-            {
-                var maxFrames = _videoDecoder?.TotalFrames ?? 1800;
-                var startIndex = Math.Max(0, targetIndex - 10); // 10 frames before
-                var endIndex = Math.Min(maxFrames - 1, startIndex + BUFFER_SIZE - 1); // 60 frames total
-
-                LogEvent?.Invoke($"[SimpleVirtualCamera] 📦 PRELOADING: Frames {startIndex} to {endIndex} ({endIndex - startIndex + 1} frames)");
-
-                // Clear old buffer if we're moving to a new region
-                if (Math.Abs(startIndex - _bufferStartIndex) > BUFFER_SIZE / 2)
-                {
-                    _frameBuffer.Clear();
-                    LogEvent?.Invoke($"[SimpleVirtualCamera] 🗑️ Cleared old buffer (moving from {_bufferStartIndex} to {startIndex})");
-                }
-
-                _bufferStartIndex = startIndex;
-
-                // Load frames in parallel (but limit to avoid overwhelming FFmpeg)
-                var semaphore = new SemaphoreSlim(4); // Max 4 concurrent FFmpeg calls
-                var tasks = new List<Task>();
-
-                for (int i = startIndex; i <= endIndex; i++)
-                {
-                    if (_frameBuffer.ContainsKey(i)) continue; // Skip if already cached
-
-                    var frameIndex = i;
-                    tasks.Add(Task.Run(async () =>
-                    {
-                        await semaphore.WaitAsync();
-                        try
-                        {
-                            var rgbData = await _videoDecoder.ReadFrameAsync(frameIndex);
-                            if (rgbData != null && rgbData.Length > 0)
-                            {
-                                _frameBuffer[frameIndex] = rgbData;
-                                LogEvent?.Invoke($"[SimpleVirtualCamera] ✅ Preloaded frame {frameIndex}");
-                            }
-                        }
-                        finally
-                        {
-                            semaphore.Release();
-                        }
-                    }));
-                }
-
-                await Task.WhenAll(tasks);
-                LogEvent?.Invoke($"[SimpleVirtualCamera] 🎯 BATCH COMPLETE: {_frameBuffer.Count} frames in buffer");
-            }
-            catch (Exception ex)
-            {
-                LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ Batch preload error: {ex.Message}");
-            }
-        }
+        // Removed: PreloadFrameBatch method - EmguVideoDecoderService handles all buffering
 
         /// <summary>
         /// Obtenir frame vidéo - vraie vidéo si chargée, sinon contenu procédural (avec cache optimisé)
