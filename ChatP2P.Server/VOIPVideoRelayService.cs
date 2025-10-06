@@ -93,39 +93,46 @@ namespace ChatP2P.Server
         {
             try
             {
-                Console.WriteLine($"[UDP-VIDEO-SERVER] 📨 Received UDP packet from {clientEndPoint} ({data.Length} bytes)");
                 await ServerLogHelper.LogToUDPVideoAsync($"📨 Received UDP packet from {clientEndPoint} ({data.Length} bytes)");
 
-                var json = Encoding.UTF8.GetString(data);
-                var message = JsonSerializer.Deserialize<UDPVideoMessage>(json);
-
-                if (message == null)
+                // ✅ NEW: Check if this is a BINARY video packet or legacy JSON
+                if (data.Length >= 32 && Encoding.UTF8.GetString(data, 0, 4) == "VDAT")
                 {
-                    Console.WriteLine($"[UDP-VIDEO-SERVER] ❌ Failed to deserialize message from {clientEndPoint}");
-                    await ServerLogHelper.LogToUDPVideoAsync($"❌ Failed to deserialize message from {clientEndPoint}");
-                    return;
+                    // Process BINARY video data packet - RELAY DIRECTLY for maximum performance
+                    await ProcessBinaryVideoDataRelay(data, clientEndPoint);
                 }
-
-                Console.WriteLine($"[UDP-VIDEO-SERVER] 📋 Message type: {message.Type} from {message.FromPeer}");
-                await ServerLogHelper.LogToUDPVideoAsync($"📋 Message type: {message.Type} from {message.FromPeer}");
-
-                switch (message.Type)
+                else
                 {
-                    case "REGISTER":
-                        await HandleClientRegistration(message.FromPeer, clientEndPoint);
-                        break;
+                    // Legacy JSON processing for registration/control messages
+                    var json = Encoding.UTF8.GetString(data);
+                    var message = JsonSerializer.Deserialize<UDPVideoMessage>(json);
 
-                    case "VIDEO_DATA":
-                        await HandleVideoData(message, clientEndPoint);
-                        break;
+                    if (message == null)
+                    {
+                        await ServerLogHelper.LogToUDPVideoAsync($"❌ Failed to deserialize message from {clientEndPoint}");
+                        return;
+                    }
 
-                    case "START_SESSION":
-                        await HandleStartSession(message.FromPeer, message.ToPeer, clientEndPoint);
-                        break;
+                    await ServerLogHelper.LogToUDPVideoAsync($"📋 Message type: {message.Type} from {message.FromPeer}");
 
-                    case "END_SESSION":
-                        await HandleEndSession(message.FromPeer, message.ToPeer);
-                        break;
+                    switch (message.Type)
+                    {
+                        case "REGISTER":
+                            await HandleClientRegistration(message.FromPeer, clientEndPoint);
+                            break;
+
+                        case "VIDEO_DATA":
+                            await HandleVideoData(message, clientEndPoint);
+                            break;
+
+                        case "START_SESSION":
+                            await HandleStartSession(message.FromPeer, message.ToPeer, clientEndPoint);
+                            break;
+
+                        case "END_SESSION":
+                            await HandleEndSession(message.FromPeer, message.ToPeer);
+                            break;
+                    }
                 }
             }
             catch (Exception ex)
@@ -134,11 +141,163 @@ namespace ChatP2P.Server
             }
         }
 
+        /// <summary>
+        /// ✅ NEW: Process BINARY video data and relay directly without JSON overhead
+        /// Maximum performance relay for real-time video streaming
+        /// </summary>
+        private async Task ProcessBinaryVideoDataRelay(byte[] packet, IPEndPoint senderEndPoint)
+        {
+            try
+            {
+                if (packet.Length < 32)
+                {
+                    await ServerLogHelper.LogToUDPVideoAsync($"❌ Binary packet too small: {packet.Length} bytes");
+                    return;
+                }
+
+                // Parse binary header to extract routing info
+                var header = ParseBinaryVideoHeader(packet);
+                if (header == null)
+                {
+                    await ServerLogHelper.LogToUDPVideoAsync($"❌ Failed to parse binary video header");
+                    return;
+                }
+
+                // Update last seen time for sender
+                _clientLastSeen[header.FromPeer] = DateTime.UtcNow;
+
+                // Find active session
+                var sessionKey1 = $"{header.FromPeer}↔{header.ToPeer}";
+                var sessionKey2 = $"{header.ToPeer}↔{header.FromPeer}";
+
+                if (!_activeSessions.TryGetValue(sessionKey1, out var session) &&
+                    !_activeSessions.TryGetValue(sessionKey2, out session))
+                {
+                    // ✅ DIAGNOSTIC: Log session issue plus souvent pour debugging
+                    if (header.PacketNumber % 10 == 0)
+                    {
+                        await ServerLogHelper.LogToUDPVideoAsync($"❌ No active session for BINARY video: {sessionKey1} (packet #{header.PacketNumber})");
+                        await ServerLogHelper.LogToUDPVideoAsync($"🔍 Current active sessions: {_activeSessions.Count}");
+                        foreach (var kvp in _activeSessions)
+                        {
+                            await ServerLogHelper.LogToUDPVideoAsync($"🔍   - {kvp.Key} (started: {kvp.Value.StartedAt})");
+                        }
+                    }
+                    return;
+                }
+
+                // Determine target endpoint
+                IPEndPoint? targetEndPoint = null;
+                if (session.Peer1 == header.FromPeer)
+                    targetEndPoint = session.Peer2EndPoint;
+                else if (session.Peer2 == header.FromPeer)
+                    targetEndPoint = session.Peer1EndPoint;
+
+                if (targetEndPoint == null) return;
+
+                // ✅ PERFORMANCE CRITICAL: Relay packet DIRECTLY without any processing
+                await _udpServer!.SendAsync(packet, targetEndPoint);
+
+                // Update statistics
+                session.VideoPacketsRelayed++;
+
+                // Log only first fragment of each packet to reduce overhead
+                if (header.FragmentIndex == 0)
+                {
+                    LogEvent?.Invoke($"[UDP-VIDEO] 🚀 BINARY relay: packet #{header.PacketNumber} from {header.FromPeer} to {header.ToPeer} ({packet.Length} bytes, {header.TotalFragments} fragments)");
+                    await ServerLogHelper.LogToUDPVideoAsync($"🚀 BINARY relay: packet #{header.PacketNumber} ({packet.Length} bytes, {header.TotalFragments} fragments)");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[UDP-VIDEO] ❌ Error in binary video relay: {ex.Message}");
+                await ServerLogHelper.LogToUDPVideoAsync($"❌ Error in binary video relay: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// ✅ NEW: Parse binary video header for routing (server-side)
+        /// </summary>
+        private BinaryVideoHeader? ParseBinaryVideoHeader(byte[] packet)
+        {
+            try
+            {
+                int offset = 0;
+
+                // Check magic type "VDAT" (4 bytes)
+                var typeBytes = new byte[4];
+                Array.Copy(packet, offset, typeBytes, 0, 4);
+                var type = Encoding.UTF8.GetString(typeBytes);
+                if (type != "VDAT") return null;
+                offset += 4;
+
+                // Parse FromPeer (1 + 7 bytes) with bounds checking
+                if (packet.Length < offset + 1) return null;
+                var fromLength = Math.Min(packet[offset], (byte)7);
+                offset += 1;
+                if (packet.Length < offset + fromLength) return null;
+                var fromBytes = new byte[fromLength];
+                Array.Copy(packet, offset, fromBytes, 0, fromLength);
+                var fromPeer = Encoding.UTF8.GetString(fromBytes);
+                offset += 7;
+
+                // Parse ToPeer (1 + 7 bytes) with bounds checking
+                if (packet.Length < offset + 1) return null;
+                var toLength = Math.Min(packet[offset], (byte)7);
+                offset += 1;
+                if (packet.Length < offset + toLength) return null;
+                var toBytes = new byte[toLength];
+                Array.Copy(packet, offset, toBytes, 0, toLength);
+                var toPeer = Encoding.UTF8.GetString(toBytes);
+                offset += 7;
+
+                // Parse metadata (12 bytes) with bounds checking
+                if (packet.Length < offset + 12) return null;
+                var packetNumber = BitConverter.ToInt32(packet, offset);
+                offset += 4;
+                var fragIndex = BitConverter.ToUInt16(packet, offset);
+                offset += 2;
+                var totalFrags = BitConverter.ToUInt16(packet, offset);
+                offset += 2;
+                var dataLength = BitConverter.ToInt32(packet, offset);
+                offset += 4;
+
+                return new BinaryVideoHeader
+                {
+                    FromPeer = fromPeer,
+                    ToPeer = toPeer,
+                    PacketNumber = packetNumber,
+                    FragmentIndex = fragIndex,
+                    TotalFragments = totalFrags,
+                    DataLength = dataLength
+                };
+            }
+            catch (Exception ex)
+            {
+                LogEvent?.Invoke($"[UDP-VIDEO] ❌ Error parsing binary header: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// ✅ NEW: Binary video header structure (server-side)
+        /// </summary>
+        private class BinaryVideoHeader
+        {
+            public string FromPeer { get; set; } = "";
+            public string ToPeer { get; set; } = "";
+            public int PacketNumber { get; set; }
+            public int FragmentIndex { get; set; }
+            public int TotalFragments { get; set; }
+            public int DataLength { get; set; }
+        }
+
         private async Task HandleClientRegistration(string peerName, IPEndPoint endPoint)
         {
             _clients[peerName] = endPoint;
             _clientLastSeen[peerName] = DateTime.UtcNow;
             LogEvent?.Invoke($"[UDP-VIDEO] ✅ Registered {peerName} at {endPoint}");
+            await ServerLogHelper.LogToUDPVideoAsync($"✅ CLIENT REGISTERED: {peerName} at {endPoint}");
 
             // Send confirmation back
             var response = new UDPVideoMessage
@@ -172,6 +331,7 @@ namespace ChatP2P.Server
 
             _activeSessions[sessionKey] = session;
             LogEvent?.Invoke($"[UDP-VIDEO] 📹 Started video session: {sessionKey}");
+            await ServerLogHelper.LogToUDPVideoAsync($"📹 ✅ VIDEO SESSION CREATED: {sessionKey}");
 
             // Notify both peers
             var notification1 = new UDPVideoMessage

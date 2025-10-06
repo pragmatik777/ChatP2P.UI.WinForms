@@ -3448,14 +3448,11 @@ namespace ChatP2P.Client
                     mediaLocalVideo.Source = testBitmap;
                     await LogToFile("[VOIP-UI] 🧪 TEST: Test bitmap assigned to local video");
 
-                    // Force a visible confirmation
-                    MessageBox.Show("🧪 TEST: Video controls should now be visible with green/purple backgrounds and test image. Do you see them?",
-                                   "Video Test", MessageBoxButton.OK, MessageBoxImage.Information);
+                    // Video controls are now visible and ready
                 }
                 else
                 {
                     await LogToFile("[VOIP-UI] ❌ TEST: Failed to create test bitmap");
-                    MessageBox.Show("❌ TEST: Failed to create test image", "Video Test Error", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
 
                 // ✅ FIX: Diagnostic approfondi avant d'appeler StartVideoCallAsync
@@ -3622,7 +3619,7 @@ namespace ChatP2P.Client
                     var videoFile = openFileDialog.FileName;
                     await LogToFile($"[VOIP-TEST] 🎬 Loading video file for {(isVirtualCameraSelected ? "Virtual Camera" : "testing")}: {videoFile}");
 
-                    if (_videoCapture != null)
+                    if (_videoCapture != null && _voipManager != null)
                     {
                         var success = await _videoCapture.StartVideoFilePlaybackAsync(videoFile);
                         if (success)
@@ -3632,6 +3629,21 @@ namespace ChatP2P.Client
                             btnTestVideoFile.IsEnabled = false;
                             btnStopVideoTest.IsEnabled = true;
                             await LogToFile($"[VOIP-TEST] ✅ Video file playback started");
+
+                            // ✅ FIX CRITIQUE: Activer le mode caméra virtuelle quand un fichier vidéo est chargé
+                            _voipManager.UseVirtualCamera = true;
+                            await LogToFile($"[VOIP-TEST] 🎥 Virtual camera mode activated for video streaming");
+
+                            // ✅ FIX CRITIQUE: Charger le fichier vidéo dans la caméra virtuelle du VOIP
+                            var virtualLoaded = await _voipManager.LoadVirtualVideoFileAsync(videoFile);
+                            if (virtualLoaded)
+                            {
+                                await LogToFile($"[VOIP-TEST] ✅ Video file loaded in VOIP virtual camera: {IOPath.GetFileName(videoFile)}");
+                            }
+                            else
+                            {
+                                await LogToFile($"[VOIP-TEST] ❌ Failed to load video file in VOIP virtual camera");
+                            }
                         }
                         else
                         {
@@ -4876,16 +4888,22 @@ namespace ChatP2P.Client
         private async Task LogToFile(string message, bool forceLog = false)
         {
             // Déterminer le type de log basé sur le contenu du message
-            if (message.Contains("[VIDEO]") || message.Contains("VIDEO") || message.Contains("📹") ||
-                message.Contains("🎥") || message.Contains("CAMERA") || message.Contains("H264") ||
+            if (message.Contains("[VIDEO]") || message.Contains("Video capture") || message.Contains("Video event") ||
+                message.Contains("Virtual camera") || message.Contains("📹") || message.Contains("🎥") ||
+                message.Contains("CAMERA") || message.Contains("H264") || message.Contains("H.264") ||
                 message.Contains("VP8") || message.Contains("FRAME") || message.Contains("ENCODING") ||
-                message.Contains("FFMPEG") || message.Contains("VirtualCamera") || message.Contains("VideoCapture"))
+                message.Contains("FFMPEG") || message.Contains("VirtualCamera") || message.Contains("VideoCapture") ||
+                message.Contains("VOIP-Encoder") || message.Contains("VirtCam-Encoder") ||
+                message.Contains("Video encoding") || message.Contains("video encoder") ||
+                message.Contains("UDP-VIDEO") || message.Contains("video relay"))
             {
                 await LogHelper.LogToVideoAsync(message, forceLog);
             }
             else if (message.Contains("[AUDIO]") || message.Contains("AUDIO") || message.Contains("🎤") ||
-                message.Contains("🔊") || message.Contains("VOIP") || message.Contains("OPUS") ||
-                message.Contains("SPECTRUM") || message.Contains("MIC-TEST"))
+                message.Contains("🔊") || message.Contains("OPUS") ||
+                message.Contains("SPECTRUM") || message.Contains("MIC-TEST") ||
+                (message.Contains("VOIP") && !message.Contains("Video") && !message.Contains("video") &&
+                 !message.Contains("H264") && !message.Contains("H.264") && !message.Contains("Virtual camera")))
             {
                 await LogHelper.LogToAudioAsync(message, forceLog);
             }
@@ -5891,10 +5909,13 @@ namespace ChatP2P.Client
         {
             try
             {
-                await LogToFile($"[VOIP-VIDEO] Received VideoFrame from {peer}: {videoFrame.Width}x{videoFrame.Height}, {videoFrame.Data.Length} bytes");
+                await LogToFile($"[VOIP-VIDEO] Received RGB VideoFrame from {peer}: {videoFrame.Width}x{videoFrame.Height}, {videoFrame.Data.Length} bytes");
 
-                // Convert VideoFrame to byte[] and call existing renderer
-                OnRemoteVideoReceived(peer, videoFrame.Data);
+                // VideoFrame.Data is already RGB from VOIPCallManager, render directly
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    await RenderVideoFrameToUI(videoFrame.Data, peer);
+                });
             }
             catch (Exception ex)
             {
@@ -6038,19 +6059,22 @@ namespace ChatP2P.Client
                 // Freezer pour permettre l'utilisation cross-thread
                 bitmap.Freeze();
 
-                // Afficher dans l'UI WPF
-                if (mediaRemoteVideo != null)
+                // Afficher dans l'UI WPF - THREAD SAFE
+                await Dispatcher.InvokeAsync(() =>
                 {
-                    // Afficher la frame dans l'Image control
-                    mediaRemoteVideo.Source = bitmap;
-                    mediaRemoteVideo.Visibility = Visibility.Visible;
+                    if (mediaRemoteVideo != null)
+                    {
+                        // Afficher la frame dans l'Image control
+                        mediaRemoteVideo.Source = bitmap;
+                        mediaRemoteVideo.Visibility = Visibility.Visible;
 
-                    // Mettre à jour le statut
-                    lblRemoteVideoStatus.Text = $"📹 {peer} - {width}x{height} ({rgbData.Length}B)";
-                    lblRemoteVideoStatus.Visibility = Visibility.Visible;
+                        // Mettre à jour le statut
+                        lblRemoteVideoStatus.Text = $"📹 {peer} - {width}x{height} ({rgbData.Length}B)";
+                        lblRemoteVideoStatus.Visibility = Visibility.Visible;
+                    }
+                });
 
-                    await LogToFile($"[VOIP-VIDEO] ✅ Frame rendered successfully: {width}x{height} from {peer}");
-                }
+                await LogToFile($"[VOIP-VIDEO] ✅ Frame rendered successfully: {width}x{height} from {peer}");
             }
             catch (Exception ex)
             {

@@ -245,6 +245,36 @@ var decrypted = await CryptoService.DecryptMessage(encrypted, ownerPrivateKey);
 
 **🎯 Status** : ✅ Logging centralisé production ready (build successful)
 
+## 🎥 **VIDEO STREAMING FIXES MAJEURS (06/10/2025) ✅ RÉSOLU**
+**🎯 System Goal**: Élimination frames corruption + UDP fragment reassembly optimization
+
+### 🔧 **UDP Fragment Reassembly Fix (06/10/2025)**:
+**Problem**: TotalFragments mismatch causait "Missing fragment" et corruption vidéo
+- Log errors: "Major TotalFragments mismatch for packet #11: expected 4, got 24"
+- Symptôme: "entrelaced frames" et corruption vidéo systématique
+**Solution**: Stratégie fragment count resolution optimisée
+- **Ancienne méthode**: `Math.Min(storedTotal, totalFragments)` (perdait des fragments)
+- **Nouvelle méthode**: `Math.Max(storedTotal, totalFragments)` (capture tous les fragments)
+- **Résultat**: ✅ Élimination complète des "Missing fragment" errors
+
+### 🎨 **Frames Procédurales Corruption Fix (06/10/2025)**:
+**Problem**: Mélange frames procédurales (couleurs test) avec vraie vidéo H.264
+- Symptôme: Frames de couleurs aléatoires entrelacées avec vraie vidéo
+- Root cause: `SimpleVirtualCameraService` générait fallback procédural + `GenerateSimulatedFrame()`
+**Solution**: Désactivation totale contenu procédural
+- **SimpleVirtualCameraService.cs**: `StartPlaybackAsync()` retourne `false` si pas de vidéo réelle
+- **GetVideoFrame()**: Retourne `null` au lieu de `GenerateSimulatedFrame()`
+- **VOIPCallManager.cs**: Protection null frames dans `OnVideoFrameReady()`
+- **Résultat**: ✅ 100% vidéo pure sans frames test parasites
+
+### 🎯 **Performance Issues Identifiés (06/10/2025)**:
+**Symptôme Actuel**: Vidéo "frame par frame" (lente/saccadée) malgré qualité améliorée
+- ✅ Qualité vidéo: Désormais correcte (pas de corruption)
+- ✅ UDP Reassembly: Fonctionnel (pas de missing fragments)
+- ⚠️ Frame Rate: Rendering lent nécessite optimisation timing
+
+**🎯 Status**: ✅ Corruption resolved, performance optimization next priority
+
 ## 🎥 **VIDEO STREAMING SYSTEM FONCTIONNEL ✅ SUCCESS (01/10/2025)**
 **🎯 System Goal**: UDP Video streaming avec H.264 compression optimisée pour low-latency
 

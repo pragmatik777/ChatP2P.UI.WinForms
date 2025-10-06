@@ -350,9 +350,102 @@ namespace ChatP2P.Server
             }
         }
 
+        /// <summary>
+        /// ✅ SÉCURITÉ: Validation stricte des messages ChatP2P contre scans automatisés
+        /// </summary>
+        private bool IsValidChatP2PMessage(ClientConnection client, string message)
+        {
+            if (string.IsNullOrEmpty(message)) return false;
+
+            // ✅ SÉCURITÉ 1: Bloquer requêtes HTTP/Web
+            if (message.StartsWith("GET ") || message.StartsWith("POST ") ||
+                message.StartsWith("HEAD ") || message.StartsWith("PUT ") ||
+                message.StartsWith("DELETE ") || message.StartsWith("OPTIONS ") ||
+                message.StartsWith("HTTP/") || message.Contains("User-Agent:") ||
+                message.Contains("Mozilla/") || message.Contains("Chrome/") ||
+                message.Contains("Accept:") || message.Contains("Accept-Encoding:") ||
+                message.Contains("Host:"))
+            {
+                Console.WriteLine($"🚫 HTTP scan detected from {client.Id}");
+                return false;
+            }
+
+            // ✅ SÉCURITÉ 2: Bloquer données binaires suspectes
+            if (message.Any(c => c < 32 && c != '\n' && c != '\r' && c != '\t'))
+            {
+                Console.WriteLine($"🚫 Binary data detected from {client.Id}");
+                return false;
+            }
+
+            // ✅ SÉCURITÉ 3: Limiter taille messages (anti-DOS)
+            if (message.Length > 100000) // 100KB max
+            {
+                Console.WriteLine($"🚫 Oversized message from {client.Id}: {message.Length} bytes");
+                return false;
+            }
+
+            // ✅ SÉCURITÉ 4: Vérifier que c'est un protocole ChatP2P valide
+            var validTags = new[]
+            {
+                ProtocolTags.TAG_NAME, ProtocolTags.TAG_PRIV, ProtocolTags.TAG_MSG,
+                ProtocolTags.TAG_ICE_OFFER, ProtocolTags.TAG_ICE_ANSWER, ProtocolTags.TAG_ICE_CAND,
+                ProtocolTags.TAG_WEBRTC_INITIATE, ProtocolTags.TAG_WEBRTC_SIGNAL,
+                ProtocolTags.TAG_FILEMETA, ProtocolTags.TAG_FILECHUNK, ProtocolTags.TAG_FILEEND,
+                ProtocolTags.TAG_FRIEND_REQ, ProtocolTags.TAG_FRIEND_ACCEPT,
+                ProtocolTags.TAG_FRIEND_ACCEPT_DUAL, ProtocolTags.TAG_FRIEND_REJECT
+            };
+
+            if (!validTags.Any(tag => message.StartsWith(tag)))
+            {
+                Console.WriteLine($"🚫 Invalid protocol tag from {client.Id}: {message.Substring(0, Math.Min(20, message.Length))}...");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// ✅ SÉCURITÉ: Déconnecter immédiatement un client malveillant
+        /// </summary>
+        private async Task DisconnectMaliciousClient(ClientConnection client, string reason)
+        {
+            try
+            {
+                Console.WriteLine($"🚫 SECURITY: Disconnecting malicious client {client.Id} ({reason})");
+
+                // Fermer connexion TCP immédiatement
+                client.TcpClient?.Close();
+
+                // Supprimer de toutes les collections
+                if (!string.IsNullOrEmpty(client.Name))
+                {
+                    if (client.IsTrustedChannel)
+                        _nameToId.TryRemove(client.Name, out _);
+                    else
+                        _friendRequestNameToId.TryRemove(client.Name, out _);
+                }
+
+                if (client.IsTrustedChannel)
+                    _clients.TryRemove(client.Id, out _);
+                else
+                    _friendRequestClients.TryRemove(client.Id, out _);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error disconnecting malicious client: {ex.Message}");
+            }
+        }
+
         // ===== TRAITEMENT MESSAGES FRIEND REQUESTS =====
         private async Task ProcessFriendRequestMessage(ClientConnection client, string message)
         {
+            // ✅ SÉCURITÉ: Validation anti-scan sur canal friend requests aussi
+            if (!IsValidChatP2PFriendMessage(client, message))
+            {
+                await DisconnectMaliciousClient(client, "Invalid protocol on friend channel");
+                return;
+            }
+
             // Seuls les tags autorisés sur le canal ouvert
             if (message.StartsWith(ProtocolTags.TAG_NAME))
             {
@@ -382,19 +475,71 @@ namespace ChatP2P.Server
             }
             else
             {
-                // DEBUG: Analyser les messages non reconnus
-                Console.WriteLine($"❌ [DEBUG] Unauthorized message from {client.Name}");
-                Console.WriteLine($"❌ [DEBUG] Message length: {message.Length}");
-                Console.WriteLine($"❌ [DEBUG] First 10 chars: '{message.Substring(0, Math.Min(10, message.Length))}'");
-                Console.WriteLine($"❌ [DEBUG] Starts with '?{{': {message.StartsWith("?{")}");
-                Console.WriteLine($"❌ [DEBUG] Starts with '{{': {message.StartsWith("{")}");
-                Console.WriteLine($"❌ [DEBUG] Full message: {message}");
+                Console.WriteLine($"🚫 BLOCKED unknown protocol on friend channel from {client.Id}: {message.Substring(0, Math.Min(50, message.Length))}...");
+                await DisconnectMaliciousClient(client, "Unknown protocol on friend channel");
             }
+        }
+
+        /// <summary>
+        /// ✅ SÉCURITÉ: Validation spécifique pour canal friend requests (inclut JSON sécurisé)
+        /// </summary>
+        private bool IsValidChatP2PFriendMessage(ClientConnection client, string message)
+        {
+            if (string.IsNullOrEmpty(message)) return false;
+
+            // ✅ SÉCURITÉ: Réutiliser validations de base (HTTP, binaire, taille)
+            if (message.StartsWith("GET ") || message.StartsWith("POST ") ||
+                message.StartsWith("HEAD ") || message.StartsWith("HTTP/") ||
+                message.Contains("User-Agent:") || message.Contains("Mozilla/"))
+            {
+                Console.WriteLine($"🚫 HTTP scan detected on friend channel from {client.Id}");
+                return false;
+            }
+
+            if (message.Any(c => c < 32 && c != '\n' && c != '\r' && c != '\t'))
+            {
+                Console.WriteLine($"🚫 Binary data detected on friend channel from {client.Id}");
+                return false;
+            }
+
+            if (message.Length > 100000)
+            {
+                Console.WriteLine($"🚫 Oversized message on friend channel from {client.Id}: {message.Length} bytes");
+                return false;
+            }
+
+            // ✅ SÉCURITÉ: Tags valides pour canal friend requests (inclut JSON sécurisé)
+            var validFriendTags = new[]
+            {
+                ProtocolTags.TAG_NAME, ProtocolTags.TAG_FRIEND_REQ, ProtocolTags.TAG_FRIEND_ACCEPT,
+                ProtocolTags.TAG_FRIEND_ACCEPT_DUAL, ProtocolTags.TAG_FRIEND_REJECT
+            };
+
+            // Autoriser aussi messages JSON sécurisés PQC
+            bool isValidTag = validFriendTags.Any(tag => message.StartsWith(tag));
+            bool isValidSecureJSON = message.Contains("\"type\":\"SECURE_HANDSHAKE_REQUEST\"") ||
+                                   message.Contains("\"type\":\"SECURE_TUNNEL_MESSAGE\"") ||
+                                   message.Contains("\"type\":\"TUNNEL_KEY_EXCHANGE\"");
+
+            if (!isValidTag && !isValidSecureJSON)
+            {
+                Console.WriteLine($"🚫 Invalid friend protocol from {client.Id}: {message.Substring(0, Math.Min(20, message.Length))}...");
+                return false;
+            }
+
+            return true;
         }
 
         // ===== TRAITEMENT MESSAGES TRUSTED =====
         private async Task ProcessTrustedMessage(ClientConnection client, string message)
         {
+            // ✅ SÉCURITÉ: Vérifications anti-scan AVANT traitement
+            if (!IsValidChatP2PMessage(client, message))
+            {
+                await DisconnectMaliciousClient(client, "Invalid protocol");
+                return;
+            }
+
             // Tous les tags autorisés sur le canal restreint
             if (message.StartsWith(ProtocolTags.TAG_NAME))
             {
@@ -408,7 +553,7 @@ namespace ChatP2P.Server
             {
                 await HandlePublicMessage(client, message);
             }
-            else if (message.StartsWith(ProtocolTags.TAG_ICE_OFFER) || 
+            else if (message.StartsWith(ProtocolTags.TAG_ICE_OFFER) ||
                      message.StartsWith(ProtocolTags.TAG_ICE_ANSWER) ||
                      message.StartsWith(ProtocolTags.TAG_ICE_CAND))
             {
@@ -427,7 +572,8 @@ namespace ChatP2P.Server
             }
             else
             {
-                Console.WriteLine($"Unknown message from {client.Name}: {message}");
+                Console.WriteLine($"🚫 BLOCKED unknown protocol from {client.Id}: {message.Substring(0, Math.Min(50, message.Length))}...");
+                await DisconnectMaliciousClient(client, "Unknown protocol");
             }
         }
 

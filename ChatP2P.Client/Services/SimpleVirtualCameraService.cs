@@ -18,11 +18,16 @@ namespace ChatP2P.Client.Services
         private Task? _playbackTask;
         private CancellationTokenSource? _cancellationTokenSource;
         private VideoEncodingService? _videoEncoder;
+        private FFmpegVideoDecoderService? _videoDecoder;
+
+        // Cache pour optimiser les performances
+        private byte[]? _lastFrameData;
+        private TimeSpan _lastFrameTime = TimeSpan.MinValue;
 
         // Configuration
         private const int TARGET_WIDTH = 640;
         private const int TARGET_HEIGHT = 480;
-        private const int TARGET_FPS = 15;
+        private const int TARGET_FPS = 10; // Réduire FPS pour moins de lag
 
         // Events
         public event Action<VideoFrame>? VideoFrameReady; // Frame RGB brute
@@ -40,12 +45,16 @@ namespace ChatP2P.Client.Services
 
         public SimpleVirtualCameraService()
         {
-            LogEvent?.Invoke("[SimpleVirtualCamera] 📹 Virtual camera with H.264/VP8 encoding initialized");
+            LogEvent?.Invoke("[SimpleVirtualCamera] 📹 Virtual camera with real video + H.264/VP8 encoding initialized");
 
             // Initialiser l'encodeur vidéo
             _videoEncoder = new VideoEncodingService();
             _videoEncoder.LogEvent += (msg) => LogEvent?.Invoke($"[VirtCam-Encoder] {msg}");
             _videoEncoder.EncodedVideoReady += (data) => EncodedVideoReady?.Invoke(data);
+
+            // Initialiser le décodeur FFmpeg pour les vraies vidéos
+            _videoDecoder = new FFmpegVideoDecoderService();
+            _videoDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[VirtCam-Decoder] {msg}");
         }
 
         /// <summary>
@@ -87,19 +96,29 @@ namespace ChatP2P.Client.Services
 
                 await StopPlaybackAsync();
 
+                // Charger le fichier avec FFmpeg decoder
+                if (_videoDecoder != null)
+                {
+                    var loadSuccess = await _videoDecoder.LoadVideoFileAsync(filePath);
+                    if (!loadSuccess)
+                    {
+                        LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ Failed to load video file with FFmpeg");
+                        return false;
+                    }
+
+                    // Utiliser les vraies informations du fichier
+                    Duration = _videoDecoder.Duration;
+                    LogEvent?.Invoke($"[SimpleVirtualCamera] 📊 Video loaded: {_videoDecoder.TotalFrames} frames, {Duration:mm\\:ss\\.fff}, {_videoDecoder.FrameRate:F2} FPS");
+                }
+
                 lock (_lock)
                 {
                     _currentVideoFile = filePath;
                 }
 
-                // Analyser le fichier pour obtenir la durée approximative
                 var fileInfo = new FileInfo(filePath);
-                var estimatedDuration = TimeSpan.FromSeconds(Math.Max(30, fileInfo.Length / 1_000_000)); // Estimation basique
-
-                Duration = estimatedDuration;
-
-                LogEvent?.Invoke($"[SimpleVirtualCamera] ✅ Video loaded (simulation): {Path.GetFileName(filePath)}");
-                LogEvent?.Invoke($"[SimpleVirtualCamera] 📊 Estimated duration: {Duration:mm\\:ss}, Size: {fileInfo.Length / 1024 / 1024}MB");
+                LogEvent?.Invoke($"[SimpleVirtualCamera] ✅ Video loaded: {Path.GetFileName(filePath)}");
+                LogEvent?.Invoke($"[SimpleVirtualCamera] 📊 Duration: {Duration:mm\\:ss}, Size: {fileInfo.Length / 1024 / 1024}MB");
 
                 return true;
             }
@@ -119,9 +138,8 @@ namespace ChatP2P.Client.Services
             {
                 if (string.IsNullOrEmpty(_currentVideoFile))
                 {
-                    LogEvent?.Invoke("[SimpleVirtualCamera] 📹 No video file loaded, using procedural content generation");
-                    _currentVideoFile = "PROCEDURAL_CONTENT"; // Marquer comme contenu procédural
-                    Duration = TimeSpan.FromMinutes(60); // 60 minutes de contenu procédural
+                    LogEvent?.Invoke("[SimpleVirtualCamera] ❌ No video file loaded - virtual camera disabled");
+                    return false; // Pas de contenu procédural, désactiver la caméra
                 }
 
                 lock (_lock)
@@ -220,8 +238,8 @@ namespace ChatP2P.Client.Services
 
                         CurrentPosition = targetTime;
 
-                        // Générer frame simulée basée sur le fichier et le temps
-                        var videoFrame = GenerateSimulatedFrame(frameCount, targetTime);
+                        // Lire frame réelle ou générer contenu procédural
+                        var videoFrame = await GetVideoFrame(frameCount, targetTime);
 
                         // Émettre frame RGB brute
                         VideoFrameReady?.Invoke(videoFrame);
@@ -273,7 +291,68 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// Générer frame simulée avec pattern basé sur le fichier et le temps
+        /// Obtenir frame vidéo - vraie vidéo si chargée, sinon contenu procédural (avec cache optimisé)
+        /// </summary>
+        private async Task<VideoFrame> GetVideoFrame(int frameNumber, TimeSpan position)
+        {
+            // Si un fichier vidéo réel est chargé, l'utiliser
+            if (_videoDecoder != null && _videoDecoder.IsInitialized &&
+                !string.IsNullOrEmpty(_currentVideoFile) && _currentVideoFile != "PROCEDURAL_CONTENT")
+            {
+                try
+                {
+                    // ✅ OPTIMISATION: Réutiliser la frame si position identique (évite FFmpeg redondant)
+                    var timeDiff = Math.Abs((position - _lastFrameTime).TotalMilliseconds);
+                    if (_lastFrameData != null && timeDiff < 10) // Cache valide si <10ms différence (plus strict)
+                    {
+                        LogEvent?.Invoke($"[SimpleVirtualCamera] 📦 Using cached frame (diff: {timeDiff:F1}ms)");
+                        return new VideoFrame
+                        {
+                            Width = TARGET_WIDTH,
+                            Height = TARGET_HEIGHT,
+                            Data = _lastFrameData,
+                            PixelFormat = SIPSorceryMedia.Abstractions.VideoPixelFormatsEnum.Rgb,
+                            Timestamp = DateTime.UtcNow.Ticks
+                        };
+                    }
+
+                    // Lire nouvelle frame via FFmpeg
+                    LogEvent?.Invoke($"[SimpleVirtualCamera] 🎬 Reading real video frame at {position:mm\\:ss\\.fff}");
+                    var rgbData = await _videoDecoder.ReadFrameAtTimeAsync(position);
+                    if (rgbData != null && rgbData.Length > 0)
+                    {
+                        // Mettre en cache pour prochaine fois
+                        _lastFrameData = rgbData;
+                        _lastFrameTime = position;
+
+                        LogEvent?.Invoke($"[SimpleVirtualCamera] ✅ Real video frame loaded ({rgbData.Length} bytes)");
+                        return new VideoFrame
+                        {
+                            Width = TARGET_WIDTH,
+                            Height = TARGET_HEIGHT,
+                            Data = rgbData,
+                            PixelFormat = SIPSorceryMedia.Abstractions.VideoPixelFormatsEnum.Rgb,
+                            Timestamp = DateTime.UtcNow.Ticks
+                        };
+                    }
+                    else
+                    {
+                        LogEvent?.Invoke($"[SimpleVirtualCamera] ⚠️ Failed to read frame at {position:mm\\:ss\\.fff}, using procedural fallback");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ Error reading video frame: {ex.Message}, using procedural fallback");
+                }
+            }
+
+            // Plus de fallback procédural - retourner null si pas de vraie vidéo
+            LogEvent?.Invoke($"[SimpleVirtualCamera] ❌ No real video frame available at {position:mm\\:ss\\.fff}");
+            return null;
+        }
+
+        /// <summary>
+        /// Générer frame simulée avec pattern basé sur le fichier et le temps (fallback)
         /// </summary>
         private VideoFrame GenerateSimulatedFrame(int frameNumber, TimeSpan position)
         {
@@ -386,7 +465,8 @@ namespace ChatP2P.Client.Services
                 StopPlaybackAsync().Wait(5000);
                 _cancellationTokenSource?.Dispose();
                 _videoEncoder?.Dispose();
-                LogEvent?.Invoke("[SimpleVirtualCamera] 🗑️ Virtual camera with H.264/VP8 encoding disposed");
+                _videoDecoder?.Dispose();
+                LogEvent?.Invoke("[SimpleVirtualCamera] 🗑️ Virtual camera with real video + H.264/VP8 encoding disposed");
             }
             catch (Exception ex)
             {

@@ -22,6 +22,7 @@ namespace ChatP2P.Client.Services
         private readonly OpusAudioStreamingService _opusStreaming; // ✅ OPUS: Professional streaming service
         private readonly VideoEncodingService _videoEncoder; // ✅ NOUVEAU: Encodage H.264/VP8 professionnel
         private volatile bool _videoEncoderInitialized = false; // ✅ FIX: Track encoder initialization state
+        private FFmpegVideoDecoderService? _ffmpegDecoder; // ✅ NOUVEAU: Décodage H.264/VP8 streaming
         private readonly WebRTCDirectClient _webRtcClient;
         private VOIPRelayClient? _voipRelay;
         private PureAudioRelayClient? _pureAudioRelay; // ✅ ANCIEN: Canal audio pur TCP
@@ -40,11 +41,28 @@ namespace ChatP2P.Client.Services
         public event Action<string, byte[]>? RemoteAudioReceived;
         public event Action<string>? LogEvent;
 
-        // Log utility method
+        // Log utility method with intelligent routing
         private async void LogAudio(string message, bool forceLog = false)
         {
             LogEvent?.Invoke(message); // For backwards compatibility
-            await ServiceLogHelper.LogToAudioAsync(message, forceLog);
+
+            // Intelligent routing: Video keywords → video log, Audio keywords → audio log
+            if (message.Contains("VIDEO") || message.Contains("H264") || message.Contains("H.264") ||
+                message.Contains("encoded video") || message.Contains("VideoEncoder") ||
+                message.Contains("video frame") || message.Contains("UDP-VIDEO") ||
+                message.Contains("VirtCam") || message.Contains("encoding") ||
+                message.Contains("FFmpeg") || message.Contains("Frame sent") ||
+                message.Contains("active video calls") || message.Contains("libx264") ||
+                message.Contains("VOIP-Encoder") || message.Contains("VirtCam-Encoder") ||
+                message.Contains("Video encoding") || message.Contains("Virtual camera") ||
+                message.Contains("video relay") || message.Contains("fragment"))
+            {
+                await ServiceLogHelper.LogToVideoAsync(message, forceLog);
+            }
+            else
+            {
+                await ServiceLogHelper.LogToAudioAsync(message, forceLog);
+            }
         }
         public event Action<string, string>? IncomingCallReceived; // fromPeer, callType
 
@@ -1520,36 +1538,54 @@ namespace ChatP2P.Client.Services
         }
 
         /// <summary>
-        /// ✅ NOUVEAU: Traiter vidéo reçue du canal pur (port 8894) - Performance maximale !
+        /// ✅ H.264 PURE: Traiter vidéo H.264 reçue et décoder avec FFmpeg streaming
         /// </summary>
-        private void OnUDPVideoReceived(byte[] videoData)
+        private async void OnUDPVideoReceived(byte[] h264Data)
         {
             try
             {
-                LogEvent?.Invoke($"[VOIP-Manager] 📹 PURE Video received: {videoData.Length} bytes (no JSON overhead!)");
+                LogEvent?.Invoke($"[VOIP-Manager] 🎬 INCOMING UDP VIDEO FRAME RECEIVED: {h264Data.Length} bytes");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 Active video calls count: {_activeCalls.Values.Count(c => c.CallType == CallType.VideoCall)}");
 
                 // ✅ FIX: Extraire le vrai peer ID depuis la session d'appel vidéo active
                 string fromPeer = GetActiveVideoPeerName();
 
-                // ✅ NOUVEAU: Convertir les données vidéo pure en VideoFrame et notifier l'UI
+                // ✅ H.264 PURE: Décoder directement avec FFmpeg streaming
+                if (_ffmpegDecoder == null)
+                {
+                    _ffmpegDecoder = new FFmpegVideoDecoderService();
+                    _ffmpegDecoder.LogEvent += (msg) => LogEvent?.Invoke($"[VOIP-Decoder] {msg}");
+                }
+
+                var rgbData = await _ffmpegDecoder.DecodeH264FrameAsync(h264Data);
+                if (rgbData == null || rgbData.Length == 0)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ H.264 decode failed, skipping frame");
+                    return;
+                }
+
+                LogEvent?.Invoke($"[VOIP-Manager] ✅ H.264 decode success: {h264Data.Length}B → {rgbData.Length}B RGB");
+
+                // ✅ Créer VideoFrame avec données RGB décodées
                 var videoFrame = new VideoFrame
                 {
-                    Width = 640, // Taille standard pour l'instant
+                    Width = 640,  // Standard resolution
                     Height = 480,
-                    Data = videoData,
+                    Data = rgbData,
                     PixelFormat = VideoPixelFormatsEnum.Rgb,
                     Timestamp = DateTime.UtcNow.Ticks
                 };
 
-                // Notifier l'UI de la frame vidéo reçue avec le vrai peer name
+                // Notifier l'UI de la frame vidéo reçue
                 RemoteVideoReceived?.Invoke(fromPeer, videoFrame);
-                LogEvent?.Invoke($"[VOIP-Manager] ✅ Pure video frame processed from {fromPeer} and sent to UI ({videoData.Length} bytes)");
+                LogEvent?.Invoke($"[VOIP-Manager] ✅ H.264 frame processed from {fromPeer} and sent to UI ({rgbData.Length} bytes RGB)");
             }
             catch (Exception ex)
             {
-                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing pure video: {ex.Message}");
+                LogEvent?.Invoke($"[VOIP-Manager] ❌ Error processing H.264 video: {ex.Message}");
             }
         }
+
 
 
         /// <summary>
@@ -1559,19 +1595,26 @@ namespace ChatP2P.Client.Services
         {
             try
             {
-                // Chercher parmi les appels actifs pour trouver l'appel vidéo
+                // Chercher parmi les appels actifs pour trouver l'appel vidéo (tout état actif)
                 foreach (var kvp in _activeCalls)
                 {
                     var call = kvp.Value;
-                    if (call.CallType == CallType.VideoCall && call.State == CallState.Connected)
+                    if (call.CallType == CallType.VideoCall &&
+                        (call.State == CallState.Connected || call.State == CallState.Calling || call.State == CallState.Connecting))
                     {
-                        LogEvent?.Invoke($"[VOIP-Manager] 🎯 Found active video call with peer: {call.PeerName}");
+                        LogEvent?.Invoke($"[VOIP-Manager] 🎯 Found active video call with peer: {call.PeerName} (state: {call.State})");
                         return call.PeerName;
                     }
                 }
 
-                // Fallback si pas d'appel vidéo actif trouvé
+                // Fallback si pas d'appel vidéo actif trouvé - diagnostiquer le problème
                 LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No active video call found, using fallback peer name");
+                LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Current active calls:");
+                foreach (var kvp in _activeCalls)
+                {
+                    var call = kvp.Value;
+                    LogEvent?.Invoke($"[VOIP-Manager] 🔍   - {call.PeerName}: Type={call.CallType}, State={call.State}");
+                }
                 return "Unknown-Video-Peer";
             }
             catch (Exception ex)
@@ -1588,6 +1631,13 @@ namespace ChatP2P.Client.Services
         {
             try
             {
+                // ✅ FIX: Vérifier si frame null (plus de contenu procédural)
+                if (frame == null)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⏭️ Skipping null video frame (no real video content)");
+                    return;
+                }
+
                 LogEvent?.Invoke($"[VOIP-Manager] 📹 Raw video frame ready: {frame.Width}x{frame.Height}, {frame.Data.Length} bytes");
 
                 // ✅ NOUVEAU: Debug diagnostics pour troubleshooting
@@ -1598,50 +1648,42 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] 🔍 DIAGNOSTIC: Call {kvp.Key} -> {call.PeerName}, Type: {call.CallType}, State: {call.State}");
                 }
 
-                // ✅ FIX CRITIQUE: Encoder la frame raw AVANT transmission pour éviter les 921KB/frame !
-                byte[]? encodedData = null;
-
-                // Si l'encodeur vidéo est initialisé, encoder la frame en H.264/VP8
-                if (_videoEncoderInitialized && _videoEncoder != null)
+                // ✅ H.264 PURE: Encoder OBLIGATOIREMENT en H.264, pas de fallback
+                if (!_videoEncoderInitialized || _videoEncoder == null)
                 {
-                    try
-                    {
-                        LogEvent?.Invoke($"[VOIP-Manager] 🎯 Encoding RGB frame to {_videoEncoder.SelectedCodec} before transmission...");
-                        encodedData = await _videoEncoder.EncodeFrameAsync(frame);
-
-                        if (encodedData != null && encodedData.Length > 0)
-                        {
-                            LogEvent?.Invoke($"[VOIP-Manager] ✅ Frame encoded successfully: {frame.Data.Length} bytes → {encodedData.Length} bytes ({_videoEncoder.SelectedCodec})");
-                        }
-                        else
-                        {
-                            LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Video encoding returned null/empty, using raw fallback");
-                        }
-                    }
-                    catch (Exception encodingEx)
-                    {
-                        LogEvent?.Invoke($"[VOIP-Manager] ❌ Video encoding failed: {encodingEx.Message}, using raw fallback");
-                    }
-                }
-                else
-                {
-                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Video encoder not initialized (initialized={_videoEncoderInitialized}), transmitting raw RGB");
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ Video encoder not initialized, skipping frame (H.264 REQUIRED)");
+                    return;
                 }
 
-                // Transmettre la frame (encodée ou raw) à tous les peers en appel vidéo actif (Calling ou Connected)
+                byte[]? h264Data;
+                try
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] 🎯 Encoding RGB frame to H.264...");
+                    h264Data = await _videoEncoder.EncodeFrameAsync(frame);
+
+                    if (h264Data == null || h264Data.Length == 0)
+                    {
+                        LogEvent?.Invoke($"[VOIP-Manager] ❌ H.264 encoding failed, skipping frame (NO FALLBACK)");
+                        return;
+                    }
+
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ H.264 encoding success: {frame.Data.Length}B → {h264Data.Length}B");
+                }
+                catch (Exception encodingEx)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ H.264 encoding error: {encodingEx.Message}, skipping frame");
+                    return;
+                }
+
+                // Transmettre le H.264 à tous les peers en appel vidéo actif
                 var videoCallsFound = 0;
                 foreach (var call in _activeCalls.Values)
                 {
-                    // ✅ FIX: Pour mode relay pur, envoyer frames dès l'état Calling (pas besoin d'attendre Connected)
                     if (call.CallType == CallType.VideoCall && (call.State == CallState.Connected || call.State == CallState.Calling))
                     {
                         videoCallsFound++;
-                        // Utiliser données encodées si disponibles, sinon raw
-                        var dataToSend = encodedData ?? frame.Data;
-                        var isEncoded = encodedData != null;
-
-                        await SendVideoFrameToPeerAsync(call.PeerName, dataToSend, isEncoded, _videoEncoder.SelectedCodec);
-                        LogEvent?.Invoke($"[VOIP-Manager] 📹 Frame sent to {call.PeerName} (state: {call.State})");
+                        await SendVideoFrameToPeerAsync(call.PeerName, h264Data, true, _videoEncoder.SelectedCodec);
+                        LogEvent?.Invoke($"[VOIP-Manager] 📹 H.264 frame sent to {call.PeerName} (state: {call.State})");
                     }
                 }
 
@@ -1670,12 +1712,20 @@ namespace ChatP2P.Client.Services
                 LogEvent?.Invoke($"[VOIP-Manager] 🎯 H.264/VP8 encoded video ready from virtual camera: {encodedData.Length} bytes");
 
                 // Transmettre directement la vidéo encodée (pas besoin de ré-encoder)
+                var videoCallsFound = 0;
                 foreach (var call in _activeCalls.Values)
                 {
-                    if (call.CallType == CallType.VideoCall && call.State == CallState.Connected)
+                    if (call.CallType == CallType.VideoCall && (call.State == CallState.Connected || call.State == CallState.Calling))
                     {
+                        videoCallsFound++;
                         await SendVideoFrameToPeerAsync(call.PeerName, encodedData, true, _virtualCamera.SelectedCodec);
+                        LogEvent?.Invoke($"[VOIP-Manager] 📹 Encoded H.264/VP8 frame sent to {call.PeerName} (state: {call.State})");
                     }
+                }
+
+                if (videoCallsFound == 0)
+                {
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No active video calls found for encoded frame transmission");
                 }
             }
             catch (Exception ex)
@@ -1706,25 +1756,18 @@ namespace ChatP2P.Client.Services
                     LogEvent?.Invoke($"[VOIP-Manager] 🚧 TODO: WebRTC video transmission to {peerName} ({videoData.Length} bytes, {formatInfo})");
                 }
 
-                // ✅ PRIORITÉ: Pure Video Relay (port 8894) - Performance maximale !
+                // ✅ UDP VIDÉO SEUL: Pure Video Relay (port 8894) - H.264 direct uniquement !
                 if (_udpVideoRelay != null && _udpVideoRelay.IsConnected)
                 {
-                    // ✅ NOUVEAU: Ajouter header avec métadonnées codec pour décodage côté réception
-                    var header = CreateVideoHeader(isEncoded, codec, videoData.Length);
-                    var fullPacket = CombineHeaderAndData(header, videoData);
-
-                    await _udpVideoRelay.SendVideoDataAsync(peerName, fullPacket);
-                    LogEvent?.Invoke($"[VOIP-Manager] ✅ {formatInfo} video sent via PURE relay to {peerName} ({fullPacket.Length} bytes total)");
-                }
-                // Fallback vers VOIP relay JSON pour vidéo
-                else if (_voipRelay?.IsConnected == true)
-                {
-                    await _voipRelay.SendVideoDataAsync(peerName, videoData);
-                    LogEvent?.Invoke($"[VOIP-Manager] ✅ {formatInfo} video sent via JSON relay fallback to {peerName} ({videoData.Length} bytes)");
+                    LogEvent?.Invoke($"[VOIP-Manager] 🚀 Sending via UDP Video Relay (port 8894)...");
+                    var sendResult = await _udpVideoRelay.SendVideoDataAsync(peerName, videoData);
+                    LogEvent?.Invoke($"[VOIP-Manager] ✅ {formatInfo} H.264 sent via UDP relay to {peerName} ({videoData.Length} bytes) - Result: {sendResult}");
                 }
                 else
                 {
-                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ No video connection available to send to {peerName}");
+                    LogEvent?.Invoke($"[VOIP-Manager] ❌ UDP Video Relay NOT CONNECTED - cannot send video to {peerName}");
+                    LogEvent?.Invoke($"[VOIP-Manager] 🔍 UDP Video Relay status: {(_udpVideoRelay == null ? "NULL" : $"Connected={_udpVideoRelay.IsConnected}")}");
+                    LogEvent?.Invoke($"[VOIP-Manager] ⚠️ Video transmission REQUIRES UDP connection on port 8894");
                 }
             }
             catch (Exception ex)
@@ -1733,29 +1776,6 @@ namespace ChatP2P.Client.Services
             }
         }
 
-        /// <summary>
-        /// ✅ NOUVEAU: Créer header avec métadonnées pour décodage vidéo
-        /// </summary>
-        private byte[] CreateVideoHeader(bool isEncoded, SIPSorceryMedia.Abstractions.VideoCodecsEnum codec, int dataLength)
-        {
-            // Format: [ENCODED:1][CODEC:4][LENGTH:4] = 9 bytes header
-            var header = new byte[9];
-            header[0] = (byte)(isEncoded ? 1 : 0);
-            BitConverter.GetBytes((int)codec).CopyTo(header, 1);
-            BitConverter.GetBytes(dataLength).CopyTo(header, 5);
-            return header;
-        }
-
-        /// <summary>
-        /// ✅ NOUVEAU: Combiner header et données vidéo
-        /// </summary>
-        private byte[] CombineHeaderAndData(byte[] header, byte[] data)
-        {
-            var combined = new byte[header.Length + data.Length];
-            header.CopyTo(combined, 0);
-            data.CopyTo(combined, header.Length);
-            return combined;
-        }
 
         private void OnVoipRelayVideoReceived(string fromPeer, byte[] videoData)
         {

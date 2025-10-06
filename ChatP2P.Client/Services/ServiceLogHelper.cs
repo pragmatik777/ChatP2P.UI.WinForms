@@ -34,6 +34,19 @@ namespace ChatP2P.Client.Services
             catch { }
         }
 
+        public static async Task LogToVideoAsync(string message, bool forceLog = false)
+        {
+            if (!forceLog && !_verboseLoggingEnabled) return;
+
+            try
+            {
+                var logFile = Path.Combine(_logDirectory, "client_video.log");
+                var logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [VIDEO] {message}{Environment.NewLine}";
+                await File.AppendAllTextAsync(logFile, logEntry);
+            }
+            catch { }
+        }
+
         public static async Task LogToGeneralAsync(string message, bool forceLog = false)
         {
             if (!forceLog && !_verboseLoggingEnabled) return;
